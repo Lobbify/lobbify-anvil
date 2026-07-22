@@ -1,7 +1,7 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { IgnoreSet, journaledSwap, recoverSwap } from "../../index.js";
+import { IgnoreSet, PathEscape, journaledSwap, recoverSwap } from "../../index.js";
 import { mkTmp, rmTmp } from "../helpers/fixtures.js";
 
 async function pathExistsIn(root: string, rel: string): Promise<boolean> {
@@ -73,6 +73,32 @@ describe("journaled swap", () => {
     const outcome = await recoverSwap(instanceDir);
     expect(outcome).toBe("back");
     expect(await readFile(join(instanceDir, "mods", "m.jar"), "utf8")).toBe("OLD");
+    expect(await pathExistsIn(instanceDir, ".anvil/swap.journal")).toBe(false);
+  });
+
+  it("refuses a '..' target that would escape the instance root", async () => {
+    const instanceDir = await mkTmp("inst");
+    dirs.push(instanceDir);
+    await expect(
+      journaledSwap({
+        instanceDir,
+        stageId: "escape",
+        installs: ["../evil.jar"],
+        removes: [],
+        ignore: new IgnoreSet([]),
+      }),
+    ).rejects.toBeInstanceOf(PathEscape);
+    // Nothing journaled: no swap.journal was created.
+    expect(await pathExistsIn(instanceDir, ".anvil/swap.journal")).toBe(false);
+  });
+
+  it("treats a torn/corrupt begin line as clean instead of wedging recovery", async () => {
+    const instanceDir = await mkTmp("inst");
+    dirs.push(instanceDir);
+    await mkdir(join(instanceDir, ".anvil"), { recursive: true });
+    await writeFile(join(instanceDir, ".anvil", "swap.journal"), '{"t":"begin","stageId":"x"'); // truncated
+    const outcome = await recoverSwap(instanceDir);
+    expect(outcome).toBe("clean");
     expect(await pathExistsIn(instanceDir, ".anvil/swap.journal")).toBe(false);
   });
 

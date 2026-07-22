@@ -54,11 +54,13 @@ export async function writeTemp(
   await ensureDir(tmpDir);
   const tmpPath = join(tmpDir, `${randomUUID()}.tmp`);
   const { tap, digest } = hashingTap(algo);
-  // Path-based write stream (auto-closing), then reopen to fsync the data. This
-  // avoids a FileHandle-owned write stream, whose fd close can deadlock.
-  await pipeline(source, tap, createWriteStream(tmpPath, { mode: 0o644 }));
+  // Create the temp already-immutable (0444): the write fd (O_WRONLY) can still
+  // write it, but the object is read-only the instant it appears at its final
+  // path after rename — no rename→chmod window, and dedup can't leave a mutable
+  // object behind. Reopen read-only (not "r+", which EACCESes on 0444) to fsync.
+  await pipeline(source, tap, createWriteStream(tmpPath, { mode: OBJECT_MODE }));
   await fireFault(fault, "object:temp-written");
-  const fh = await open(tmpPath, "r+");
+  const fh = await open(tmpPath, "r");
   try {
     await fh.sync();
   } finally {

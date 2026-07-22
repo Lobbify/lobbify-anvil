@@ -33,6 +33,13 @@ describe(".anvilignore", () => {
     expect(set.ignores("mods/a.jar")).toBe(false);
   });
 
+  it("protects case-insensitively (Windows/macOS case-folding)", () => {
+    const set = new IgnoreSet([]);
+    expect(set.ignores("Saves/world")).toBe(true);
+    expect(set.ignores("SAVES/world")).toBe(true);
+    expect(set.ignores(".Anvil/refs")).toBe(true);
+  });
+
   it("loads an instance's .anvilignore file", async () => {
     const dir = await mkTmp("inst");
     dirs.push(dir);

@@ -15,6 +15,7 @@
 
 import { createWriteStream } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl";
 import type { Entry, ZipFile } from "yauzl";
@@ -41,10 +42,12 @@ function openZip(zipPath: string): Promise<ZipFile> {
   return new Promise((res, rej) => {
     // decodeStrings:false — yield raw filename buffers so *our* `assertSafeName`
     // is the sole path guard (and raises `PathEscape`), rather than yauzl's own
-    // built-in rejection surfacing as an anonymous error.
+    // built-in rejection surfacing as an anonymous error. validateEntrySizes:true
+    // (explicit) makes yauzl abort a stream whose real size ≠ its declared size,
+    // so a "declare tiny, expand to GiBs" lie can't slip past the byte bound.
     yauzl.open(
       zipPath,
-      { lazyEntries: true, autoClose: false, decodeStrings: false },
+      { lazyEntries: true, autoClose: false, decodeStrings: false, validateEntrySizes: true },
       (err, zip) => {
         if (err || !zip) {
           rej(err ?? new Error(`could not open zip "${zipPath}"`));
@@ -110,7 +113,8 @@ export async function safeExtract(
   const zip = await openZip(zipPath);
   const written: string[] = [];
   let entryCount = 0;
-  let totalBytes = 0;
+  let totalBytes = 0; // declared (fast pre-check)
+  let actualBytes = 0; // real bytes written (authoritative bound)
 
   try {
     await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -161,7 +165,20 @@ export async function safeExtract(
 
           await ensureDir(dirname(abs));
           const stream = await openEntryStream(zip, entry);
-          await pipeline(stream, createWriteStream(abs));
+          // Count the *actual* decompressed bytes and abort past the budget —
+          // independent of the attacker-controlled declared size above. Open with
+          // "wx" (O_CREAT|O_EXCL) so a pre-existing symlink/file is never followed.
+          const limiter = new Transform({
+            transform(chunk, _enc, cb) {
+              actualBytes += (chunk as Uint8Array).length;
+              if (actualBytes > maxTotalBytes) {
+                cb(new DecompressionBomb(`archive "${zipPath}" exceeds ${maxTotalBytes} bytes`));
+                return;
+              }
+              cb(null, chunk);
+            },
+          });
+          await pipeline(stream, limiter, createWriteStream(abs, { flags: "wx" }));
           written.push(name);
           zip.readEntry();
         })().catch(fail);

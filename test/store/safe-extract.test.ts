@@ -1,9 +1,11 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DecompressionBomb, PathEscape, excludeMetaInf, safeExtract } from "../../index.js";
 import { listFiles, mkTmp, rmTmp } from "../helpers/fixtures.js";
 import { makeZip } from "../helpers/zip.js";
+
+const posixIt = it.skipIf(process.platform === "win32");
 
 async function zipFile(dir: string, name: string, zip: Buffer): Promise<string> {
   const p = join(dir, name);
@@ -88,6 +90,20 @@ describe("safeExtract — zip-slip and bomb guards", () => {
     await expect(safeExtract(zip, join(work, "out"), { maxEntries: 2 })).rejects.toBeInstanceOf(
       DecompressionBomb,
     );
+  });
+
+  posixIt("does not write through a pre-existing symlink at the destination", async () => {
+    const work = await mkTmp("xtr");
+    dirs.push(work);
+    const out = join(work, "out");
+    await mkdir(out, { recursive: true });
+    const outside = join(work, "outside.txt");
+    await writeFile(outside, "ORIGINAL");
+    await symlink(outside, join(out, "target")); // pre-existing symlink inside destRoot
+    const zip = await zipFile(work, "z.zip", makeZip([{ name: "target", data: "HACKED" }]));
+    await expect(safeExtract(zip, out)).rejects.toBeTruthy();
+    // The "wx" (O_EXCL) open refuses to follow/overwrite the symlink.
+    expect(await readFile(outside, "utf8")).toBe("ORIGINAL");
   });
 
   it("enforces the max-total-bytes bomb bound", async () => {

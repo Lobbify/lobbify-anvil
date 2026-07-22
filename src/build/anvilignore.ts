@@ -10,25 +10,25 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { PROTECTED_TOP } from "../internal/fs.js";
+import { PROTECTED_TOP, foldName } from "../internal/fs.js";
 
-/** A resolved set of protected top-level entry names. */
+/** A resolved set of protected top-level entry names (case-folded for match). */
 export class IgnoreSet {
-  readonly #tops: Set<string>;
+  readonly #folded: Set<string>;
 
   constructor(tops: Iterable<string>) {
-    this.#tops = new Set([...PROTECTED_TOP, ...tops]);
+    this.#folded = new Set([...PROTECTED_TOP, ...tops].map(foldName));
   }
 
-  /** True if the relative target's top-level segment is protected. */
+  /** True if the relative target's top-level segment is protected (case-insensitive). */
   ignores(relPath: string): boolean {
     const top = relPath.split(/[/\\]/).find((s) => s.length > 0 && s !== ".");
-    return top !== undefined && this.#tops.has(top);
+    return top !== undefined && this.#folded.has(foldName(top));
   }
 
-  /** The protected top-level names (always includes `saves`, `.anvil`, `.anvilignore`). */
+  /** The protected top-level names, case-folded (always includes saves/.anvil/.anvilignore). */
   get tops(): ReadonlySet<string> {
-    return this.#tops;
+    return this.#folded;
   }
 }
 

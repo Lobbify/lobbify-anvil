@@ -9,16 +9,20 @@
  * consistent state — **fully old** (no commit) or **fully new** (commit present)
  * — never a half-installed Frankenstein.
  *
- * The swap set only ever contains managed targets; `saves/` and everything the
- * {@link IgnoreSet} protects are never in it, so worlds are never moved or lost —
- * at any crash point, across recovery.
+ * Durability: the journal file *and* every directory it renames through are
+ * `fsync`ed so the ordering survives a power loss — the renames are made durable
+ * before the `commit` line is, so a recovered instance never rolls forward onto
+ * renames that never hit disk. The swap set only ever contains validated,
+ * non-protected targets, so `saves/` (and everything the {@link IgnoreSet}
+ * protects, case-insensitively) is never moved or lost, at any crash point.
  */
 
-import { open, readFile, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { open, readFile, rmdir, unlink } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 import type { FaultHook } from "../internal/faults.js";
 import { fireFault } from "../internal/faults.js";
-import { ensureDir, pathExists, removePath, renameInto } from "../internal/fs.js";
+import { ensureDir, pathExists, removePath, renameInto, safeJoin } from "../internal/fs.js";
+import { fsyncDir } from "../store/atomic.js";
 import { SwapRecoveryFailed } from "../types/errors.js";
 import type { IgnoreSet } from "./anvilignore.js";
 
@@ -67,6 +71,41 @@ async function writeFsync(path: string, data: string, flag: "w" | "a"): Promise<
   }
 }
 
+/** The directories whose entries the swap mutates — fsynced before `commit`. */
+function affectedDirs(
+  instanceDir: string,
+  backupDir: string,
+  stageRoot: string,
+  installs: readonly string[],
+  removes: readonly string[],
+): string[] {
+  const dirs = new Set<string>([anvilDir(instanceDir), instanceDir]);
+  for (const t of installs) {
+    dirs.add(dirname(join(instanceDir, t)));
+    dirs.add(dirname(join(backupDir, t)));
+    dirs.add(dirname(join(stageRoot, t)));
+  }
+  for (const t of removes) {
+    dirs.add(dirname(join(instanceDir, t)));
+    dirs.add(dirname(join(backupDir, t)));
+  }
+  return [...dirs];
+}
+
+/** Remove now-empty parent dirs of a rolled-back brand-new target, up to the instance. */
+async function pruneEmptyParents(instanceDir: string, relTarget: string): Promise<void> {
+  const root = resolve(instanceDir);
+  let dir = dirname(join(instanceDir, relTarget));
+  while (resolve(dir) !== root && resolve(dir).startsWith(root + sep)) {
+    try {
+      await rmdir(dir); // fails (ENOTEMPTY/ENOENT) if it still holds anything → stop
+    } catch {
+      return;
+    }
+    dir = dirname(dir);
+  }
+}
+
 /**
  * Execute the swap: move-aside old, move-in new for each install; aside stale
  * removes; write `commit`; then delete the backups, the stage, and the journal.
@@ -74,9 +113,15 @@ async function writeFsync(path: string, data: string, flag: "w" | "a"): Promise<
  */
 export async function journaledSwap(plan: SwapPlan): Promise<void> {
   const { instanceDir, stageId, ignore, fault } = plan;
-  // Defense in depth: a protected target can never enter the swap set.
+  // Defense in depth: a protected target can never enter the swap set...
   const installs = plan.installs.filter((t) => !ignore.ignores(t));
   const removes = plan.removes.filter((t) => !ignore.ignores(t));
+  // ...and every target must resolve safely under the instance (rejects `..`,
+  // absolute, drive-letter, and protected paths — remove targets come from the
+  // previous built lock, which is otherwise unvalidated).
+  for (const t of [...installs, ...removes]) {
+    safeJoin(instanceDir, t);
+  }
 
   const stageRoot = stageRootOf(instanceDir, stageId);
   const backupDir = backupDirOf(instanceDir, stageId);
@@ -93,6 +138,7 @@ export async function journaledSwap(plan: SwapPlan): Promise<void> {
   await ensureDir(anvilDir(instanceDir));
   const begin: SwapBegin = { t: "begin", stageId, installs, removes, hadOld };
   await writeFsync(jPath, `${JSON.stringify(begin)}\n`, "w");
+  await fsyncDir(anvilDir(instanceDir)); // journal entry durable before any rename
   await fireFault(fault, "swap:begin");
 
   for (const t of installs) {
@@ -113,8 +159,14 @@ export async function journaledSwap(plan: SwapPlan): Promise<void> {
     }
   }
 
+  // Make every rename durable BEFORE the commit line becomes durable, so a
+  // recovered instance can never roll forward onto renames that never landed.
+  for (const d of affectedDirs(instanceDir, backupDir, stageRoot, installs, removes)) {
+    await fsyncDir(d);
+  }
   await fireFault(fault, "swap:before-commit");
   await writeFsync(jPath, `${JSON.stringify({ t: "commit" })}\n`, "a");
+  await fsyncDir(anvilDir(instanceDir)); // commit durable → linearization point
   await fireFault(fault, "swap:after-commit");
 
   await removePath(backupDir);
@@ -128,7 +180,14 @@ function parseJournal(text: string): { begin: SwapBegin; committed: boolean } | 
   if (lines.length === 0) {
     return undefined;
   }
-  const first = JSON.parse(lines[0] as string) as SwapBegin;
+  let first: SwapBegin;
+  try {
+    first = JSON.parse(lines[0] as string) as SwapBegin;
+  } catch {
+    // A torn `begin` line (power loss mid-write) means no rename ran — the safe
+    // reading is "clean". Never let it wedge every future build.
+    return undefined;
+  }
   if (first.t !== "begin") {
     return undefined;
   }
@@ -140,6 +199,15 @@ function parseJournal(text: string): { begin: SwapBegin; committed: boolean } | 
     }
   });
   return { begin: first, committed };
+}
+
+/** Resolve a target safely, or `undefined` if it escapes the instance root. */
+function safeTarget(instanceDir: string, t: string): string | undefined {
+  try {
+    return safeJoin(instanceDir, t);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -168,7 +236,7 @@ export async function recoverSwap(
   const backupDir = backupDirOf(instanceDir, begin.stageId);
 
   if (committed) {
-    // Roll forward: every op completed before `commit` was written. Just clean up.
+    // Roll forward: every op completed (and was fsynced) before `commit`. Clean up.
     await removePath(backupDir);
     await removePath(stageRoot);
     await unlink(jPath).catch(() => undefined);
@@ -179,6 +247,9 @@ export async function recoverSwap(
   // Roll back to the pre-build state.
   const considered = [...new Set([...begin.installs, ...begin.removes])];
   for (const t of considered) {
+    if (safeTarget(instanceDir, t) === undefined) {
+      continue; // never operate on an out-of-instance path from a tampered journal
+    }
     const instPath = join(instanceDir, t);
     const backupPath = join(backupDir, t);
     if (await pathExists(backupPath)) {
@@ -191,9 +262,11 @@ export async function recoverSwap(
         throw new SwapRecoveryFailed(`could not restore "${t}" during rollback: ${String(err)}`);
       }
     } else if (!begin.hadOld.includes(t)) {
-      // Brand-new entry: undo any install that landed.
+      // Brand-new entry: undo any install that landed, then prune empty parents
+      // so the tree is left exactly as it was before the build.
       if (await pathExists(instPath)) {
         await removePath(instPath);
+        await pruneEmptyParents(instanceDir, t);
       }
     }
     // else: had an old, no backup → aside never ran → old is still in place; leave it.

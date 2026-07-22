@@ -11,6 +11,22 @@ import { PathEscape } from "../types/errors.js";
 /** Top-level instance entries the build must never create, move, or delete. */
 export const PROTECTED_TOP = new Set([".anvil", ".anvilignore", "saves"]);
 
+/**
+ * Case-fold + Unicode-normalize a path segment for protection checks. Windows
+ * (NTFS) and macOS (APFS) are case-insensitive, so `Saves`/`SAVES`/`saves` all
+ * resolve to the same directory on disk — protection must fold the same way.
+ */
+export function foldName(segment: string): string {
+  return segment.normalize("NFC").toLowerCase();
+}
+
+const PROTECTED_TOP_FOLDED = new Set([...PROTECTED_TOP].map(foldName));
+
+/** True if a top-level segment is protected (case-insensitive). */
+export function isProtectedTop(segment: string): boolean {
+  return PROTECTED_TOP_FOLDED.has(foldName(segment));
+}
+
 /** True if `p` exists (file, dir, or symlink). */
 export async function pathExists(p: string): Promise<boolean> {
   try {
@@ -66,7 +82,7 @@ export function safeJoin(root: string, rel: string, opts?: { allowProtected?: bo
     throw new PathEscape(rel, "escapes the target root");
   }
   const top = segments[0] ?? "";
-  if (!opts?.allowProtected && PROTECTED_TOP.has(top)) {
+  if (!opts?.allowProtected && isProtectedTop(top)) {
     throw new PathEscape(rel, `targets protected path "${top}"`);
   }
   return abs;

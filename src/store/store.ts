@@ -14,7 +14,7 @@
  */
 
 import { createReadStream } from "node:fs";
-import { chmod, readdir, rename, stat, unlink } from "node:fs/promises";
+import { chmod, readdir, rename, stat, unlink, utimes } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import type { LinkStrategy } from "../events.js";
@@ -22,7 +22,7 @@ import type { FaultHook } from "../internal/faults.js";
 import { ensureDir, statDevOf } from "../internal/fs.js";
 import { ShaMismatch } from "../types/errors.js";
 import type { Hash, HashAlgo } from "../types/index.js";
-import { OBJECT_MODE, fsyncDir, sweepTmp, writeTemp } from "./atomic.js";
+import { fsyncDir, sweepTmp, writeTemp } from "./atomic.js";
 import { hashEquals, hashFile, hashKey, shardOf } from "./hash.js";
 import type { LinkOptions } from "./linking.js";
 import { linkOrCopy } from "./linking.js";
@@ -134,22 +134,34 @@ export class ContentStore {
     const dest = this.objectPath(hash);
     if (await this.has(hash)) {
       await unlink(tmpPath).catch(() => undefined);
+      await this.#touch(dest);
       return { hash, deduped: true };
     }
     await ensureDir(dirname(dest));
     try {
-      await rename(tmpPath, dest);
+      await rename(tmpPath, dest); // object is already 0444 — immutable at this instant
     } catch (err) {
       // A racing writer may have landed the same object between has() and rename.
       if (await this.has(hash)) {
         await unlink(tmpPath).catch(() => undefined);
+        await this.#touch(dest);
         return { hash, deduped: true };
       }
       throw err;
     }
-    await chmod(dest, OBJECT_MODE);
     await fsyncDir(dirname(dest));
     return { hash, deduped: false };
+  }
+
+  /**
+   * Re-arm the GC grace window on a deduped object by bumping its mtime, so a
+   * concurrent GC won't sweep an object a build just deduped against but hasn't
+   * linked yet. Best-effort (owner can touch times on a 0444 file). Full
+   * cross-process build/GC locking lands with remotes (Stage 7).
+   */
+  async #touch(dest: string): Promise<void> {
+    const now = new Date();
+    await utimes(dest, now, now).catch(() => undefined);
   }
 
   /** Admit a file by path. */
