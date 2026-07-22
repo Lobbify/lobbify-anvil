@@ -1,0 +1,31 @@
+/**
+ * `@lobbify/anvil` — public API.
+ *
+ * A reproducible, content-addressed build system for Minecraft instances
+ * (git + docker + uv for `.minecraft`). Library-first: construct an {@link Anvil}
+ * and call its methods; the CLI/TUI are thin skins over this surface.
+ */
+
+export { Anvil, ProgressBus } from "./src/anvil.js";
+export type {
+  BuildOptions,
+  BuildResult,
+  CommitRef,
+  DiffResult,
+  FsckResult,
+  GcResult,
+  LockOptions,
+  MergeResult,
+  PullResult,
+  VerifyResult,
+} from "./src/anvil.js";
+
+export type {
+  AnvilEvent,
+  AnvilEventType,
+  BuildPhase,
+  LinkStrategy,
+  ProgressListener,
+} from "./src/events.js";
+
+export * from "./src/types/index.js";

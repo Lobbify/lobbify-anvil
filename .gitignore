@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Test / coverage artifacts
+coverage/
+*.tsbuildinfo
+
+# anvil instance metadata + test scratch (the tool's own artifacts)
+.anvil/
+**/*.anvil
+.anvil-test/
+test/.tmp/
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json

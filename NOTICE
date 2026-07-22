@@ -1,0 +1,43 @@
+lobbify-anvil
+Copyright 2026 Lobbify
+
+This product includes software developed by Lobbify and the lobbify-anvil
+contributors. Licensed under the Apache License, Version 2.0 (the "LICENSE"
+file in this repository).
+
+--------------------------------------------------------------------------------
+Data sources (named for attribution only — NOT endorsements)
+--------------------------------------------------------------------------------
+
+lobbify-anvil interoperates with, and fetches data and files from, third-party
+services and their published metadata:
+
+  - Minecraft, the Minecraft launcher metadata, assets, libraries, and Java
+    runtimes are products of and copyright Mojang Studios / Microsoft.
+  - Modrinth (modrinth.com) — a mod/pack distribution platform.
+  - CurseForge (curseforge.com) — a mod/pack distribution platform.
+
+These names and marks belong to their respective owners. Their appearance here
+indicates only that lobbify-anvil can retrieve content from them; it does not
+imply any affiliation with, sponsorship by, or endorsement from any of them.
+
+--------------------------------------------------------------------------------
+CurseForge content — fetched under the user's own key, never re-hosted
+--------------------------------------------------------------------------------
+
+CurseForge files are handled as "replay" provenance: they are fetched per-client
+using the end user's own CurseForge API key and are NEVER re-hosted, transferred,
+pushed, or exported by lobbify-anvil. Reproducibility of a CurseForge item is
+achieved by re-fetching from CurseForge itself under the user's key and verifying
+the pinned hash — not by redistributing the bytes. This preserves compliance with
+CurseForge's terms of service. lobbify-anvil is bring-your-own-key; the tool ships
+no CurseForge key.
+
+--------------------------------------------------------------------------------
+Third-party dependencies
+--------------------------------------------------------------------------------
+
+This software depends on third-party open-source packages, each distributed under
+its own license (see each package's LICENSE in node_modules and the project's
+dependency manifest). Their inclusion does not modify the licensing of
+lobbify-anvil itself.
