@@ -101,11 +101,15 @@ export type AllowSource = (ref: ResolvedRef) => boolean;
  * - `link` — link a single object to a target path (mod jar, resourcepack zip).
  * - `extract` — safe-extract an archive under a target dir (natives, overrides).
  * - `asset-tree` — materialize a Mojang asset index into the sha1 asset domain.
+ * - `store-only` — keep the object in the shared store but place nothing into the
+ *   instance tree (e.g. a classpath library or client jar referenced by store
+ *   path). Additive member landed in Stage 1 to complete the placement table.
  */
 export type Placement =
   | { readonly method: "link"; readonly target: string }
   | { readonly method: "extract"; readonly targetDir: string }
-  | { readonly method: "asset-tree"; readonly indexTarget: string };
+  | { readonly method: "asset-tree"; readonly indexTarget: string }
+  | { readonly method: "store-only" };
 
 /**
  * A fully-pinned entry in the lock. The lock is the **sole build input**: every

@@ -8,9 +8,9 @@ describe("Anvil scaffold", () => {
     expect(anvil.dir).toBe("/tmp/anvil-smoke");
   });
 
-  it("throws NotImplemented from a stubbed async method", async () => {
+  it("throws NotImplemented from a still-stubbed async method", async () => {
     const anvil = new Anvil({ dir: "/tmp/anvil-smoke" });
-    await expect(anvil.build()).rejects.toBeInstanceOf(NotImplemented);
+    await expect(anvil.lock()).rejects.toBeInstanceOf(NotImplemented);
   });
 
   it("carries a stable error code + name on NotImplemented", () => {
@@ -20,12 +20,11 @@ describe("Anvil scaffold", () => {
     expect(err.code).toBe("NOT_IMPLEMENTED");
   });
 
-  it("every public method is stubbed to throw NotImplemented", async () => {
+  it("every not-yet-owned method is stubbed to throw NotImplemented", async () => {
+    // Stage 1 implements build/verify/gc/fsck; the rest land in later stages.
     const anvil = new Anvil({ dir: "/tmp/anvil-smoke" });
     const calls: Array<Promise<unknown>> = [
       anvil.lock(),
-      anvil.build(),
-      anvil.verify(),
       anvil.diff(),
       anvil.commit("m"),
       anvil.branch("b"),
@@ -38,8 +37,6 @@ describe("Anvil scaffold", () => {
       anvil.push(),
       anvil.import("pack.mrpack"),
       anvil.export("pack.mrpack"),
-      anvil.gc(),
-      anvil.fsck(),
     ];
     const results = await Promise.allSettled(calls);
     for (const r of results) {

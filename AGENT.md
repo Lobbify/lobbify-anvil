@@ -16,10 +16,14 @@ and the interactive TUI are thin skins that carry **no logic**. It is standalone
 source-agnostic (Modrinth / CurseForge / URL / local); a host app (e.g. Lobbify) supplies
 an `allowSource` policy and calls the library directly.
 
-This repo is currently at **Stage 0** — scaffold + type spine + CI. Real subsystem
-logic (store, build, game installer, sources, resolver, VC, remotes) lands in Stages 1–9;
-see `lobbify-anvil-implementation-plan.md`. Every public `Anvil` method is typed and
-stubbed to `throw new NotImplemented()` until its owning stage lands.
+This repo is at **Stage 1** — the content-addressed store (`src/store/`) and the
+atomic, offline build engine (`src/build/`) now sit on top of the Stage-0 scaffold.
+The remaining subsystems (game installer, sources, resolver, VC, remotes) land in
+Stages 2–9; see `lobbify-anvil-implementation-plan.md`. Public `Anvil` methods are
+stubbed to `throw new NotImplemented()` until their owning stage lands — Stage 1
+implements `build` / `verify` / `gc` / `fsck` (the build is offline: it materializes
+from the populated store and fails clearly on the first missing object; the network
+`Source` fetch arrives in Stage 3).
 
 ## Commands
 

@@ -29,3 +29,7 @@ export type {
 } from "./src/events.js";
 
 export * from "./src/types/index.js";
+
+// Stage 1 — the content store + atomic build engine.
+export * from "./src/store/index.js";
+export * from "./src/build/index.js";

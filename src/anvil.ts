@@ -12,9 +12,20 @@
  * replay-never-rehosted) are enforced as these methods gain real bodies.
  */
 
+import {
+  StoreOnlyAcquirer,
+  buildInstance,
+  collectRoots,
+  currentPlatform,
+  readBuiltLock,
+  readInputLock,
+  recoverSwap,
+  resolvePaths,
+} from "./build/index.js";
 import type { AnvilEvent, ProgressListener } from "./events.js";
-import { NotImplemented } from "./types/errors.js";
-import type { AnvilOptions, Hash, Lockfile, ManifestItem } from "./types/index.js";
+import { ContentStore, hashFile } from "./store/index.js";
+import { AnvilError, NotImplemented } from "./types/errors.js";
+import type { AnvilOptions, Hash, LockPackage, Lockfile, ManifestItem } from "./types/index.js";
 
 /**
  * A typed progress bus: a fan-out event emitter that is also an
@@ -192,14 +203,80 @@ export class Anvil {
     throw new NotImplemented("Anvil.lock");
   }
 
-  /** `anvil build` — install a launch-ready instance from the lock, atomically. */
-  async build(_options?: BuildOptions): Promise<BuildResult> {
-    throw new NotImplemented("Anvil.build");
+  /**
+   * `anvil build` — install a launch-ready instance from the lock, atomically.
+   *
+   * Stage 1 is offline: it materializes from the populated content store and
+   * fails clearly on the first missing object (the network `Source` fetch lands
+   * in Stage 3). The lock is the sole input; a prior interrupted swap is
+   * reconciled first, and the swap into place is journaled and crash-atomic.
+   */
+  async build(options?: BuildOptions): Promise<BuildResult> {
+    const emit = (event: AnvilEvent): void => {
+      this.progress.emit(event);
+    };
+    try {
+      await recoverSwap(this.dir);
+      const paths = await resolvePaths(this.dir, this.#options);
+      const store = new ContentStore({ root: paths.store });
+      const lock = await readInputLock(this.dir);
+      const previousLock = await readBuiltLock(this.dir);
+      const acquire = new StoreOnlyAcquirer(store, emit);
+      void options; // offline is the only Stage-1 mode
+      const result = await buildInstance({
+        instanceDir: this.dir,
+        lock,
+        store,
+        acquire,
+        platform: currentPlatform(),
+        previousLock,
+        emit,
+      });
+      return { dir: result.dir, objects: result.objects };
+    } catch (err) {
+      if (err instanceof AnvilError) {
+        emit({ type: "error", code: err.code, message: err.message });
+      }
+      throw err;
+    }
   }
 
-  /** `anvil verify` — check the materialized instance matches the lock. */
+  /**
+   * `anvil verify` — check the materialized instance matches the lock it was
+   * built from (re-hashing every single-file target against its pin).
+   */
   async verify(): Promise<VerifyResult> {
-    throw new NotImplemented("Anvil.verify");
+    const lock = (await readBuiltLock(this.dir)) ?? (await readInputLock(this.dir));
+    const targets = lock.resolved.filter(
+      (p: LockPackage) => p.placement.method === "link" || p.placement.method === "asset-tree",
+    );
+    this.progress.emit({ type: "verify:start", items: targets.length });
+    const mismatches: string[] = [];
+    for (const pkg of targets) {
+      const rel =
+        pkg.placement.method === "link"
+          ? pkg.placement.target
+          : pkg.placement.method === "asset-tree"
+            ? pkg.placement.indexTarget
+            : "";
+      let ok = false;
+      try {
+        const actual = await hashFile(`${this.dir}/${rel}`, pkg.hash.algo);
+        ok = actual.value === pkg.hash.value;
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        mismatches.push(pkg.name);
+      }
+      this.progress.emit({ type: "verify:item", name: pkg.name, ok });
+    }
+    this.progress.emit({
+      type: "verify:done",
+      ok: mismatches.length === 0,
+      mismatches: mismatches.length,
+    });
+    return { ok: mismatches.length === 0, mismatches };
   }
 
   /** `anvil diff` — compare manifests / locks / instances. */
@@ -270,13 +347,29 @@ export class Anvil {
 
   // --- store maintenance (git gc / fsck) ----------------------------------
 
-  /** `anvil store gc` — prune unreachable objects from the content store. */
+  /**
+   * `anvil store gc` — mark-sweep unreachable objects, rooted at this instance's
+   * built lock (and the assets its indexes name).
+   *
+   * NOTE — Stage 1 roots GC at this single instance. The store-level instance
+   * registry that unions every instance's roots before sweeping (so GC from one
+   * instance can't delete another's objects) is a later-stage addition; the
+   * underlying {@link ContentStore.gc} already takes an explicit root set.
+   */
   async gc(): Promise<GcResult> {
-    throw new NotImplemented("Anvil.gc");
+    const paths = await resolvePaths(this.dir, this.#options);
+    const store = new ContentStore({ root: paths.store });
+    const built = await readBuiltLock(this.dir);
+    const roots = built ? await collectRoots(built, store) : [];
+    const result = await store.gc(roots, { graceMs: 0 });
+    return { removed: result.removed, freedBytes: result.freedBytes };
   }
 
-  /** `anvil fsck` — verify content-store integrity. */
+  /** `anvil fsck` — re-hash every stored object and report content-address drift. */
   async fsck(): Promise<FsckResult> {
-    throw new NotImplemented("Anvil.fsck");
+    const paths = await resolvePaths(this.dir, this.#options);
+    const store = new ContentStore({ root: paths.store });
+    const result = await store.fsck();
+    return { ok: result.ok, problems: result.problems };
   }
 }

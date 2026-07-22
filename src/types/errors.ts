@@ -138,6 +138,67 @@ export class CrossVolume extends AnvilError {
 }
 
 /**
+ * An archive entry or a placement target resolves outside its allowed root, or is
+ * an absolute/drive-letter path, a `..` traversal, or a symlink/hardlink entry.
+ * The one hardened check behind {@link https://en.wikipedia.org/wiki/Zip_Slip zip-slip}
+ * safety and the "`saves/` is never touched" placement guarantee.
+ */
+export class PathEscape extends AnvilError {
+  readonly subject: string;
+  readonly reason: string;
+
+  constructor(subject: string, reason: string) {
+    super("PATH_ESCAPE", `Refusing unsafe path "${subject}": ${reason}.`);
+    this.subject = subject;
+    this.reason = reason;
+  }
+}
+
+/**
+ * An archive exceeded a decompression bound (entry count or total uncompressed
+ * bytes) — a decompression-bomb guard on every untrusted extraction site.
+ */
+export class DecompressionBomb extends AnvilError {
+  constructor(message: string) {
+    super("DECOMPRESSION_BOMB", message);
+  }
+}
+
+/**
+ * An offline build (or a `store-only`/`asset-tree` placement) needs an object the
+ * populated store does not contain. We fail clearly on the first missing object
+ * rather than reaching for the network in an offline build.
+ */
+export class MissingObject extends AnvilError {
+  readonly hash: Hash;
+
+  constructor(hash: Hash, subject?: string) {
+    super(
+      "MISSING_OBJECT",
+      `Required object ${hash.algo}:${hash.value}${subject ? ` for "${subject}"` : ""} is not present in the store.`,
+    );
+    this.hash = hash;
+  }
+}
+
+/** A build preflight check failed (e.g. insufficient free disk space). */
+export class PreflightFailed extends AnvilError {
+  constructor(message: string) {
+    super("PREFLIGHT_FAILED", message);
+  }
+}
+
+/**
+ * Startup swap-journal recovery could not reconcile the instance to a consistent
+ * old-or-new state. A last-resort error — recovery is designed to always succeed.
+ */
+export class SwapRecoveryFailed extends AnvilError {
+  constructor(message: string) {
+    super("SWAP_RECOVERY_FAILED", message);
+  }
+}
+
+/**
  * A stubbed capability that Stage 0 has typed but not yet implemented. Every
  * public `Anvil` method throws this until its owning stage lands.
  */
