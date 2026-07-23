@@ -12,7 +12,7 @@
  * replay-never-rehosted) are enforced as these methods gain real bodies.
  */
 
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Acquirer, WhyResult } from "./build/index.js";
 import {
@@ -32,7 +32,7 @@ import {
 import type { AnvilEvent, ProgressListener } from "./events.js";
 import type { MojangApiOptions } from "./game/index.js";
 import { GameAcquirer, isGamePackage, resolveGame } from "./game/index.js";
-import { importMrpack } from "./import/index.js";
+import { importCurseForgeZip, importMrpack, readZipEntry } from "./import/index.js";
 import { ensureDir, pathExists } from "./internal/fs.js";
 import { comparePackages, readInputLock, readLockIfPresent, writeLock } from "./lock/index.js";
 import {
@@ -49,11 +49,12 @@ import type { SourceRegistry } from "./sources/index.js";
 import {
   NetworkAcquirer,
   RateLimitedHttp,
+  ReplayAcquirer,
   USER_AGENT,
   buildRegistry,
   defaultAllowSource,
 } from "./sources/index.js";
-import { ContentStore, hashBuffer, hashFile } from "./store/index.js";
+import { ContentStore, ReplayCache, hashBuffer, hashFile } from "./store/index.js";
 import {
   AnvilError,
   ManifestError,
@@ -591,21 +592,46 @@ export class Anvil {
   }
 
   /**
-   * The build acquirer: offline → store-only; else a router that fetches game
-   * bytes from the Mojang/loader CDNs (via {@link GameAcquirer}) and manifest
-   * items from their sources (via {@link NetworkAcquirer}).
+   * The build acquirer. `provenance: "replay"` (CurseForge) items ALWAYS route
+   * to the {@link ReplayAcquirer} — which fetches per-client into the instance
+   * replay cache, never the shared store — regardless of offline. Everything
+   * else: offline → store-only; else a router that fetches game bytes from the
+   * Mojang/loader CDNs (via {@link GameAcquirer}) and copy items from their
+   * sources (via {@link NetworkAcquirer}).
    */
   #buildAcquirer(
     store: ContentStore,
+    replayCache: ReplayCache,
     offline: boolean,
     emit: (event: AnvilEvent) => void,
   ): Acquirer {
-    if (offline) {
-      return new StoreOnlyAcquirer(store, emit);
-    }
+    const registry = this.#registry();
+    const cfHttp = registry.get("curseforge")?.http;
+    const replay = new ReplayAcquirer({
+      replayCache,
+      ...(cfHttp ? { http: cfHttp } : {}),
+      ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
+      offline,
+      emit,
+    });
+    const base: Acquirer = offline
+      ? new StoreOnlyAcquirer(store, emit)
+      : this.#onlineCopyAcquirer(store, registry, emit);
+    return {
+      ensure: (pkg: LockPackage) =>
+        pkg.provenance === "replay" ? replay.ensure(pkg) : base.ensure(pkg),
+    };
+  }
+
+  /** The online copy/game router (Mojang/loader CDNs + copy sources). */
+  #onlineCopyAcquirer(
+    store: ContentStore,
+    registry: SourceRegistry,
+    emit: (event: AnvilEvent) => void,
+  ): Acquirer {
     const network = new NetworkAcquirer({
       store,
-      registry: this.#registry(),
+      registry,
       allowSource: this.#options.allowSource ?? defaultAllowSource,
       ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
       emit,
@@ -640,12 +666,17 @@ export class Anvil {
       const lock = await readInputLock(this.dir);
       const previousLock = await readBuiltLock(this.dir);
       const offline = options?.offline ?? this.#options.offline ?? false;
-      const acquire = this.#buildAcquirer(store, offline, emit);
+      // The per-instance replay cache — where CurseForge (replay) bytes are
+      // materialized from. Physically separate from the shared store so the
+      // store-serve / GC / transfer / export code cannot enumerate CF bytes.
+      const replayCache = new ReplayCache({ instanceDir: this.dir });
+      const acquire = this.#buildAcquirer(store, replayCache, offline, emit);
       const result = await buildInstance({
         instanceDir: this.dir,
         lock,
         store,
         acquire,
+        replayCache,
         platform: currentPlatform(),
         previousLock,
         emit,
@@ -981,12 +1012,33 @@ export class Anvil {
 
   // --- import / export (docker load/save) ---------------------------------
 
+  /** The game-install resolver an importer uses for the pack's `[game]` deps. */
+  #importGameResolver(store: ContentStore) {
+    return async ({ minecraft, loader }: { minecraft: string; loader: string }) => {
+      const game = await resolveGame({
+        minecraft,
+        ...(loader && loader !== "vanilla" ? { loader } : {}),
+        mojangHttp: this.#gameHttp(),
+        loaderHttp: this.#gameHttp(),
+        store,
+        ...(this.#env.mojangOptions ? { mojangOptions: this.#env.mojangOptions } : {}),
+        ...(this.#env.loaderMetaBase ? { loaderMetaBase: this.#env.loaderMetaBase } : {}),
+      });
+      return { packages: game.packages, java: game.java, loader: game.loader };
+    };
+  }
+
   /**
-   * `anvil import` — adopt an `.mrpack` (Modrinth modpack) into this instance,
-   * writing `anvil.toml` + a pre-resolved `anvil.lock`. The archive is untrusted:
-   * files are integrity-checked, server-only files filtered, `overrides/` unpacked
-   * through the hardened extractor, and nothing is placed into a protected path.
-   * (CurseForge-zip / Prism import land in Stages 6–7.)
+   * `anvil import` — adopt a modpack into this instance, writing `anvil.toml` +
+   * a pre-resolved `anvil.lock`. Auto-detects the format:
+   *
+   *   - a `.mrpack` (Modrinth) — files copied + sha-verified, server-only filtered;
+   *   - a **CurseForge** zip (`manifest.json`) — its `files[]` become **replay**
+   *     items (pinned under the BYO key; never re-hosted), `overrides/` copied.
+   *
+   * The archive is untrusted: `overrides/` unpack through the hardened extractor,
+   * nothing lands in a protected path, and CurseForge bytes never enter the shared
+   * store. (Prism import lands in Stage 7.)
    */
   async import(archive: string): Promise<ImportSummary> {
     const emit = (event: AnvilEvent): void => {
@@ -996,24 +1048,35 @@ export class Anvil {
       const paths = await resolvePaths(this.dir, this.#options);
       const store = new ContentStore({ root: paths.store });
       const registry = this.#registry();
+
+      // Peek at the archive to route: Modrinth (.mrpack) vs CurseForge zip.
+      const archiveBytes = new Uint8Array(await readFile(archive));
+      const isMrpack = (await readZipEntry(archiveBytes, "modrinth.index.json")) !== undefined;
+      const isCfZip =
+        !isMrpack && (await readZipEntry(archiveBytes, "manifest.json")) !== undefined;
+
+      if (isCfZip) {
+        const cfHttp = registry.get("curseforge")?.http ?? this.#gameHttp();
+        const result = await importCurseForgeZip({
+          archivePath: archive,
+          instanceDir: this.dir,
+          store,
+          curseforgeHttp: cfHttp,
+          ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
+          resolveGame: this.#importGameResolver(store),
+          allowSource: this.#options.allowSource ?? defaultAllowSource,
+          emit,
+        });
+        return { files: result.files, overrides: result.overrides, warnings: result.warnings };
+      }
+
       const fileHttp = registry.get("url")?.http ?? this.#gameHttp();
       const result = await importMrpack({
         archivePath: archive,
         instanceDir: this.dir,
         store,
         fileHttp,
-        resolveGame: async ({ minecraft, loader }) => {
-          const game = await resolveGame({
-            minecraft,
-            ...(loader && loader !== "vanilla" ? { loader } : {}),
-            mojangHttp: this.#gameHttp(),
-            loaderHttp: this.#gameHttp(),
-            store,
-            ...(this.#env.mojangOptions ? { mojangOptions: this.#env.mojangOptions } : {}),
-            ...(this.#env.loaderMetaBase ? { loaderMetaBase: this.#env.loaderMetaBase } : {}),
-          });
-          return { packages: game.packages, java: game.java, loader: game.loader };
-        },
+        resolveGame: this.#importGameResolver(store),
         allowSource: this.#options.allowSource ?? defaultAllowSource,
         emit,
       });

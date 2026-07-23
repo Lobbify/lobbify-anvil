@@ -13,6 +13,7 @@ import { ensureDir } from "../internal/fs.js";
 import type { ContentStore } from "../store/index.js";
 import { executePlacement } from "../store/index.js";
 import { hashFile } from "../store/index.js";
+import type { ReplayCache } from "../store/replay-cache.js";
 import { ShaMismatch } from "../types/errors.js";
 import type { LockPackage, Lockfile } from "../types/index.js";
 import type { Acquirer } from "./acquire.js";
@@ -35,6 +36,12 @@ export interface BuildEngineInput {
   readonly lock: Lockfile;
   readonly store: ContentStore;
   readonly acquire: Acquirer;
+  /**
+   * The per-instance replay cache — where `provenance: "replay"` (CurseForge)
+   * objects are materialized from (never the shared store). Required when the
+   * lock contains a replay item; a copy-only build may omit it.
+   */
+  readonly replayCache?: ReplayCache;
   readonly platform: Platform;
   /** The previous built lock, for the incremental delta (usually from refs). */
   readonly previousLock?: Lockfile;
@@ -125,7 +132,11 @@ export async function buildInstance(input: BuildEngineInput): Promise<BuildEngin
   const stageRoot = stageRootOf(instanceDir, stageId);
   await ensureDir(stageRoot);
   for (const pkg of delta.install) {
-    const outcome = await executePlacement(pkg, { store, stageRoot });
+    const outcome = await executePlacement(pkg, {
+      store,
+      stageRoot,
+      ...(input.replayCache ? { replayCache: input.replayCache } : {}),
+    });
     if (outcome.targets.length > 0) {
       emit({
         type: "object:link",

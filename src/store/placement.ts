@@ -18,8 +18,9 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import type { LinkStrategy } from "../events.js";
 import { ensureDir, safeJoin } from "../internal/fs.js";
-import { MissingObject, PathEscape } from "../types/errors.js";
+import { MissingObject, PathEscape, UnsatisfiableTarget } from "../types/errors.js";
 import type { Hash, LockPackage } from "../types/index.js";
+import type { ReplayCache } from "./replay-cache.js";
 import { excludeMetaInf, safeExtract } from "./safe-extract.js";
 import type { ContentStore } from "./store.js";
 
@@ -49,6 +50,13 @@ export interface PlacementContext {
   readonly store: ContentStore;
   /** The stage root the build materializes into before the atomic swap. */
   readonly stageRoot: string;
+  /**
+   * The per-instance replay cache. A `provenance: "replay"` package is
+   * materialized **from here**, never from the shared store — the storage-layer
+   * half of the replay-never-rehosted invariant. Required whenever the delta
+   * contains a replay package; absent is fine for a copy-only build.
+   */
+  readonly replayCache?: ReplayCache;
   readonly onWarn?: (message: string) => void;
 }
 
@@ -132,6 +140,28 @@ export async function executePlacement(
   ctx: PlacementContext,
 ): Promise<PlacementOutcome> {
   const p = pkg.placement;
+
+  // Replay (CurseForge) bytes are materialized from the per-instance replay
+  // cache — NEVER the shared store. A replay item is always a single-file
+  // `link` (mod/resourcepack/shader/datapack); any other placement method for a
+  // replay item is an invariant violation (a game/asset/runtime tree is never
+  // replay), so we refuse rather than silently reach into the shared store.
+  if (pkg.provenance === "replay") {
+    if (p.method !== "link") {
+      throw new UnsatisfiableTarget(
+        pkg.name,
+        `a replay item must use a single-file 'link' placement, not '${p.method}'`,
+      );
+    }
+    const cache = ctx.replayCache;
+    if (!cache) {
+      throw new MissingObject(pkg.hash, `${pkg.name} (replay cache not provided to the build)`);
+    }
+    const dest = safeJoin(ctx.stageRoot, p.target);
+    const strategy = await cache.materialize(pkg.hash, dest);
+    return { targets: [p.target], strategy };
+  }
+
   switch (p.method) {
     case "link": {
       const dest = safeJoin(ctx.stageRoot, p.target);

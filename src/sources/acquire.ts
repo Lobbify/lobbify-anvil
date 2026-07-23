@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import type { Acquirer } from "../build/acquire.js";
 import type { AnvilEvent } from "../events.js";
 import type { ContentStore } from "../store/index.js";
-import { MissingObject } from "../types/errors.js";
+import { MissingObject, UnsatisfiableTarget } from "../types/errors.js";
 import type { AllowSource, LockPackage, SourceContext } from "../types/index.js";
 import type { SourceRegistry } from "./registry.js";
 import { defaultAllowSource } from "./registry.js";
@@ -48,6 +48,17 @@ export class NetworkAcquirer implements Acquirer {
   }
 
   async ensure(pkg: LockPackage): Promise<void> {
+    // Hard guard: replay (CurseForge) bytes must NEVER enter the shared store.
+    // They are acquired per-client by the ReplayAcquirer into the per-instance
+    // replay cache. Even if a caller misroutes a replay package here, we refuse
+    // rather than admit its bytes to the shared, transferable store.
+    if (pkg.provenance === "replay") {
+      throw new UnsatisfiableTarget(
+        pkg.name,
+        "a replay (CurseForge) item cannot be acquired into the shared store — " +
+          "it is fetched per-client into the instance replay cache",
+      );
+    }
     if (await this.#store.has(pkg.hash)) {
       this.#emit?.({ type: "object:store", hash: pkg.hash, deduped: true });
       return;

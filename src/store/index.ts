@@ -32,6 +32,8 @@ export {
   targetsOf,
   treeLeaves,
 } from "./placement.js";
+export type { ReplayCacheOptions } from "./replay-cache.js";
+export { REPLAY_CACHE_DIRNAME, ReplayCache } from "./replay-cache.js";
 export type { SafeExtractOptions } from "./safe-extract.js";
 export { excludeMetaInf, safeExtract } from "./safe-extract.js";
 export type {

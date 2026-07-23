@@ -16,8 +16,8 @@ and the interactive TUI are thin skins that carry **no logic**. It is standalone
 source-agnostic (Modrinth / CurseForge / URL / local); a host app (e.g. Lobbify) supplies
 an `allowSource` policy and calls the library directly.
 
-This repo is at **Stage 5 — the version-control engine is complete** (MVP tier
-Stages 0–4 + the first v1-tier stage). On top of the Stage-0 scaffold, the Stage-1
+This repo is at **Stage 6 — the CurseForge (BYO-key, replay) source is complete**
+(MVP tier Stages 0–4 + v1-tier Stages 5–6). On top of the Stage-0 scaffold, the Stage-1
 content-addressed store (`src/store/`) + atomic build engine (`src/build/`), the
 Stage-2 manifest/sources/resolver/lock, the Stage-3 full game installer
 (`src/game/`: Mojang walk + Fabric/Quilt), and the Stage-4 thin CLI + `.mrpack`
@@ -41,11 +41,24 @@ wrapper):
   closure + carried local blobs (VC store) and unions every reachable commit's lock
   into the shared-store roots.
 
+**Stage 6 adds the CurseForge source (`src/sources/curseforge.ts`)** — BYO-key
+(`x-api-key`), `classId`→kind + `relationType`→dep maps, sha256 pinned on the first
+keyed fetch, and the retained Murmur2 fingerprint — plus **replay provenance enforced
+at the storage layer**: CF bytes are `provenance: "replay"` and materialize into a
+per-instance **`.anvil/replay-cache/`** (`src/store/replay-cache.ts`, `ReplayCache`),
+fetched per-client by the `ReplayAcquirer` (`src/sources/replay-acquire.ts`) and placed
+from that cache — they **never** enter the shared store. The lock row carries
+`{project, file, version, hash, size}` and **no rehostable `url`**; the download URL is
+re-resolved under the user's key at fetch time (a `null`/403 → a clear `ReplayUnavailable`,
+never a copy-from-elsewhere). CurseForge-zip import (`src/import/cfzip.ts`) turns a pack's
+`files[]` into replay items and its `overrides/` into local copies. The ToS/replay audit
+(`test/security/replay-tos-audit.test.ts`) is a standing hard review gate.
+
 The CLI is a **thin skin**: it parses args and calls one `Anvil` method — no business
 logic. The library is testable offline via the optional `AnvilEnv` constructor arg (the
 mirror/endpoint + fixture injection seam; `AnvilEnv.now`/`author` inject the VC clock +
-author). The remaining subsystems (CurseForge, remotes, TUI) land in Stages 6–9; those
-`Anvil` methods (`clone`/`pull`/`push`/`export`) still throw `NotImplemented`. See
+author). The remaining subsystems (remotes, TUI) land in Stages 7–9; those `Anvil` methods
+(`clone`/`pull`/`push`/`export`) still throw `NotImplemented`. See
 `lobbify-anvil-implementation-plan.md`.
 
 ## Commands

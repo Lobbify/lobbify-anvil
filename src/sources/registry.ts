@@ -51,6 +51,8 @@ export function allowOnly(...kinds: readonly SourceKind[]): AllowSource {
 export interface BuildRegistryOptions {
   /** Modrinth API base override (proxy/mirror). */
   readonly modrinthBaseUrl?: string;
+  /** CurseForge Core API base override (proxy/mirror/offline fixtures). */
+  readonly curseforgeBaseUrl?: string;
   /** Sustained requests/second per source. Conservative default in the client. */
   readonly rps?: number;
   /**
@@ -78,6 +80,11 @@ export function buildRegistry(options: BuildRegistryOptions = {}): SourceRegistr
   });
   map.set("url", { source: new UrlSource(), http: make() });
   map.set("local", { source: new LocalSource() });
-  map.set("curseforge", { source: new CurseForgeSource() });
+  map.set("curseforge", {
+    source: new CurseForgeSource(
+      options.curseforgeBaseUrl ? { baseUrl: options.curseforgeBaseUrl } : {},
+    ),
+    http: make(),
+  });
   return map;
 }

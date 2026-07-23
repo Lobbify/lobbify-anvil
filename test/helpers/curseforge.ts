@@ -1,0 +1,180 @@
+/**
+ * Offline CurseForge test scaffolding. Nothing here touches the real network or
+ * a real API key: {@link FakeCurseForge} implements the `Http` interface directly
+ * and replays the CurseForge Core v1 response shapes (mod / files / file /
+ * download-url + CDN bytes) from an in-memory dataset — the recorded-fixture
+ * replay, hermetic. It also models the two failure surfaces the ToS path must
+ * handle: a `null` download-url (author disabled third-party downloads) and a
+ * `403` from the CDN.
+ */
+
+import { curseforgeFingerprint } from "../../index.js";
+import { HttpError } from "../../index.js";
+import type { Http, HttpGetOptions, HttpResult } from "../../index.js";
+import { sha1hex } from "./net.js";
+
+export interface FakeCfFileSpec {
+  readonly id: number;
+  readonly displayName?: string;
+  readonly fileName: string;
+  readonly fileDate?: string;
+  /** Game versions + loader names the file lists (e.g. `["26.2", "Fabric"]`). */
+  readonly gameVersions?: readonly string[];
+  readonly bytes: Uint8Array;
+  readonly dependencies?: ReadonlyArray<{ modId: number; relationType: number }>;
+  readonly fileLength?: number;
+  /** `download-url` returns `null` (author disabled third-party downloads). */
+  readonly downloadDisabled?: boolean;
+  /** The CDN GET answers `403`. */
+  readonly cdn403?: boolean;
+  /** Omit `fileFingerprint` from the file JSON. */
+  readonly omitFingerprint?: boolean;
+  /** Force a wrong `fileFingerprint` (to exercise the cross-check). */
+  readonly badFingerprint?: number;
+  /** Force a wrong attested sha1 (to exercise the tamper guard). */
+  readonly badSha1?: string;
+  /** Serve different bytes at the CDN than were indexed (tamper simulation). */
+  readonly cdnBytes?: Uint8Array;
+}
+
+export interface FakeCfModSpec {
+  readonly modId: number;
+  readonly slug: string;
+  readonly name?: string;
+  readonly classId?: number;
+  readonly files: readonly FakeCfFileSpec[];
+}
+
+function encode(obj: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(obj));
+}
+
+function cdnUrl(modId: number, file: FakeCfFileSpec): string {
+  return `https://edge.forgecdn.net/files/${file.id}/${modId}/${encodeURIComponent(file.fileName)}`;
+}
+
+function fileJson(modId: number, f: FakeCfFileSpec): unknown {
+  const sha1 = f.badSha1 ?? sha1hex(f.bytes);
+  const fp = f.badFingerprint ?? curseforgeFingerprint(f.bytes);
+  return {
+    id: f.id,
+    modId,
+    displayName: f.displayName ?? f.fileName,
+    fileName: f.fileName,
+    fileDate: f.fileDate ?? "2026-06-01T00:00:00Z",
+    fileLength: f.fileLength ?? f.bytes.byteLength,
+    gameVersions: f.gameVersions ?? [],
+    hashes: [{ value: sha1, algo: 1 }],
+    ...(f.omitFingerprint ? {} : { fileFingerprint: fp }),
+    dependencies: f.dependencies ?? [],
+  };
+}
+
+/** An in-memory CurseForge Core v1 API + CDN, implementing the `Http` interface. */
+export class FakeCurseForge implements Http {
+  readonly calls: string[] = [];
+  readonly apiKeys: string[] = [];
+  readonly #mods = new Map<number, FakeCfModSpec>();
+  readonly #files = new Map<string, { modId: number; file: FakeCfFileSpec }>();
+  readonly #cdn = new Map<string, FakeCfFileSpec>();
+
+  add(mod: FakeCfModSpec): this {
+    this.#mods.set(mod.modId, mod);
+    for (const file of mod.files) {
+      this.#files.set(`${mod.modId}:${file.id}`, { modId: mod.modId, file });
+      this.#cdn.set(cdnUrl(mod.modId, file), file);
+    }
+    return this;
+  }
+
+  async get(url: string, options?: HttpGetOptions): Promise<HttpResult> {
+    this.calls.push(url);
+    const key = options?.headers?.["x-api-key"];
+    if (key) {
+      this.apiKeys.push(key);
+    }
+
+    // Exercise any provided SSRF guard with a benign public address.
+    await options?.guard?.({ url, host: safeHost(url), addresses: ["104.18.0.1"] });
+
+    // CDN byte fetch.
+    const cdnFile = this.#cdn.get(url);
+    if (cdnFile) {
+      if (cdnFile.cdn403) {
+        throw new HttpError(url, "unexpected status 403", 403);
+      }
+      return { status: 200, headers: {}, url, body: cdnFile.cdnBytes ?? cdnFile.bytes };
+    }
+
+    const u = new URL(url);
+    const path = u.pathname;
+
+    const dl = path.match(/^\/v1\/mods\/(\d+)\/files\/(\d+)\/download-url$/);
+    if (dl) {
+      const entry = this.#files.get(`${dl[1]}:${dl[2]}`);
+      if (!entry) {
+        return { status: 200, headers: {}, url, body: encode({ data: null }) };
+      }
+      const data = entry.file.downloadDisabled ? null : cdnUrl(entry.modId, entry.file);
+      return { status: 200, headers: {}, url, body: encode({ data }) };
+    }
+
+    const oneFile = path.match(/^\/v1\/mods\/(\d+)\/files\/(\d+)$/);
+    if (oneFile) {
+      const entry = this.#files.get(`${oneFile[1]}:${oneFile[2]}`);
+      if (!entry) {
+        return { status: 404, headers: {}, url, body: encode({ error: "not found" }) };
+      }
+      return {
+        status: 200,
+        headers: {},
+        url,
+        body: encode({ data: fileJson(entry.modId, entry.file) }),
+      };
+    }
+
+    const filesList = path.match(/^\/v1\/mods\/(\d+)\/files$/);
+    if (filesList) {
+      const mod = this.#mods.get(Number(filesList[1]));
+      if (!mod) {
+        return { status: 404, headers: {}, url, body: encode({ error: "not found" }) };
+      }
+      const gameVersion = u.searchParams.get("gameVersion");
+      const list = mod.files
+        .filter((f) => gameVersion === null || (f.gameVersions ?? []).includes(gameVersion))
+        .map((f) => fileJson(mod.modId, f));
+      return { status: 200, headers: {}, url, body: encode({ data: list }) };
+    }
+
+    const modMatch = path.match(/^\/v1\/mods\/(\d+)$/);
+    if (modMatch) {
+      const mod = this.#mods.get(Number(modMatch[1]));
+      if (!mod) {
+        return { status: 404, headers: {}, url, body: encode({ error: "not found" }) };
+      }
+      return {
+        status: 200,
+        headers: {},
+        url,
+        body: encode({
+          data: {
+            id: mod.modId,
+            name: mod.name ?? mod.slug,
+            slug: mod.slug,
+            ...(mod.classId !== undefined ? { classId: mod.classId } : {}),
+          },
+        }),
+      };
+    }
+
+    return { status: 404, headers: {}, url, body: encode({ error: `unrouted ${path}` }) };
+  }
+}
+
+function safeHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "example.com";
+  }
+}

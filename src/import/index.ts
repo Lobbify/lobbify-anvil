@@ -5,9 +5,16 @@
  */
 
 export type {
+  ImportCfZipInput,
+  ImportCfZipResult,
+} from "./cfzip.js";
+export { importCurseForgeZip } from "./cfzip.js";
+export type {
   GamePinsForImport,
   ImportMrpackInput,
   ImportMrpackResult,
 } from "./mrpack.js";
 export { importMrpack } from "./mrpack.js";
+export type { ImportOverrideTreeInput } from "./pack-common.js";
+export { importOverrideTree, isUnsafePackPath, kindForPackPath } from "./pack-common.js";
 export { readZipEntry } from "./zip-read.js";

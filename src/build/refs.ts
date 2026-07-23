@@ -46,6 +46,11 @@ export async function writeBuiltLock(instanceDir: string, lock: Lockfile): Promi
 export async function collectRoots(lock: Lockfile, store: ContentStore): Promise<Hash[]> {
   const roots: Hash[] = [];
   for (const pkg of lock.resolved) {
+    // Replay (CurseForge) objects never live in the shared store — they are
+    // per-instance replay-cache bytes — so they are not shared-store GC roots.
+    if (pkg.provenance === "replay") {
+      continue;
+    }
     roots.push(pkg.hash);
     const method = pkg.placement.method;
     if ((method === "asset-tree" || method === "runtime-tree") && (await store.has(pkg.hash))) {

@@ -234,6 +234,27 @@ export class SsrfBlocked extends AnvilError {
 }
 
 /**
+ * A CurseForge **replay** item cannot be fetched: the keyed
+ * `/files/{id}/download-url` endpoint returned `null` (the author disabled
+ * third-party downloads) or the CDN answered `403`. Per the CF ToS the bytes are
+ * **never** copied from anywhere else — we surface a clear, actionable error and
+ * stop. The user must obtain the file through the CurseForge app/site.
+ */
+export class ReplayUnavailable extends AnvilError {
+  readonly item: string;
+  readonly reason: string;
+
+  constructor(item: string, reason: string) {
+    super(
+      "REPLAY_UNAVAILABLE",
+      `CurseForge file for "${item}" cannot be downloaded programmatically: ${reason}. Per the CurseForge Terms of Service the bytes are never re-hosted or copied from elsewhere — obtain this file through the CurseForge app or website, or choose a project whose author allows API downloads.`,
+    );
+    this.item = item;
+    this.reason = reason;
+  }
+}
+
+/**
  * A source could not infer an item's kind and refuses to guess (e.g. a `.zip`
  * that could be a resourcepack, datapack, or shader). The caller must pin the
  * kind explicitly. A clear lock error rather than a wrong placement folder.

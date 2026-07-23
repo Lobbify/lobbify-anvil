@@ -27,20 +27,19 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { join, posix } from "node:path";
-import { pathToFileURL } from "node:url";
+import { readFile, stat } from "node:fs/promises";
+import { posix } from "node:path";
 import { writeGraph } from "../build/graph.js";
 import { canonicalJson } from "../build/serialize.js";
 import type { AnvilEvent } from "../events.js";
-import { ensureDir, isProtectedTop } from "../internal/fs.js";
+import { isProtectedTop } from "../internal/fs.js";
 import { writeLock } from "../lock/index.js";
 import { comparePackages } from "../lock/serialize.js";
 import { writeManifest } from "../manifest/index.js";
 import type { DependencyEdge } from "../resolver/index.js";
 import { canonicalKeyOf } from "../resolver/index.js";
 import { defaultAllowSource, guardHop, safeBasename } from "../sources/index.js";
-import { hashBuffer, safeExtract } from "../store/index.js";
+import { hashBuffer } from "../store/index.js";
 import {
   AnvilError,
   DecompressionBomb,
@@ -51,13 +50,13 @@ import {
 import type {
   AllowSource,
   Http,
-  ItemKind,
   LockPackage,
   Lockfile,
   Manifest,
   ManifestItem,
   ObjectSink,
 } from "../types/index.js";
+import { importOverrideTree, isUnsafePackPath, kindForPackPath } from "./pack-common.js";
 import { readZipEntry } from "./zip-read.js";
 
 /** A single byte-download bomb bound during import. */
@@ -202,34 +201,6 @@ function loaderFromDeps(deps: Readonly<Record<string, string>>): string {
   return "vanilla";
 }
 
-/** Infer a placement kind from a pack-relative path's top-level directory. */
-function kindForPackPath(path: string): ItemKind {
-  const top = path.split("/")[0]?.toLowerCase();
-  switch (top) {
-    case "mods":
-      return "mod";
-    case "resourcepacks":
-      return "resourcepack";
-    case "shaderpacks":
-      return "shaderpack";
-    case "datapacks":
-      return "datapack";
-    default:
-      return "config";
-  }
-}
-
-/** Reject an obviously-unsafe pack path (traversal / absolute / drive letter). */
-function isUnsafePackPath(path: string): boolean {
-  if (path.includes("\0") || path.length === 0) {
-    return true;
-  }
-  if (path.startsWith("/") || path.startsWith("\\") || /^[a-zA-Z]:[/\\]?/.test(path)) {
-    return true;
-  }
-  return path.split(/[/\\]/).includes("..");
-}
-
 /** Pick a canonical download mirror: prefer the Modrinth CDN, else first https. */
 function pickMirror(downloads: readonly string[], subject: string): string {
   const https = downloads.filter((u) => /^https:\/\//i.test(u));
@@ -270,26 +241,6 @@ function verifyMrpackHashes(bytes: Uint8Array, file: MrFile): void {
     const actual1 = hashBuffer(bytes, "sha1");
     if (actual1.value !== file.hashes.sha1) {
       throw new ShaMismatch(file.path, { algo: "sha1", value: file.hashes.sha1 }, actual1);
-    }
-  }
-}
-
-// --- override tree ---------------------------------------------------------
-
-async function* walkFiles(root: string, rel = ""): AsyncGenerator<string> {
-  let names: string[];
-  try {
-    names = await readdir(join(root, rel));
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    const childRel = rel ? posix.join(rel, name) : name;
-    const st = await stat(join(root, childRel));
-    if (st.isDirectory()) {
-      yield* walkFiles(root, childRel);
-    } else if (st.isFile()) {
-      yield childRel;
     }
   }
 }
@@ -388,9 +339,15 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
   }
 
   // 3. overrides/ (+ client-overrides/, which wins) → tracked local files.
-  const overrideCount = await importOverrides(input, placeable, warnings, (h) =>
-    emit({ type: "object:store", hash: h, deduped: false }),
-  );
+  const overrideCount = await importOverrideTree({
+    archivePath: input.archivePath,
+    instanceDir: input.instanceDir,
+    store: input.store,
+    prefixes: ["overrides", "client-overrides"],
+    placeable,
+    warnings,
+    onStored: (h) => emit({ type: "object:store", hash: h, deduped: false }),
+  });
 
   // 4. Assemble the manifest + the pre-resolved lock.
   const manifest: Manifest = {
@@ -418,72 +375,4 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
 
   emit({ type: "resolve:done", pinned: lock.resolved.length });
   return { manifest, lock, files: fileCount, overrides: overrideCount, warnings };
-}
-
-/**
- * Extract the pack's `overrides/` + `client-overrides/` trees through the
- * hardened extractor, track them under `.anvil/overrides/`, admit their bytes,
- * and register a `local` copy entry per file. `client-overrides/` wins a path
- * collision (its purpose); a file whose top segment is protected is refused.
- */
-async function importOverrides(
-  input: ImportMrpackInput,
-  placeable: Map<string, LockPackage>,
-  warnings: string[],
-  onStored: (hash: LockPackage["hash"]) => void,
-): Promise<number> {
-  const stageDir = join(input.instanceDir, ".anvil", `import-stage-${process.pid}`);
-  const trackedRoot = join(input.instanceDir, ".anvil", "overrides");
-  await rm(stageDir, { recursive: true, force: true });
-  await ensureDir(stageDir);
-
-  let count = 0;
-  try {
-    // safeExtract applies every zip-slip / symlink / bomb guard; we only keep the
-    // two override subtrees.
-    await safeExtract(input.archivePath, stageDir, {
-      exclude: (name) => !(name.startsWith("overrides/") || name.startsWith("client-overrides/")),
-    });
-
-    // Map destRel → absolute staged source; client-overrides/ processed last so
-    // it overwrites plain overrides/ for the same path (config precedence).
-    const chosen = new Map<string, string>();
-    for (const prefix of ["overrides", "client-overrides"]) {
-      const sub = join(stageDir, prefix);
-      for await (const rel of walkFiles(sub)) {
-        chosen.set(rel, join(sub, rel));
-      }
-    }
-
-    for (const [destRel, absSrc] of chosen) {
-      const top = destRel.split(/[/\\]/)[0] ?? "";
-      if (isProtectedTop(top) || isUnsafePackPath(destRel)) {
-        warnings.push(`skipped override targeting a protected/unsafe path: ${destRel}`);
-        continue;
-      }
-      const bytes = new Uint8Array(await readFile(absSrc));
-      const hash = hashBuffer(bytes, "sha256");
-      await input.store.putBuffer(bytes, "sha256", hash);
-      const trackedPath = join(trackedRoot, destRel);
-      await mkdir(join(trackedPath, ".."), { recursive: true });
-      // Write the already-read+hashed bytes (no re-read → no TOCTOU on absSrc).
-      await writeFile(trackedPath, bytes);
-      placeable.set(destRel, {
-        name: safeBasename(destRel, ".txt"),
-        kind: kindForPackPath(destRel),
-        source: "local",
-        hash,
-        provenance: "copy",
-        placement: { method: "link", target: destRel },
-        size: bytes.byteLength,
-        url: pathToFileURL(trackedPath).toString(),
-      });
-      onStored(hash);
-      count += 1;
-    }
-  } finally {
-    // Always reap the staging dir, even if extraction/placement threw.
-    await rm(stageDir, { recursive: true, force: true });
-  }
-  return count;
 }
