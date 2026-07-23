@@ -23,6 +23,7 @@
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as semver from "semver";
+import { assertNoPlacementCollisions } from "../build/collision.js";
 import { canonicalJson } from "../build/serialize.js";
 import type { AnvilEvent } from "../events.js";
 import { comparePackages } from "../lock/serialize.js";
@@ -296,6 +297,11 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
   }
 
   emit?.({ type: "resolve:done", pinned: resolved.size });
+  const resolvedPackages = [...resolved.values()].sort(comparePackages);
+  // Two distinct items must never claim the same placement target — the resolver
+  // dedups by identity, not by where a file lands, so a shared basename would make
+  // one silently overwrite the other in the built instance. Fail at lock time.
+  assertNoPlacementCollisions(resolvedPackages);
   return {
     meta: {
       version: 1,
@@ -306,6 +312,6 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
       // pinned JRE (meta.java) are resolved by the game installer in Stage 3.
       java: "pending:game-install",
     },
-    resolved: [...resolved.values()].sort(comparePackages),
+    resolved: resolvedPackages,
   };
 }

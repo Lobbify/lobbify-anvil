@@ -32,6 +32,15 @@ export {
   targetsOf,
   treeLeaves,
 } from "./placement.js";
+export type { InstanceRegistry, InstanceRegistryEntry } from "./registry.js";
+export {
+  INSTANCE_REGISTRY_FILENAME,
+  instanceRegistryPath,
+  readInstanceRegistry,
+  removeInstance,
+  upsertInstance,
+  writeInstanceRegistry,
+} from "./registry.js";
 export type { ReplayCacheOptions } from "./replay-cache.js";
 export { REPLAY_CACHE_DIRNAME, ReplayCache } from "./replay-cache.js";
 export type { SafeExtractOptions } from "./safe-extract.js";

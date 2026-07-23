@@ -13,7 +13,7 @@
  */
 
 import { readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Acquirer, BuildEngineResult, WhyResult } from "./build/index.js";
 import {
   StoreOnlyAcquirer,
@@ -23,6 +23,7 @@ import {
   currentPlatform,
   packageAppliesToPlatform,
   readBuiltLock,
+  readBuiltLockStrict,
   readGraph,
   recoverSwap,
   resolvePaths,
@@ -78,11 +79,21 @@ import {
   buildRegistry,
   defaultAllowSource,
 } from "./sources/index.js";
-import { ContentStore, ReplayCache, hashBuffer, hashFile } from "./store/index.js";
+import type { InstanceRegistryEntry } from "./store/index.js";
+import {
+  ContentStore,
+  ReplayCache,
+  hashBuffer,
+  hashFile,
+  readInstanceRegistry,
+  upsertInstance,
+  writeInstanceRegistry,
+} from "./store/index.js";
 import {
   AnvilError,
   ManifestError,
   RemoteNotFound,
+  StoreRegistryCorrupt,
   UnsatisfiableTarget,
   VcStateError,
 } from "./types/errors.js";
@@ -107,6 +118,15 @@ import type {
   RevertOutcome,
 } from "./vc/index.js";
 import { Refs, VcObjectStore, VcRepo, vcReachability } from "./vc/index.js";
+
+/**
+ * The default GC grace window (ms). Objects modified within this window are kept
+ * even when unrooted, a secondary guard (below the instance-registry root union)
+ * against sweeping bytes a concurrent build just wrote but has not yet linked or
+ * registered. Non-zero so a store shared with an in-flight build on another
+ * instance is not reclaimed out from under it mid-write.
+ */
+const DEFAULT_GC_GRACE_MS = 60_000;
 
 /**
  * The runtime environment an {@link Anvil} resolves/fetches through. Every field
@@ -736,12 +756,12 @@ export class Anvil {
       this.progress.emit(event);
     };
     try {
+      const paths = await resolvePaths(this.dir, this.#options);
       // The per-instance process lock (`.anvil/lock`) serializes mutating ops on
       // this instance, so two concurrent builds (or a build racing a pull) can
       // never interleave the atomic swap or the VC ref database.
-      return await withLock(instanceLockPath(this.dir), async () => {
+      const result = await withLock(instanceLockPath(this.dir), async () => {
         await recoverSwap(this.dir);
-        const paths = await resolvePaths(this.dir, this.#options);
         const store = new ContentStore({ root: paths.store });
         const lock = await readInputLock(this.dir);
         const previousLock = await readBuiltLock(this.dir);
@@ -766,12 +786,55 @@ export class Anvil {
         });
         return { dir: result.dir, objects: result.objects };
       });
+      // Register/refresh this instance in the shared-store instance registry so a
+      // `gc` run from ANY instance sharing this store unions our built-lock roots
+      // and never reclaims an object we still reference. Done as a SEPARATE store-
+      // lock critical section (NOT nested inside the instance lock) so it can never
+      // deadlock against `gc`, which takes the store lock and then the instance lock.
+      await this.#registerInstance(paths.store);
+      return result;
     } catch (err) {
       if (err instanceof AnvilError) {
         emit({ type: "error", code: err.code, message: err.message });
       }
       throw err;
     }
+  }
+
+  /**
+   * Record (or refresh) this instance in the shared-store instance registry — the
+   * cross-instance GC root map. Keyed by the instance's absolute directory. A
+   * future `destroy`/`uninstall` command (not yet implemented) should DEREGISTER
+   * here via `removeInstance` so an intentionally-deleted instance stops rooting
+   * objects immediately; until then a deleted instance is pruned lazily by `gc`
+   * (its dir no longer exists). A registry that is present but unreadable is left
+   * untouched — clobbering it would silently drop other instances' roots, and `gc`
+   * already refuses to sweep against a corrupt registry.
+   */
+  async #registerInstance(storeRoot: string): Promise<void> {
+    const built = await readBuiltLock(this.dir);
+    if (!built) {
+      return; // nothing built to protect — no roots to register
+    }
+    const dir = resolve(this.dir);
+    const builtLockHash = `sha256:${hashBuffer(new TextEncoder().encode(canonicalJson(built)), "sha256").value}`;
+    const now = (this.#env.now ?? (() => Date.now()))();
+    await ensureDir(storeRoot);
+    await withLock(storeLockPath(storeRoot), async () => {
+      let registry: Awaited<ReturnType<typeof readInstanceRegistry>>;
+      try {
+        registry = await readInstanceRegistry(storeRoot);
+      } catch (err) {
+        if (err instanceof StoreRegistryCorrupt) {
+          return; // never clobber a corrupt registry — `gc` will refuse until fixed
+        }
+        throw err;
+      }
+      await writeInstanceRegistry(
+        storeRoot,
+        upsertInstance(registry, dir, { builtLockHash, updatedAt: now }),
+      );
+    });
   }
 
   /**
@@ -1490,53 +1553,109 @@ export class Anvil {
    *     expanded through its snapshot to the manifest/lock/ignore blobs **and the
    *     carried local blobs**, so switching to an old commit after a GC never hits
    *     a missing object;
-   *   - the shared **content store**: rooted at the built lock **and every reachable
-   *     commit's lock** (plus carried local content), so a mod pinned only by an old
-   *     commit is not reclaimed out from under a future `switch` + `build`.
+   *   - the shared **content store**: the default store (`~/.anvil/store`) is SHARED
+   *     across every instance on the machine, so the sweep roots at the **union of
+   *     every registered instance's built lock** — read from the store-level
+   *     instance registry (`<storeRoot>/instances.toml`) — plus this instance's
+   *     reachable-commit locks and carried local content. A sweep in instance A can
+   *     therefore never reclaim an object instance B's built lock still references.
    *
-   * NOTE — the shared store is still rooted at this single instance; the store-level
-   * instance registry that unions every instance's roots is a later-stage addition.
+   * Safety: entries whose instance directory no longer exists are pruned (their
+   * objects stop being rooted and become collectable); a registry that is present
+   * but unreadable/corrupt makes GC **refuse to sweep** (a typed
+   * `STORE_REGISTRY_CORRUPT`) rather than run with an under-counted root set. A
+   * non-zero grace window ({@link DEFAULT_GC_GRACE_MS}) is a secondary guard against
+   * reclaiming bytes a concurrent build just wrote but has not yet registered.
    */
   async gc(): Promise<GcResult> {
     const paths = await resolvePaths(this.dir, this.#options);
     const store = new ContentStore({ root: paths.store });
     // The shared-store write lock serializes the destructive mark-sweep against a
-    // concurrent GC on the same store; the per-instance lock keeps the VC prune
-    // consistent with a concurrent build/pull on this instance. NOTE: `graceMs: 0`
-    // means an object is protected ONLY by reachability from THIS instance's roots
-    // — a build on a DIFFERENT instance sharing this store is not yet fenced from
-    // this sweep (it takes only its own instance lock, not the store lock). Full
-    // cross-instance safety is the store-level instance-registry union, a later
-    // stage (see the note above); until then, run `gc` when no other instance is
-    // building against the shared store.
+    // concurrent GC and against a build's end-of-build registration (which also
+    // takes the store lock); the per-instance lock keeps the VC prune consistent
+    // with a concurrent build/pull on this instance.
     await ensureDir(paths.store);
-    return withLock(storeLockPath(paths.store), () =>
-      withLock(instanceLockPath(this.dir), async () => {
-        const anvilDir = join(this.dir, ".anvil");
-        const vcStore = new VcObjectStore({ anvilDir });
-        const refs = new Refs(anvilDir);
+    return this.#withErrors(() =>
+      withLock(storeLockPath(paths.store), () =>
+        withLock(instanceLockPath(this.dir), async () => {
+          const anvilDir = join(this.dir, ".anvil");
+          const vcStore = new VcObjectStore({ anvilDir });
+          const refs = new Refs(anvilDir);
 
-        // 1. VC object store: keep the full ref/reflog/in-progress closure + carried.
-        const reach = await vcReachability(refs, vcStore, anvilDir);
-        const vcPruned = await vcStore.prune(reach.keep);
+          // Read the instance registry FIRST, before ANY deletion (the VC prune or
+          // the shared sweep). A corrupt/unreadable registry throws here so GC
+          // refuses entirely rather than run with an under-counted cross-instance
+          // root set and delete an object a live instance still references.
+          const registry = await readInstanceRegistry(paths.store);
 
-        // 2. Shared store: built-lock roots ∪ every reachable commit's lock ∪ carried.
-        const roots: Hash[] = [];
-        const built = await readBuiltLock(this.dir);
-        if (built) {
-          roots.push(...(await collectRoots(built, store)));
-        }
-        for (const lock of reach.commitLocks) {
-          roots.push(...(await collectRoots(lock, store)));
-        }
-        roots.push(...reach.carriedContent);
-        const result = await store.gc(roots, { graceMs: 0 });
+          // 1. VC object store: keep the full ref/reflog/in-progress closure + carried.
+          const reach = await vcReachability(refs, vcStore, anvilDir);
+          const vcPruned = await vcStore.prune(reach.keep);
 
-        return {
-          removed: result.removed + vcPruned.removed,
-          freedBytes: result.freedBytes + vcPruned.freedBytes,
-        };
-      }),
+          // 2. Shared store roots.
+          const roots: Hash[] = [];
+
+          // 2a. This instance's own built lock is always a root (belt-and-braces,
+          //     even if a stale registry has not yet caught up to this instance).
+          const built = await readBuiltLock(this.dir);
+          if (built) {
+            roots.push(...(await collectRoots(built, store)));
+          }
+
+          // 2b. The cross-instance union: root every OTHER registered instance's
+          //     built lock; drop entries whose dir no longer exists (stale). A
+          //     registered instance whose built lock is present-but-unparseable
+          //     re-throws (readBuiltLockStrict) → refuse rather than under-root.
+          const selfDir = resolve(this.dir);
+          const survivors: InstanceRegistryEntry[] = [];
+          let prunedStale = false;
+          for (const entry of registry.instances) {
+            if (entry.dir === selfDir) {
+              continue; // refreshed from live state below
+            }
+            if (!(await pathExists(entry.dir))) {
+              prunedStale = true; // stale: instance deleted → stop rooting it
+              continue;
+            }
+            survivors.push(entry);
+            const otherBuilt = await readBuiltLockStrict(entry.dir);
+            if (otherBuilt) {
+              roots.push(...(await collectRoots(otherBuilt, store)));
+            }
+          }
+
+          // Persist a pruned + self-healed registry when the dir-set changed (a
+          // stale entry dropped, or this instance was not yet registered), so
+          // stale entries don't accumulate and a pre-registry build self-heals.
+          const selfPresent = registry.instances.some((e) => e.dir === selfDir);
+          if (prunedStale || (built && !selfPresent)) {
+            const reconciled: InstanceRegistryEntry[] = built
+              ? [
+                  ...survivors,
+                  {
+                    dir: selfDir,
+                    builtLockHash: `sha256:${hashBuffer(new TextEncoder().encode(canonicalJson(built)), "sha256").value}`,
+                    updatedAt: (this.#env.now ?? (() => Date.now()))(),
+                  },
+                ]
+              : survivors;
+            await writeInstanceRegistry(paths.store, { version: 1, instances: reconciled });
+          }
+
+          // 2c. Reachable-commit locks + carried content (per-instance history).
+          for (const lock of reach.commitLocks) {
+            roots.push(...(await collectRoots(lock, store)));
+          }
+          roots.push(...reach.carriedContent);
+
+          const result = await store.gc(roots, { graceMs: DEFAULT_GC_GRACE_MS });
+
+          return {
+            removed: result.removed + vcPruned.removed,
+            freedBytes: result.freedBytes + vcPruned.freedBytes,
+          };
+        }),
+      ),
     );
   }
 

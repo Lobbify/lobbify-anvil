@@ -147,6 +147,25 @@ export class VcRepo {
     return this.#objects;
   }
 
+  /**
+   * Refuse a HEAD-moving / history-writing op while a rebase is in progress.
+   *
+   * A rebase does NOT move the branch ref until it finishes; its progress lives in
+   * `REBASE_STATE` and the working tree sits on the partially-replayed tip. A
+   * `commit` / `branch` / `revert` / `switch` run in that window would parent the
+   * new commit on — or move HEAD away from — the stale pre-rebase HEAD, orphaning
+   * or corrupting the replayed history the moment the rebase is later `--continue`d
+   * or `--abort`ed. Every such op funnels through this guard so it raises the exact
+   * same typed refusal `merge()` does. (The rebase engine's own internal commits go
+   * through `#recordCommit` / direct object writes, never these public methods, so
+   * this guard never trips a legitimate replay step.)
+   */
+  async #assertNoRebaseInProgress(action: string): Promise<void> {
+    if (await rebaseInProgress(this.#anvilDir)) {
+      throw new VcStateError(`a rebase is in progress — finish or abort it before ${action}`);
+    }
+  }
+
   // --- ref resolution ------------------------------------------------------
 
   /** Resolve a branch name / tag / full ref / commit id to a commit hash. */
@@ -202,6 +221,7 @@ export class VcRepo {
       readonly requireLockFresh?: boolean;
     } = {},
   ): Promise<CommitRef> {
+    await this.#assertNoRebaseInProgress("committing");
     const built = await buildSnapshot({
       instanceDir: this.#instanceDir,
       vcStore: this.#objects,
@@ -256,6 +276,7 @@ export class VcRepo {
 
   /** Create a branch at HEAD (or at `startPoint`). Does not switch to it. */
   async branch(name: string, startPoint?: string): Promise<CommitRef> {
+    await this.#assertNoRebaseInProgress("creating a branch");
     const refName = `refs/heads/${name}`;
     if (await this.refs.readRef(refName)) {
       throw new VcStateError(`branch "${name}" already exists`);
@@ -307,6 +328,7 @@ export class VcRepo {
 
   /** Switch the working tree (and HEAD) to a branch / tag / commit, by hash-diff. */
   async switchTo(ref: string): Promise<CommitRef> {
+    await this.#assertNoRebaseInProgress("switching");
     const targetId = await this.resolveRef(ref);
     const target = await this.#loadCommit(targetId);
 
@@ -492,9 +514,7 @@ export class VcRepo {
     if (!oursId) {
       throw new VcStateError("cannot merge into an unborn HEAD");
     }
-    if (await rebaseInProgress(this.#anvilDir)) {
-      throw new VcStateError("a rebase is in progress — finish or abort it before merging");
-    }
+    await this.#assertNoRebaseInProgress("merging");
     const theirsId = await this.resolveRef(branch);
     if (theirsId.value === oursId.value || (await isAncestor(this.#objects, theirsId, oursId))) {
       return { conflicts: [], warnings: [], fastForward: false, upToDate: true };
@@ -673,6 +693,7 @@ export class VcRepo {
 
   /** Create a new commit that undoes the item-delta a past commit introduced. */
   async revert(ref: string): Promise<RevertOutcome> {
+    await this.#assertNoRebaseInProgress("reverting");
     const headId = await this.refs.resolveHead();
     if (!headId) {
       throw new VcStateError("cannot revert on an unborn HEAD");

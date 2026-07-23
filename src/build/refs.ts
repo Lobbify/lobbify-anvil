@@ -27,6 +27,25 @@ export async function readBuiltLock(instanceDir: string): Promise<Lockfile | und
   }
 }
 
+/**
+ * Read the built-lock ref, distinguishing "never built" from "present but corrupt".
+ * Returns `undefined` only when the ref is genuinely absent (`ENOENT`); a ref that
+ * exists but will not parse re-throws, so a GC that roots at a foreign registered
+ * instance can REFUSE rather than under-count its roots and delete live objects.
+ */
+export async function readBuiltLockStrict(instanceDir: string): Promise<Lockfile | undefined> {
+  let text: string;
+  try {
+    text = await readFile(join(instanceDir, BUILT_REF), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw err;
+  }
+  return parseRefJson(text);
+}
+
 /** Atomically record the lock the instance was just built from. */
 export async function writeBuiltLock(instanceDir: string, lock: Lockfile): Promise<void> {
   const dir = join(instanceDir, REFS_DIR);

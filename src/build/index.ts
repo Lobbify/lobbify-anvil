@@ -8,6 +8,7 @@
 export type { Acquirer } from "./acquire.js";
 export { FixtureAcquirer, StoreOnlyAcquirer } from "./acquire.js";
 export { IgnoreSet, loadIgnoreSet, parseAnvilignore } from "./anvilignore.js";
+export { assertNoPlacementCollisions } from "./collision.js";
 export type { DependencyGraph, WhyResult } from "./graph.js";
 export { readGraph, whyChains, writeGraph } from "./graph.js";
 export type { BuildDelta } from "./incremental.js";
@@ -26,7 +27,7 @@ export {
 } from "./preflight.js";
 export type { BuildEngineInput, BuildEngineResult } from "./pipeline.js";
 export { buildInstance } from "./pipeline.js";
-export { collectRoots, readBuiltLock, writeBuiltLock } from "./refs.js";
+export { collectRoots, readBuiltLock, readBuiltLockStrict, writeBuiltLock } from "./refs.js";
 export { canonicalJson } from "./serialize.js";
 export type { SwapPlan } from "./swap.js";
 export { hasPendingSwap, journaledSwap, recoverSwap } from "./swap.js";

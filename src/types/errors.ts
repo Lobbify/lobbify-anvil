@@ -424,6 +424,51 @@ export class LockBusy extends AnvilError {
 }
 
 /**
+ * Two DISTINCT resolved items place their single file at the SAME target path in
+ * the built instance. The resolver dedups by *identity* (`source:id`), never by
+ * placement target, so two different items that share a basename (e.g. a Modrinth
+ * `sodium.jar` and a `url` `sodium.jar`, or two mods from different sources) would
+ * both `link` onto `mods/sodium.jar` — one silently overwriting the other while
+ * the lock still lists BOTH. That is a silently-wrong build, so we fail loudly and
+ * name the colliding items and their shared target. Detected order-independently
+ * (deterministic across runs) at lock time and again at build time.
+ */
+export class PlacementCollision extends AnvilError {
+  readonly target: string;
+  readonly items: readonly string[];
+
+  constructor(target: string, items: readonly string[]) {
+    const named = items.map((i) => `"${i}"`).join(" and ");
+    super(
+      "PLACEMENT_COLLISION",
+      `Placement target collision at "${target}": ${named} both resolve to the same path in the built instance — one would silently overwrite the other. Remove or rename one of them, or pin a source/version whose file has a distinct name.`,
+    );
+    this.target = target;
+    this.items = items;
+  }
+}
+
+/**
+ * The shared-store instance registry (`<storeRoot>/instances.toml`) — the record
+ * of every instance that roots the GC mark-sweep — is present but unreadable or
+ * malformed. GC **refuses to sweep** on this error: it cannot confidently
+ * enumerate the roots, and sweeping with an under-counted root set would delete
+ * objects a live instance still references. Fix or remove the registry file (a
+ * subsequent successful `build` re-creates it) and re-run `gc`.
+ */
+export class StoreRegistryCorrupt extends AnvilError {
+  readonly path: string;
+
+  constructor(path: string, reason: string) {
+    super(
+      "STORE_REGISTRY_CORRUPT",
+      `The shared-store instance registry "${path}" is unreadable (${reason}). GC refuses to sweep rather than risk deleting objects a live instance still references — repair or remove this file and retry.`,
+    );
+    this.path = path;
+  }
+}
+
+/**
  * A stubbed capability that Stage 0 has typed but not yet implemented. Every
  * public `Anvil` method throws this until its owning stage lands.
  */

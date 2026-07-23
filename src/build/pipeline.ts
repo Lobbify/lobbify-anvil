@@ -19,6 +19,7 @@ import type { LockPackage, Lockfile } from "../types/index.js";
 import type { Acquirer } from "./acquire.js";
 import type { IgnoreSet } from "./anvilignore.js";
 import { loadIgnoreSet } from "./anvilignore.js";
+import { assertNoPlacementCollisions } from "./collision.js";
 import { diffLocks } from "./incremental.js";
 import type { Platform, Rule } from "./preflight.js";
 import {
@@ -120,6 +121,12 @@ export async function buildInstance(input: BuildEngineInput): Promise<BuildEngin
   const ruled = filterByRules(input.lock.resolved, platform, input.rules);
   const effective = filterByTargets(ruled, platform);
   const effectiveLock: Lockfile = { meta: input.lock.meta, resolved: effective };
+  // Last line of defense against a silently-wrong build: no two distinct items may
+  // `link` to the same target on THIS machine. Checked on the platform-effective
+  // set (so cross-platform packages that legitimately share a target but never
+  // co-install are not false-positives), and covers locks that never went through
+  // the resolver — imports, remote pulls, hand-edited locks.
+  assertNoPlacementCollisions(effective);
   await checkDiskSpace(instanceDir, effective, input.diskHeadroomBytes);
 
   // 2. Incremental delta.
