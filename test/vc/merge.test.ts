@@ -120,6 +120,56 @@ describe("vc merge: item-set 3-way + constrained re-lock", () => {
     await rmTmp(fx.storeDir);
   });
 
+  it("GATE game-cascade: a game-bump 3-way merge carries the NEW side's game install (unpinned loader)", async () => {
+    // Both mods support 26.2 AND 26.3, so the game bump re-locks them cleanly.
+    const fx = await makeVcFixture(
+      modWorld([
+        { slug: "universal", id: "UNI", versions: [version("UNI", "1.0.0", ["26.2", "26.3"])] },
+        { slug: "extra", id: "EXTRA", versions: [version("EXTRA", "1.0.0", ["26.2", "26.3"])] },
+      ]),
+    );
+    const anvil = fx.anvil();
+
+    // Unpinned "fabric" loader → the lock's meta.loader resolves to "fabric 0.19.9",
+    // deliberately different from the manifest string "fabric".
+    await fx.writeLockFor(
+      manifest({ minecraft: "26.2", loader: "fabric", items: ["modrinth:universal"] }),
+    );
+    await anvil.commit("base");
+    await anvil.branch("theirs");
+
+    // ours adds a mod (game unchanged) → a real 3-way, not a fast-forward.
+    await fx.writeLockFor(
+      manifest({
+        minecraft: "26.2",
+        loader: "fabric",
+        items: ["modrinth:universal", "modrinth:extra"],
+      }),
+    );
+    await anvil.commit("ours: add extra");
+
+    // theirs bumps the game to 26.3.
+    await anvil.switch("theirs");
+    await fx.writeLockFor(
+      manifest({ minecraft: "26.3", loader: "fabric", items: ["modrinth:universal"] }),
+    );
+    await anvil.commit("theirs: bump to 26.3");
+
+    await anvil.switch("main");
+    const result = await anvil.merge("theirs");
+    expect(result.committed).toBeDefined();
+
+    // The merged lock's game install must be THEIRS' (26.3), matching the merged
+    // @game — not ours' 26.2 (the bug: matching the resolved lock label vs the raw
+    // manifest loader string silently fell back to ours for an unpinned loader).
+    const merged = await readLock(fx.dir);
+    expect(merged.meta.minecraft).toBe("26.3");
+    expect(merged.resolved.find((p) => p.kind === "game")?.version).toBe("26.3");
+
+    await rmTmp(fx.dir);
+    await rmTmp(fx.storeDir);
+  });
+
   it("3-way merge materializes a merged carried local file so the working tree matches the commit", async () => {
     const fx = await makeVcFixture(
       modWorld([

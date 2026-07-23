@@ -71,6 +71,20 @@ export function modWorld(
   return fake;
 }
 
+/**
+ * The RESOLVED loader label a real `resolveGame` would emit (`"fabric" → "fabric
+ * 0.19.9"`) — deliberately distinct from the unpinned manifest string, so tests
+ * exercise the manifest-string-vs-resolved-label distinction `#gameFor` must honor.
+ */
+export function resolvedLoaderLabel(manifestLoader: string): string {
+  const parts = manifestLoader.trim().split(/\s+/);
+  const name = parts[0] ?? "vanilla";
+  if (name === "vanilla") {
+    return "vanilla";
+  }
+  return parts.length >= 2 ? manifestLoader : `${name} 0.19.9`;
+}
+
 /** A deterministic, minimal game-install package set for a `{minecraft, loader}`. */
 export function gamePackagesFor(minecraft: string, loader: string): LockPackage[] {
   const hash = hashBuffer(new TextEncoder().encode(`client|${minecraft}|${loader}`), "sha256");
@@ -132,12 +146,15 @@ export async function makeVcFixture(fake: FakeModrinth): Promise<VcFixture> {
         baseDir: dir,
         store,
       });
-      const game = gamePackagesFor(disk.game.minecraft, disk.game.loader);
+      // Mirror `resolveGame`: the lock records the RESOLVED loader label, which for
+      // an unpinned manifest loader ("fabric") differs from the manifest string.
+      const label = resolvedLoaderLabel(disk.game.loader);
+      const game = gamePackagesFor(disk.game.minecraft, label);
       const lock: Lockfile = {
         meta: {
           ...itemLock.meta,
           minecraft: disk.game.minecraft,
-          loader: disk.game.loader,
+          loader: label,
           java: "runtime-test-21",
         },
         resolved: [...itemLock.resolved, ...game].sort(comparePackages),

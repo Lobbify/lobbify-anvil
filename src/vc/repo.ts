@@ -381,11 +381,10 @@ export class VcRepo {
         }
       }
     }
+    // Newest-first by generation (authoritative); id breaks ties. Wall-clock time
+    // is NEVER consulted for ordering — a skewed clock must not reorder history.
     const ordered = [...loaded.values()].sort(
-      (a, b) =>
-        b.commit.gen - a.commit.gen ||
-        b.commit.time - a.commit.time ||
-        (a.id.value < b.id.value ? 1 : -1),
+      (a, b) => b.commit.gen - a.commit.gen || (a.id.value < b.id.value ? 1 : -1),
     );
     const entries: LogEntry[] = [];
     for (const c of ordered) {
@@ -414,15 +413,24 @@ export class VcRepo {
 
   // --- shared 3-way apply (merge / revert / rebase step) -------------------
 
-  /** Pick the game packages + meta whose game matches the merged `@game`. */
+  /**
+   * Pick the game packages + meta whose game matches the merged `@game`. The match
+   * is on each side's **manifest** game (the same representation the merged `@game`
+   * is expressed in — a raw loader string like `"fabric"`), NOT on `lock.meta.loader`
+   * (a *resolved* label like `"fabric 0.19.1"`): an unpinned loader would otherwise
+   * never match and silently fall back to `ours`, carrying the wrong Minecraft
+   * client into a game-bump merge.
+   */
   #gameFor(
     merged: { minecraft: string; loader: string },
     sides: readonly CommitContent[],
   ): { gamePackages: readonly LockPackage[]; gameMeta: RelockRequest["gameMeta"] } {
     for (const side of sides) {
       if (
-        gameValue({ minecraft: side.lock.meta.minecraft, loader: side.lock.meta.loader }) ===
-        gameValue(merged)
+        gameValue({
+          minecraft: side.manifest.game.minecraft,
+          loader: side.manifest.game.loader,
+        }) === gameValue(merged)
       ) {
         return {
           gamePackages: side.lock.resolved.filter(isGamePackage),
@@ -716,12 +724,49 @@ export class VcRepo {
       throw new VcStateError("cannot rebase an unborn HEAD");
     }
     const ontoId = await this.resolveRef(onto);
-    if (oursId.value === ontoId.value || (await isAncestor(this.#objects, oursId, ontoId))) {
-      // Our tip is already at/under onto: fast-forward the branch to onto.
-      if (oursId.value !== ontoId.value) {
-        await this.refs.writeRef(branch, ontoId);
-      }
+    if (oursId.value === ontoId.value) {
       return { status: "up-to-date", conflicts: [], warnings: [], remaining: 0 };
+    }
+    if (await isAncestor(this.#objects, oursId, ontoId)) {
+      // Our tip is a proper ancestor of onto (the branch is behind): fast-forward
+      // the branch AND the working tree, mirroring the merge fast-forward path —
+      // otherwise HEAD would resolve to onto while the tracked files stay stale.
+      const ontoContent = await this.#loadCommit(ontoId);
+      const oursSnap = await this.#objects.getSnapshot(
+        (await this.#objects.getCommit(oursId)).snapshot,
+      );
+      await this.refs.writeOrigHead(oursId);
+      await this.refs.writeRef(branch, ontoId);
+      await materializeSnapshot({
+        instanceDir: this.#instanceDir,
+        snapshot: ontoContent.snapshot,
+        vcStore: this.#objects,
+        sharedStore: this.#shared,
+        previous: oursSnap,
+      });
+      await this.refs.appendReflog(
+        branch,
+        oursId,
+        ontoId,
+        this.#author,
+        `rebase: fast-forward onto ${ontoId.value.slice(0, 12)}`,
+        this.#now(),
+      );
+      await this.refs.appendReflog(
+        "HEAD",
+        oursId,
+        ontoId,
+        this.#author,
+        "rebase: fast-forward",
+        this.#now(),
+      );
+      return {
+        status: "done",
+        head: { id: ontoId, generation: ontoContent.commit.gen },
+        conflicts: [],
+        warnings: [],
+        remaining: 0,
+      };
     }
 
     // The commits unique to our side (ours minus onto's ancestors), oldest → newest.
@@ -729,7 +774,6 @@ export class VcRepo {
     if (todo.length === 0) {
       return { status: "up-to-date", conflicts: [], warnings: [], remaining: 0 };
     }
-    await this.refs.writeOrigHead(oursId);
     const state: RebaseState = {
       onto: ontoId,
       origHead: oursId,
@@ -738,6 +782,10 @@ export class VcRepo {
       todo,
       done: [],
     };
+    // Persist ORIG_HEAD + the rebase state BEFORE touching the working tree, so a
+    // crash after the tree is moved to `onto` is always resumable/abortable.
+    await this.refs.writeOrigHead(oursId);
+    await writeRebaseState(this.#anvilDir, state);
     // Materialize onto so the working tree starts from the new base.
     const ontoContent = await this.#loadCommit(ontoId);
     const oursSnap = await this.#objects.getSnapshot(
@@ -750,7 +798,6 @@ export class VcRepo {
       sharedStore: this.#shared,
       previous: oursSnap,
     });
-    await writeRebaseState(this.#anvilDir, state);
     return this.#runRebase(state, policy);
   }
 

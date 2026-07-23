@@ -14,6 +14,7 @@
  */
 
 import * as semver from "semver";
+import { canonicalKeyOf } from "../resolver/index.js";
 import type { GameSpec, LockPackage, Manifest } from "../types/index.js";
 import type { Conflict, OnConflict, Resolution } from "./conflict.js";
 import type { GameValue, ItemEntry, ItemSet } from "./itemset.js";
@@ -111,7 +112,10 @@ export async function threeWayMerge(input: ThreeWayInput): Promise<ThreeWayResul
     const pins = side === "ours" ? input.oursPins : input.theirsPins;
     const pin = pins.get(entry.canonicalKey);
     if (pin) {
-      seedPins.set(entry.canonicalKey, pin);
+      // Key the seed by the pin's OWN canonical key (matching `pinsFromLock`), so
+      // an item referenced by project-id instead of slug still reuses its pin in
+      // the re-lock rather than re-resolving and drifting.
+      seedPins.set(canonicalKeyOf(pin), pin);
     }
   };
 
