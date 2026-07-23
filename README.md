@@ -1,13 +1,18 @@
 # lobbify-anvil
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-20%20%7C%2022-339933?logo=node.js&logoColor=white)](./package.json)
+
 > **git + docker + uv for `.minecraft`** — a reproducible, content-addressed build
 > system for Minecraft instances.
 
-**Status: MVP complete (Stages 0–4).** The content store, atomic build engine, the
-Modrinth/URL/local sources + resolver, the full Mojang + Fabric/Quilt game installer,
-the thin `lobbify-anvil` CLI, and `.mrpack` import all ship. The version-control and
-remote verbs (`commit`/`branch`/`merge`/`clone`/`pull`/`push`/`export`) are the next
-tiers and still throw `NotImplemented`. See the roadmap below.
+**Status: feature-complete through v1, plus Forge/NeoForge.** The content store, atomic
+build engine, the Modrinth/URL/local/**CurseForge** sources + resolver, the full Mojang
+game installer with **all four loaders (Fabric, Quilt, Forge, NeoForge)**, anvil's own
+**version control** (`commit`/`branch`/`merge`/`rebase`), **remotes**
+(`clone`/`pull`/`push`), `.mrpack` + Prism import, `.mrpack` export, the thin
+`lobbify-anvil` CLI, and a colorful interactive TUI all ship. Remaining v1+ items
+(chunked deltas, recursive virtual-base merge, more registries) are on the roadmap below.
 
 If you know **git**, **Docker**, and **uv**, you already know anvil: you write a
 **manifest** (like a `pyproject.toml`), `anvil lock` freezes it (like `uv.lock`),
@@ -208,6 +213,16 @@ npm run build     # tsup → dist/
 
 See [`AGENT.md`](./AGENT.md) for conventions and the three hard invariants
 (determinism · atomic swap · replay-never-rehosted) that gate every change.
+
+## Contributing & docs
+
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup, the four gates, how to add
+  a new `Source`, and the test/fixture conventions.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — a design overview: the content store,
+  manifest → resolver → lock, the build pipeline, anvil's own version control,
+  remotes, and the trust model.
+- [`SECURITY.md`](./SECURITY.md) — the trust model in full, and how to report a
+  vulnerability.
 
 ## License
 
