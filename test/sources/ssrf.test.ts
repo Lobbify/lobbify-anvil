@@ -28,6 +28,9 @@ describe("isBlockedIp", () => {
       "fe80::1",
       "::ffff:127.0.0.1",
       "::ffff:10.0.0.1",
+      "::127.0.0.1", // IPv4-compatible
+      "64:ff9b::169.254.169.254", // NAT64 → metadata
+      "::ffff:0:169.254.169.254", // translated form → metadata
     ]) {
       expect(isBlockedIp(ip), ip).toBe(true);
     }
@@ -66,6 +69,12 @@ describe("guardHop", () => {
         host: "sneaky.example",
         addresses: ["169.254.169.254"],
       }),
+    ).toThrow(SsrfBlocked);
+  });
+
+  it("fails closed when a non-IP host resolved to no addresses", () => {
+    expect(() =>
+      guardHop({ url: "https://nowhere.example/x", host: "nowhere.example", addresses: [] }),
     ).toThrow(SsrfBlocked);
   });
 });

@@ -52,12 +52,14 @@ export function tomlString(value: string): string {
   return `${out}"`;
 }
 
-/** A canonical TOML integer (base-10, no grouping, no fraction). */
+/** A canonical TOML integer (base-10, no grouping, no fraction, no exponent). */
 export function tomlInt(value: number): string {
-  if (!Number.isInteger(value)) {
-    throw new RangeError(`not an integer: ${value}`);
+  // `Number.isInteger(1e21)` is true but `(1e21).toString()` is `"1e+21"` — TOML
+  // float syntax in an integer field. Require a *safe* integer so the base-10
+  // rendering is always exact and exponent-free.
+  if (!Number.isSafeInteger(value)) {
+    throw new RangeError(`not a safe integer: ${value}`);
   }
-  // Avoid any locale/exponent formatting; base-10 via toString is stable.
   return value.toString(10);
 }
 

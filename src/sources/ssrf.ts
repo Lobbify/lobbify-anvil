@@ -96,22 +96,43 @@ function ipv6Hextets(ip: string): number[] | undefined {
   return [...head, ...new Array<number>(missing).fill(0), ...tail];
 }
 
+/**
+ * Extract an embedded IPv4 from an IPv6 address in any of the v4-embedding ranges
+ * — IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible / `::`/`::1` (`::/96`), the
+ * translated `::ffff:0:0/96` alt form, and NAT64 (`64:ff9b::/96`). Returns the
+ * dotted-quad of the low 32 bits, so the embedded address is checked as IPv4.
+ */
+function embeddedIpv4(h: number[]): string | undefined {
+  const dotted = (hi: number, lo: number): string =>
+    `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+  const lo = dotted(h[6] as number, h[7] as number);
+  const prefixZero = h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0;
+  // ::/96 (compatible, incl. :: and ::1) and ::ffff:0:0/96 (mapped): h[4]=0.
+  if (prefixZero && h[4] === 0 && (h[5] === 0 || h[5] === 0xffff)) {
+    return lo;
+  }
+  // Alternative translated form where ffff lands in h[4].
+  if (prefixZero && h[4] === 0xffff && h[5] === 0) {
+    return lo;
+  }
+  // 64:ff9b::/96 NAT64.
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+    return lo;
+  }
+  return undefined;
+}
+
 /** True if an IPv6 address is not a safe public target. */
 function isBlockedIpv6(ip: string): boolean {
   const h = ipv6Hextets(ip);
   if (!h) {
     return true;
   }
-  // ::  unspecified, and ::1 loopback.
-  if (h.every((x) => x === 0)) return true;
-  if (h[7] === 1 && h.slice(0, 7).every((x) => x === 0)) return true;
-  // ::ffff:a.b.c.d — IPv4-mapped: unwrap and check the embedded IPv4.
-  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
-    const a = (h[6] as number) >> 8;
-    const b = (h[6] as number) & 0xff;
-    const c = (h[7] as number) >> 8;
-    const d = (h[7] as number) & 0xff;
-    return isBlockedIpv4(`${a}.${b}.${c}.${d}`);
+  // Any embedded IPv4 (::, ::1, mapped, compatible, translated, NAT64) is
+  // vetted as IPv4 — this is where loopback/RFC1918/metadata-via-v6 is caught.
+  const v4 = embeddedIpv4(h);
+  if (v4 !== undefined) {
+    return isBlockedIpv4(v4);
   }
   const first = h[0] as number;
   if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
@@ -154,8 +175,13 @@ export function assertHttpScheme(rawUrl: string): URL {
 export function guardHop(hop: HttpHop): void {
   const url = assertHttpScheme(hop.url);
   const host = url.hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
-  if (isIP(host) && isBlockedIp(host)) {
+  const hostIsIp = isIP(host) !== 0;
+  if (hostIsIp && isBlockedIp(host)) {
     throw new SsrfBlocked(hop.url, `host ${host} is an internal/reserved address`);
+  }
+  // Fail closed: a non-IP host that resolved to nothing must not pass unvetted.
+  if (!hostIsIp && hop.addresses.length === 0) {
+    throw new SsrfBlocked(hop.url, `host ${host} did not resolve to any address`);
   }
   for (const addr of hop.addresses) {
     if (isBlockedIp(addr)) {

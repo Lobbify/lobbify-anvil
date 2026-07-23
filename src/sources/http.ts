@@ -22,6 +22,7 @@ import type { LookupFunction } from "node:net";
 import { Agent, fetch as undiciFetch } from "undici";
 import { HttpError } from "../types/errors.js";
 import type { Http, HttpGetOptions, HttpHop, HttpResult } from "../types/index.js";
+import { assertHttpScheme } from "./ssrf.js";
 
 /** A minimal fetch response shape (undici's satisfies it; fakes implement it). */
 export interface FetchResponseLike {
@@ -67,6 +68,10 @@ const DEFAULT_RPS = 4;
 const DEFAULT_MAX_RETRIES = 4;
 const DEFAULT_MAX_REDIRECTS = 5;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
+/** Hard ceiling on any single honored backoff/pause — a hostile server can
+ * otherwise send `Retry-After: 2000000` (or a far-future ratelimit reset) and
+ * wedge the lock for days, or spin the token bucket. */
+const MAX_DELAY_MS = 60_000;
 
 function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
@@ -146,8 +151,17 @@ export class RateLimitedHttp implements Http {
       if (res.status >= 400) {
         throw new HttpError(current, `unexpected status ${res.status}`, res.status);
       }
-      const body = new Uint8Array(await res.arrayBuffer());
       const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+      // Reject an honestly-declared oversize body BEFORE buffering it into memory.
+      const declared = Number(res.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        throw new HttpError(
+          current,
+          `response declares ${declared} > ${maxBytes} bytes`,
+          res.status,
+        );
+      }
+      const body = new Uint8Array(await res.arrayBuffer());
       if (body.byteLength > maxBytes) {
         throw new HttpError(current, `response exceeds ${maxBytes} bytes`, res.status);
       }
@@ -164,6 +178,8 @@ export class RateLimitedHttp implements Http {
     if (!options.guard) {
       return { addresses: [] };
     }
+    // Reject a bad scheme BEFORE any DNS resolution.
+    assertHttpScheme(url);
     const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
     const addresses = isIP(host) ? [host] : await this.#lookup(host);
     const hop: HttpHop = { url, host, addresses };
@@ -197,15 +213,16 @@ export class RateLimitedHttp implements Http {
 
   /** Backoff for a 429/503: honor `Retry-After`, else exponential + jitter. */
   #retryDelayMs(res: FetchResponseLike, attempt: number): number {
+    const clamp = (ms: number): number => Math.min(MAX_DELAY_MS, Math.max(0, ms));
     const retryAfter = res.headers.get("retry-after");
     if (retryAfter) {
       const seconds = Number(retryAfter);
       if (Number.isFinite(seconds)) {
-        return Math.max(0, seconds * 1000);
+        return clamp(seconds * 1000);
       }
       const at = Date.parse(retryAfter);
       if (!Number.isNaN(at)) {
-        return Math.max(0, at - this.#now());
+        return clamp(at - this.#now());
       }
     }
     const base = Math.min(30_000, 250 * 2 ** attempt);
@@ -228,7 +245,9 @@ export class RateLimitedHttp implements Http {
     }
     // Reset can be "seconds from now" (Modrinth) — treat small values that way.
     const resetMs = secs > 1_000_000_000 ? secs * 1000 : this.#now() + secs * 1000;
-    this.#pauseUntil = Math.max(this.#pauseUntil, resetMs);
+    // Clamp to a bounded pause so a far-future reset can't wedge / spin the bucket.
+    const capped = Math.min(resetMs, this.#now() + MAX_DELAY_MS);
+    this.#pauseUntil = Math.max(this.#pauseUntil, capped);
     this.#tokens = 0;
   }
 

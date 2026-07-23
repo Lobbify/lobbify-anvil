@@ -127,13 +127,25 @@ function parsePlacement(raw: unknown, where: string): Placement {
 
 // --- package ordering ------------------------------------------------------
 
-/** A stable comparator so package order is independent of resolution order. */
+/**
+ * Pure UTF-16 code-unit comparison. We deliberately avoid `localeCompare`, whose
+ * ICU/CLDR-collation ordering varies across Node versions and would break the
+ * cross-Node byte-identical-lock guarantee.
+ */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** A stable total-order comparator so package order never depends on the host. */
 export function comparePackages(a: LockPackage, b: LockPackage): number {
   return (
-    a.name.localeCompare(b.name, "en") ||
-    a.source.localeCompare(b.source, "en") ||
-    a.kind.localeCompare(b.kind, "en") ||
-    a.hash.value.localeCompare(b.hash.value, "en")
+    byCodeUnit(a.name, b.name) ||
+    byCodeUnit(a.source, b.source) ||
+    byCodeUnit(a.kind, b.kind) ||
+    byCodeUnit(a.hash.value, b.hash.value) ||
+    byCodeUnit(a.url ?? "", b.url ?? "") ||
+    byCodeUnit(String(a.project ?? ""), String(b.project ?? "")) ||
+    byCodeUnit(String(a.file ?? ""), String(b.file ?? ""))
   );
 }
 

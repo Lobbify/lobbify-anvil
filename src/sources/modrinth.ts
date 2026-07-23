@@ -154,8 +154,9 @@ function pickLatest(
       continue;
     }
     const cmp = Date.parse(v.date_published) - Date.parse(best.date_published);
-    // Newest wins; a stable id tiebreak keeps selection deterministic.
-    if (cmp > 0 || (cmp === 0 && v.id.localeCompare(best.id, "en") > 0)) {
+    // Newest wins; a code-unit id tiebreak keeps selection deterministic across
+    // Node/ICU versions (never `localeCompare`, whose collation is host-variant).
+    if (cmp > 0 || (cmp === 0 && v.id > best.id)) {
       best = v;
     }
   }
@@ -291,6 +292,12 @@ export class ModrinthSource implements Source {
       await ctx.store.putBuffer(bytes, "sha256", hash);
     }
     const filename = safeBasename(file.filename, ".jar");
+    // Trust our own byte count over an attacker-influenceable declared size.
+    const declared = file.size;
+    const size =
+      typeof declared === "number" && Number.isSafeInteger(declared) && declared >= 0
+        ? declared
+        : bytes.byteLength;
     const pkg: LockPackage = {
       name: project.slug,
       kind: itemKind,
@@ -299,7 +306,7 @@ export class ModrinthSource implements Source {
       hash,
       provenance: "copy",
       placement: singleFilePlacement(itemKind, filename),
-      size: file.size ?? bytes.byteLength,
+      size,
       url: file.url,
     };
 

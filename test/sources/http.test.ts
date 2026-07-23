@@ -32,6 +32,17 @@ describe("RateLimitedHttp", () => {
     expect(s.sleeps).toContain(2000);
   });
 
+  it("clamps a hostile Retry-After to a bounded backoff", async () => {
+    const s = makeScriptedHttp({
+      handler: (_url, _init, call) =>
+        call === 0 ? { status: 429, headers: { "retry-after": "2000000" } } : ok("done"),
+    });
+    const res = await s.http.get("https://api.example/limited");
+    expect(res.status).toBe(200);
+    // 2,000,000 s would be ~23 days; it must be clamped to the 60 s ceiling.
+    expect(Math.max(...s.sleeps)).toBeLessThanOrEqual(60_000);
+  });
+
   it("paces requests through the token bucket", async () => {
     const s = makeScriptedHttp({ handler: () => ok(), rps: 1, burst: 1 });
     await s.http.get("https://api.example/1");

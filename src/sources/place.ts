@@ -46,10 +46,13 @@ function stripControlChars(s: string): string {
   return out;
 }
 
+/** Characters that are illegal in a filename on Windows (NTFS) → replaced with `_`. */
+const WINDOWS_ILLEGAL = /[<>:"|?*]/g;
+
 /** Reduce any path to a safe, single-segment basename usable cross-OS. */
 export function safeBasename(raw: string, fallbackExt: string): string {
   const base = raw.split(/[/\\]/).pop() ?? "";
-  const cleaned = stripControlChars(base).trim();
+  const cleaned = stripControlChars(base).replace(WINDOWS_ILLEGAL, "_").trim();
   if (cleaned.length === 0 || cleaned === "." || cleaned === "..") {
     return `unnamed${fallbackExt}`;
   }
