@@ -16,9 +16,9 @@ and the interactive TUI are thin skins that carry **no logic**. It is standalone
 source-agnostic (Modrinth / CurseForge / URL / local); a host app (e.g. Lobbify) supplies
 an `allowSource` policy and calls the library directly.
 
-This repo is at **Stage 7 — remotes (clone / pull / push) + `.mrpack` export + Prism import
-are complete**, closing the v1 sync tier (MVP Stages 0–4 + v1 Stages 5–7; the colorful
-TUI is Stage 8). On top of the Stage-0 scaffold, the Stage-1
+This repo is at **Stage 8 — the colorful interactive TUI is complete, closing the v1 tier**
+(MVP Stages 0–4 + v1 Stages 5–8; only Stage 9 v1+ hardening / OSS release remains). On top
+of the Stage-0 scaffold, the Stage-1
 content-addressed store (`src/store/`) + atomic build engine (`src/build/`), the
 Stage-2 manifest/sources/resolver/lock, the Stage-3 full game installer
 (`src/game/`: Mojang walk + Fabric/Quilt), and the Stage-4 thin CLI + `.mrpack`
@@ -69,10 +69,24 @@ seam: matched → copy/replay items, unmatched → local). **The replay boundary
 push/pull/export skip `provenance:"replay"` rows and never read `.anvil/replay-cache/`** (a standing
 hard review rule; see `test/security/replay-tos-audit.test.ts` + `test/remote/replay-export.test.ts`).
 
+**Stage 8 adds `src/tui/`** — the colorful interactive TUI, a **thin skin** over the same
+`Anvil` library + progress event bus (it carries **no** build/merge logic, only rendering +
+orchestration). An **Ink** (React-for-terminal, via `createElement` — no JSX) app renders a
+syntax-highlighted item list with source/kind badges, colorized semver diffs, live progress
+bars folded from the event bus, and **conflict-resolution cards** (high-severity `@game`
+first, with a blast-radius + re-lock preview); **@clack/prompts** drives the linear wizards
+(init / add) and confirmations; `picocolors` tints the prompt chrome. Content is built once
+as styled **segments** and rendered two ways: the Ink components (colorful) and an **Ink-free
+plain renderer** (`src/tui/plain.ts`) that emits **no ANSI** — the fallback taken under
+`!isTTY` / `NO_COLOR` / CI, so pipes and CI still get a greppable dashboard. Running
+`lobbify-anvil` with **no command** opens the TUI (dynamically imported by `src/cli/run.ts`,
+so library-only consumers and every other command never pull Ink/React into their graph — the
+public `index.ts` deliberately does **not** re-export `tui/`).
+
 The CLI is a **thin skin**: it parses args and calls one `Anvil` method — no business
 logic. The library is testable offline via the optional `AnvilEnv` constructor arg (the
 mirror/endpoint + fixture injection seam; `AnvilEnv.now`/`author` inject the VC clock +
-author). The remaining subsystem (the colorful Ink TUI) lands in Stage 8. See
+author). Only Stage 9 (v1+ hardening + OSS release) remains. See
 `lobbify-anvil-implementation-plan.md`.
 
 ## Commands
@@ -166,5 +180,6 @@ src/import/         # pack import: mrpack (S4) + cfzip (S6) + prism (S7) + the h
 src/remote/         # remotes (Stage 7): descriptor, config.toml, transports, transfer, clone/pull/push
 src/export/         # .mrpack export (Stage 7): the exporter + a deterministic zip writer
 src/cli/            # the thin `lobbify-anvil` bin (Stage 4+): commands, reporter, errors, run
-test/               # vitest — determinism/crash/game/CLI-e2e/import/remote/error fixtures (offline)
+src/tui/            # the colorful Ink TUI (Stage 8): segments/badges/item-list/progress/conflict cards + clack wizards + launch
+test/               # vitest — determinism/crash/game/CLI-e2e/import/remote/tui/error fixtures (offline)
 ```

@@ -8,6 +8,7 @@
 
 import type { Writable } from "node:stream";
 import { Builtins, Cli } from "clipanion";
+import type { StreamLike } from "../tui/capabilities.js";
 import { COMMANDS } from "./commands.js";
 import type { AnvilCliContext } from "./context.js";
 import { defaultMakeAnvil } from "./context.js";
@@ -56,5 +57,19 @@ export async function runCli(
     env: overrides.env ?? process.env,
     makeAnvil: overrides.makeAnvil ?? defaultMakeAnvil,
   };
+  // No command → open the interactive TUI (Stage 8). It is loaded lazily so a
+  // plain command run (and the whole test suite) never pays the Ink/React import
+  // cost, and library-only consumers never pull it in at all.
+  if (argv.length === 0) {
+    const { launchTui } = await import("../tui/launch.js");
+    return launchTui({
+      cwd: context.cwd,
+      env: context.env,
+      stdout: context.stdout,
+      stderr: context.stderr,
+      stdin: context.stdin as unknown as StreamLike,
+      makeAnvil: context.makeAnvil,
+    });
+  }
   return cli.run([...argv], context);
 }
