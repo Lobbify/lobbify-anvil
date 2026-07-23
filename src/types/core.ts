@@ -191,28 +191,119 @@ export interface FetchPlan {
 }
 
 /**
- * Ambient context handed to a {@link Source}: the rate-limited HTTP client, the
- * offline flag, the BYO CurseForge key (a reference, never serialized), and the
- * `allowSource` policy gate. Concrete shapes for `http` land in Stage 2.
+ * A resolved request/redirect hop, surfaced to the SSRF guard **before** the
+ * request is dispatched. `addresses` are the DNS-resolved IPs the connection
+ * will actually use (empty when the host is an IP literal), so the guard vets
+ * the real target — not just the hostname — closing the DNS-rebinding hole.
+ */
+export interface HttpHop {
+  readonly url: string;
+  readonly host: string;
+  readonly addresses: readonly string[];
+}
+
+/** A completed HTTP GET result: status, headers, the final URL, and the body. */
+export interface HttpResult {
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string>>;
+  /** The final URL after any redirects were followed. */
+  readonly url: string;
+  readonly body: Uint8Array;
+}
+
+/** Options for an {@link Http} GET. */
+export interface HttpGetOptions {
+  readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Per-hop SSRF guard: invoked with the initial request **and every redirect
+   * target** before dispatch; throwing aborts the fetch. The `url` source passes
+   * the internal-address validator here, so a redirect to an internal host is
+   * rejected on the hop that introduces it.
+   */
+  readonly guard?: (hop: HttpHop) => void | Promise<void>;
+  /** Cap on bytes buffered into memory — a decompression/response-bomb bound. */
+  readonly maxBytes?: number;
+}
+
+/**
+ * The per-source rate-limited HTTP client a {@link Source} uses at **lock time**
+ * (never during a build — the lock is the sole build input). Each source owns
+ * its own client so the token bucket and User-Agent are scoped per source.
+ */
+export interface Http {
+  get(url: string, options?: HttpGetOptions): Promise<HttpResult>;
+}
+
+/** The outcome of admitting bytes to the store: the content hash + a dedup flag. */
+export interface PutOutcome {
+  readonly hash: Hash;
+  readonly deduped: boolean;
+}
+
+/**
+ * The minimal store-admission surface a {@link Source} uses to cache the bytes
+ * it hashed at lock time, so a subsequent build finds them already present. The
+ * `ContentStore` satisfies this structurally; keeping it an interface here keeps
+ * the type spine decoupled from the store implementation.
+ */
+export interface ObjectSink {
+  has(hash: Hash): Promise<boolean>;
+  putBuffer(data: Uint8Array, algo: HashAlgo, expected?: Hash): Promise<PutOutcome>;
+  putFile(src: string, algo: HashAlgo, expected?: Hash): Promise<PutOutcome>;
+}
+
+/**
+ * Ambient context handed to a {@link Source}: the per-source rate-limited HTTP
+ * client, the frozen lock clock, the offline flag, the BYO CurseForge key (a
+ * reference, never serialized), the `allowSource` policy gate, and the store the
+ * source admits hashed bytes into.
  */
 export interface SourceContext {
-  /** The per-source rate-limited HTTP client (typed in Stage 2). */
-  readonly http: unknown;
+  /** The per-source rate-limited HTTP client (absent for the local source). */
+  readonly http?: Http;
   readonly offline: boolean;
+  /**
+   * The frozen lock clock (ms since epoch). A `latest`/omitted spec resolves to
+   * the newest artifact published at or before this instant, so "latest-at-lock"
+   * is deterministic across re-runs of the same lock.
+   */
+  readonly now: number;
   /** BYO CurseForge key. Never serialized into lock/config/events/logs. */
   readonly curseforgeKey?: string;
   readonly allowSource: AllowSource;
+  /** Where a source admits the bytes it hashed at lock time (copy provenance). */
+  readonly store?: ObjectSink;
+  /**
+   * The game target from the manifest — a source filters its artifacts by the
+   * Minecraft version and (for mods) the loader.
+   */
+  readonly game?: {
+    readonly minecraft: string;
+    /** The raw loader string (`"fabric 0.19.1"`, `"vanilla"`). */
+    readonly loader?: string;
+  };
+}
+
+/**
+ * The result of resolving one ref: the fully-pinned package plus any **required**
+ * transitive dependencies to enqueue. Optional and embedded (jar-in-jar) deps are
+ * excluded by the source before they reach here.
+ */
+export interface ResolveResult {
+  readonly pkg: LockPackage;
+  readonly dependencies?: readonly ResolvedRef[];
 }
 
 /**
  * The source abstraction: resolve a manifest ref to a fully-pinned lock package
- * (may hit the network), and plan the byte fetch for a pinned package (never
- * hits the network). Modrinth / CurseForge / URL / local each implement this.
+ * (may hit the network) plus its required transitive deps, and plan the byte
+ * fetch for a pinned package (never hits the network). Modrinth / CurseForge /
+ * URL / local each implement this.
  */
 export interface Source {
   readonly kind: SourceKind;
-  /** Resolve a ref to a fully-pinned package. May perform network I/O. */
-  resolve(ref: ResolvedRef, ctx: SourceContext): Promise<LockPackage>;
+  /** Resolve a ref to a fully-pinned package (+ required deps). May do network I/O. */
+  resolve(ref: ResolvedRef, ctx: SourceContext): Promise<ResolveResult>;
   /** Produce the byte-fetch plan for an already-pinned package. No network I/O. */
   plan(pkg: LockPackage, ctx: SourceContext): FetchPlan;
 }

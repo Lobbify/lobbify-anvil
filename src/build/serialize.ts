@@ -1,12 +1,11 @@
 /**
- * Deterministic JSON serialization for the on-disk locks Stage 1 reads and writes.
+ * Deterministic JSON helpers.
  *
- * NOTE — interim format. Stage 2 introduces the canonical, diff-friendly **TOML**
- * lock (`anvil.lock`) and its reader/writer in `src/lock/`. Until then, the build
- * engine reads its input lock and records the built-lock ref as canonical JSON
- * (recursively key-sorted, `/`-separated paths) so the bytes are stable and this
- * layer is self-contained. The Lockfile *object* is the real contract; only its
- * serialization changes in Stage 2.
+ * `canonicalJson` (recursively key-sorted, stable) is used to fingerprint the
+ * manifest for `meta.manifestHash` and to record the internal built-lock ref
+ * (`.anvil/refs/built`). The user-facing `anvil.lock` is canonical **TOML** (see
+ * `src/lock/`); the internal built ref stays canonical JSON — it is not the lock
+ * artifact, only the incremental baseline + GC root, and JSON keeps it simple.
  */
 
 import type { Lockfile } from "../types/index.js";
@@ -37,10 +36,12 @@ export function canonicalJson(value: unknown): string {
   return `${JSON.stringify(normalize(value), null, 2)}\n`;
 }
 
-export function serializeLock(lock: Lockfile): string {
+/** Serialize the internal built-lock ref as canonical JSON. */
+export function serializeRefJson(lock: Lockfile): string {
   return canonicalJson(lock);
 }
 
-export function deserializeLock(text: string): Lockfile {
+/** Parse the internal built-lock ref. */
+export function parseRefJson(text: string): Lockfile {
   return JSON.parse(text) as Lockfile;
 }

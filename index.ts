@@ -33,3 +33,9 @@ export * from "./src/types/index.js";
 // Stage 1 — the content store + atomic build engine.
 export * from "./src/store/index.js";
 export * from "./src/build/index.js";
+
+// Stage 2 — the manifest, sources, resolver, and canonical lock writer.
+export * from "./src/manifest/index.js";
+export * from "./src/sources/index.js";
+export * from "./src/resolver/index.js";
+export * from "./src/lock/index.js";

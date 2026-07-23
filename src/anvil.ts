@@ -18,11 +18,14 @@ import {
   collectRoots,
   currentPlatform,
   readBuiltLock,
-  readInputLock,
   recoverSwap,
   resolvePaths,
 } from "./build/index.js";
 import type { AnvilEvent, ProgressListener } from "./events.js";
+import { readInputLock, readLockIfPresent, writeLock } from "./lock/index.js";
+import { readManifest } from "./manifest/index.js";
+import { pinsFromLock, resolveManifest } from "./resolver/index.js";
+import { buildRegistry, defaultAllowSource } from "./sources/index.js";
 import { ContentStore, hashFile } from "./store/index.js";
 import { AnvilError, NotImplemented } from "./types/errors.js";
 import type { AnvilOptions, Hash, LockPackage, Lockfile, ManifestItem } from "./types/index.js";
@@ -102,6 +105,19 @@ export class ProgressBus implements AsyncIterable<AnvilEvent> {
 export interface LockOptions {
   /** `true` upgrades everything; a list upgrades only the named packages. */
   readonly upgrade?: boolean | readonly string[];
+}
+
+/** Normalize the `upgrade` option to the resolver's `boolean | Set` shape. */
+function normalizeUpgrade(
+  upgrade: boolean | readonly string[] | undefined,
+): boolean | ReadonlySet<string> | undefined {
+  if (upgrade === undefined || upgrade === false) {
+    return undefined;
+  }
+  if (upgrade === true) {
+    return true;
+  }
+  return new Set(upgrade);
 }
 
 /** Options for {@link Anvil.build}. */
@@ -198,9 +214,48 @@ export class Anvil {
   // Every method below is `async` so it returns a *rejected* promise (never a
   // synchronous throw) — the same contract callers get once bodies land.
 
-  /** `anvil lock` — resolve the manifest and freeze the lockfile. */
-  async lock(_options?: LockOptions): Promise<Lockfile> {
-    throw new NotImplemented("Anvil.lock");
+  /**
+   * `anvil lock` — resolve `anvil.toml` and freeze the fully-pinned `anvil.lock`.
+   *
+   * Resolution runs under a **frozen clock** (`Date.now()` captured once), the
+   * `allowSource` policy gates every ref before any network I/O, and copy items
+   * (Modrinth / URL / local) are admitted to the store as they are hashed so a
+   * following build performs zero network. A prior lock, when present, seeds the
+   * constrained re-lock: untouched items keep their exact pins unless `upgrade`
+   * names them. The canonical TOML lock is written atomically.
+   */
+  async lock(options?: LockOptions): Promise<Lockfile> {
+    const emit = (event: AnvilEvent): void => {
+      this.progress.emit(event);
+    };
+    try {
+      const manifest = await readManifest(this.dir);
+      const paths = await resolvePaths(this.dir, this.#options);
+      const store = new ContentStore({ root: paths.store });
+      const registry = buildRegistry();
+      const prior = await readLockIfPresent(this.dir);
+      const upgrade = normalizeUpgrade(options?.upgrade);
+      const lock = await resolveManifest({
+        manifest,
+        registry,
+        allowSource: this.#options.allowSource ?? defaultAllowSource,
+        now: Date.now(),
+        baseDir: this.dir,
+        offline: this.#options.offline ?? false,
+        store,
+        ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
+        ...(prior ? { lockedPins: pinsFromLock(prior) } : {}),
+        ...(upgrade !== undefined ? { upgrade } : {}),
+        emit,
+      });
+      await writeLock(this.dir, lock);
+      return lock;
+    } catch (err) {
+      if (err instanceof AnvilError) {
+        emit({ type: "error", code: err.code, message: err.message });
+      }
+      throw err;
+    }
   }
 
   /**

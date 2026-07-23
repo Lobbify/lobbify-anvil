@@ -199,6 +199,84 @@ export class SwapRecoveryFailed extends AnvilError {
 }
 
 /**
+ * The `allowSource` policy gate denied a ref. Evaluated **before any network
+ * I/O**, so a malicious manifest cannot trigger a fetch to a source the embedder
+ * has not trusted — this is the malicious-remote veto surface.
+ */
+export class SourceNotAllowed extends AnvilError {
+  readonly source: SourceKind;
+  readonly id: string;
+
+  constructor(source: SourceKind, id: string) {
+    super(
+      "SOURCE_NOT_ALLOWED",
+      `The source policy refused "${source}:${id}". The host app's allowSource() did not permit this source.`,
+    );
+    this.source = source;
+    this.id = id;
+  }
+}
+
+/**
+ * The SSRF guard blocked a `url`-source target: a non-`http(s)` scheme, or a host
+ * that resolves to a loopback / RFC1918 / link-local / cloud-metadata address.
+ * Enforced on the initial request and re-validated on **every** redirect hop.
+ */
+export class SsrfBlocked extends AnvilError {
+  readonly url: string;
+  readonly reason: string;
+
+  constructor(url: string, reason: string) {
+    super("SSRF_BLOCKED", `Refusing to fetch "${url}": ${reason}.`);
+    this.url = url;
+    this.reason = reason;
+  }
+}
+
+/**
+ * A source could not infer an item's kind and refuses to guess (e.g. a `.zip`
+ * that could be a resourcepack, datapack, or shader). The caller must pin the
+ * kind explicitly. A clear lock error rather than a wrong placement folder.
+ */
+export class KindInferenceFailed extends AnvilError {
+  readonly subject: string;
+
+  constructor(subject: string, reason: string) {
+    super(
+      "KIND_INFERENCE_FAILED",
+      `Cannot determine the kind of "${subject}": ${reason}. Set an explicit kind for this item.`,
+    );
+    this.subject = subject;
+  }
+}
+
+/** A network request failed (non-2xx after retries, or a transport error). */
+export class HttpError extends AnvilError {
+  readonly url: string;
+  readonly status?: number;
+
+  constructor(url: string, message: string, status?: number) {
+    super("HTTP_ERROR", `Request to "${url}" failed: ${message}`);
+    this.url = url;
+    this.status = status;
+  }
+}
+
+/** The `anvil.toml` manifest was malformed or referenced an unknown source. */
+export class ManifestError extends AnvilError {
+  constructor(message: string) {
+    super("MANIFEST_INVALID", message);
+  }
+}
+
+/** An `anvil.lock` on disk was malformed or carried an unsupported schema version. */
+export class LockParseError extends AnvilError {
+  constructor(message: string) {
+    super("LOCK_INVALID", message);
+  }
+}
+
+/**
  * A stubbed capability that Stage 0 has typed but not yet implemented. Every
  * public `Anvil` method throws this until its owning stage lands.
  */

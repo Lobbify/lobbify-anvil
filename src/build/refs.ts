@@ -12,7 +12,7 @@ import { ensureDir } from "../internal/fs.js";
 import type { ContentStore } from "../store/index.js";
 import { assetHashes, readAssetIndex } from "../store/index.js";
 import type { Hash, Lockfile } from "../types/index.js";
-import { deserializeLock, serializeLock } from "./serialize.js";
+import { parseRefJson, serializeRefJson } from "./serialize.js";
 
 const REFS_DIR = join(".anvil", "refs");
 const BUILT_REF = join(REFS_DIR, "built");
@@ -21,7 +21,7 @@ const BUILT_REF = join(REFS_DIR, "built");
 export async function readBuiltLock(instanceDir: string): Promise<Lockfile | undefined> {
   try {
     const text = await readFile(join(instanceDir, BUILT_REF), "utf8");
-    return deserializeLock(text);
+    return parseRefJson(text);
   } catch {
     return undefined;
   }
@@ -33,7 +33,7 @@ export async function writeBuiltLock(instanceDir: string, lock: Lockfile): Promi
   await ensureDir(dir);
   const finalPath = join(dir, "built");
   const tmpPath = join(dir, `built.${process.pid}.tmp`);
-  await writeFile(tmpPath, serializeLock(lock));
+  await writeFile(tmpPath, serializeRefJson(lock));
   await rename(tmpPath, finalPath);
 }
 

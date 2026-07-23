@@ -10,7 +10,7 @@ describe("Anvil scaffold", () => {
 
   it("throws NotImplemented from a still-stubbed async method", async () => {
     const anvil = new Anvil({ dir: "/tmp/anvil-smoke" });
-    await expect(anvil.lock()).rejects.toBeInstanceOf(NotImplemented);
+    await expect(anvil.commit("m")).rejects.toBeInstanceOf(NotImplemented);
   });
 
   it("carries a stable error code + name on NotImplemented", () => {
@@ -21,10 +21,9 @@ describe("Anvil scaffold", () => {
   });
 
   it("every not-yet-owned method is stubbed to throw NotImplemented", async () => {
-    // Stage 1 implements build/verify/gc/fsck; the rest land in later stages.
+    // Stage 1 implements build/verify/gc/fsck; Stage 2 adds lock; the rest land later.
     const anvil = new Anvil({ dir: "/tmp/anvil-smoke" });
     const calls: Array<Promise<unknown>> = [
-      anvil.lock(),
       anvil.diff(),
       anvil.commit("m"),
       anvil.branch("b"),

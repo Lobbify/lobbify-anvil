@@ -16,14 +16,17 @@ and the interactive TUI are thin skins that carry **no logic**. It is standalone
 source-agnostic (Modrinth / CurseForge / URL / local); a host app (e.g. Lobbify) supplies
 an `allowSource` policy and calls the library directly.
 
-This repo is at **Stage 1** — the content-addressed store (`src/store/`) and the
-atomic, offline build engine (`src/build/`) now sit on top of the Stage-0 scaffold.
-The remaining subsystems (game installer, sources, resolver, VC, remotes) land in
-Stages 2–9; see `lobbify-anvil-implementation-plan.md`. Public `Anvil` methods are
+This repo is at **Stage 2** — on top of the Stage-0 scaffold and the Stage-1
+content-addressed store (`src/store/`) + atomic build engine (`src/build/`), Stage 2
+adds the manifest (`src/manifest/`), the `Source` layer (`src/sources/`: Modrinth /
+URL / local + the rate-limited HTTP client, SSRF guard, kind inference), the resolver
+(`src/resolver/`), and the canonical deterministic TOML lock writer (`src/lock/`).
+The remaining subsystems (full game installer, CurseForge, VC, remotes) land in
+Stages 3–9; see `lobbify-anvil-implementation-plan.md`. Public `Anvil` methods are
 stubbed to `throw new NotImplemented()` until their owning stage lands — Stage 1
-implements `build` / `verify` / `gc` / `fsck` (the build is offline: it materializes
-from the populated store and fails clearly on the first missing object; the network
-`Source` fetch arrives in Stage 3).
+implements `build` / `verify` / `gc` / `fsck`, and Stage 2 implements `lock`
+(resolve `anvil.toml` → freeze the fully-pinned `anvil.lock`). The build reads only
+the lock; the network `Source` fetch for game/loader/JRE objects arrives in Stage 3.
 
 ## Commands
 
