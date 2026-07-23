@@ -21,6 +21,33 @@ launcher runs it.
 It is **standalone** (no dependency on Lobbify) and **library-first**: the CLI is a
 thin skin over an npm package, and a host app calls the package directly.
 
+## Install
+
+anvil installs **directly from GitHub** — no npm-registry publish required. The package
+builds itself on install (a `prepare` step runs `tsup`), so you get both the library
+(`@lobbify/anvil`) and the working `lobbify-anvil` CLI from a single install.
+
+```bash
+# As a library dependency (import { Anvil } from "@lobbify/anvil")
+npm install github:Lobbify/lobbify-anvil
+# bun add github:Lobbify/lobbify-anvil
+# pnpm add github:Lobbify/lobbify-anvil
+# yarn add github:Lobbify/lobbify-anvil
+
+# As a global CLI
+npm install -g github:Lobbify/lobbify-anvil
+lobbify-anvil --help
+
+# One-off, no install
+npx github:Lobbify/lobbify-anvil --help
+
+# Pin to a released version tag (recommended for reproducibility)
+npm install github:Lobbify/lobbify-anvil#v0.1.0
+```
+
+> The install runs a build (`tsup`), so it takes a few seconds and needs a network
+> connection the first time. Node **20** or **22** is required (see `engines`).
+
 ## The mental model
 
 | Borrowed from | Idea | In anvil |
@@ -38,9 +65,9 @@ content store — which can simply *be* an existing `.minecraft/assets` you alre
 ## Quickstart
 
 ```bash
-# Install the CLI. NOTE: the bin is `lobbify-anvil` (not bare `anvil`, which would
-# collide with Foundry's anvil). Add your own alias if you like: alias anvil=lobbify-anvil
-npm install -g lobbify-anvil
+# Install the CLI from GitHub. NOTE: the bin is `lobbify-anvil` (not bare `anvil`,
+# which would collide with Foundry's anvil). Alias it if you like: alias anvil=lobbify-anvil
+npm install -g github:Lobbify/lobbify-anvil
 lobbify-anvil --version
 
 # Author a pack from vanilla and build a launch-ready instance
