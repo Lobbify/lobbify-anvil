@@ -158,6 +158,46 @@ pushes, or exports** CurseForge bytes — `.mrpack` export omits them with a war
 Everything else (Mojang files, Modrinth jars, local files) is `copy` provenance:
 cacheable and shareable through the content store.
 
+## Trust model & security
+
+**anvil runs build code provided by the sources you build.** Building a Forge or
+NeoForge instance runs that installer's **processors** — JVM programs (the binpatcher,
+the SRG renamer, installertools) that patch the client jar at build time. `anvil build`
+executes them **by default**, using the build's pinned JRE.
+
+This is the same, deliberate **trust-the-source** model you already rely on elsewhere:
+
+| Tool | Runs your source's code |
+|---|---|
+| **git** | hooks (`pre-commit`, `post-checkout`, …) |
+| **npm/yarn/pnpm** | `preinstall` / `postinstall` lifecycle scripts |
+| **docker** | every `RUN` in the `Dockerfile` |
+| **Gradle / Maven** | the build script itself |
+| **anvil** | a Forge/NeoForge installer's processors |
+
+> **Only build instances from sources you trust.** The standalone tool is **not** a
+> sandbox against its own inputs, and does **not** claim to protect you from a
+> malicious modpack, installer, or manifest you chose to build. A processor is
+> arbitrary code; if you don't trust where a pack came from, don't build it.
+
+**What anvil *does* guarantee** is reproducibility and no silent surprises, not
+safety-from-your-inputs: every fetched artifact (including processor jars and their
+classpath deps) is **sha256-pinned** so a rebuild is byte-identical; all network I/O
+goes through an **SSRF-guarded** client; and every archive extraction is **zip-slip
+guarded**. Those are integrity/DoS protections — they are *not* a defense against the
+build code of a source you told it to build.
+
+**Embedding anvil to build from untrusted/remote sources?** Then *you* own the
+sandboxing, and anvil gives you the seams:
+
+- **`allowSource(ref)`** — vetoed **before any network I/O**; refuse sources you don't trust.
+- **`allowProcessor(proc)`** — called before each installer processor runs; return
+  `false` to block it (a typed `PROCESSOR_REFUSED`). Defaults to allow.
+- **a custom `ProcessorRunner`** — inject a runner that wraps the JVM in a real OS
+  sandbox (namespaces / `sandbox-exec` / a container) instead of the default launcher.
+
+See [`SECURITY.md`](./SECURITY.md) for the full model and reporting.
+
 ## Development
 
 ```bash

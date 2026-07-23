@@ -161,9 +161,14 @@ The "join a room / import a pack" path is fully untrusted (manifest + lock + arc
 - **SSRF guard on the `url` source (on by default).** Block non-`http(s)`, and
   loopback/RFC1918/link-local/cloud-metadata IPs; re-validate on every redirect hop;
   show `allowSource` the final host. Stage 2.
-- **Forge/NeoForge processor sandbox.** Installer processors are JVM code run at build
-  time — only run processor jars pinned to official Maven coordinates by sha256; sandbox
-  the JVM (no network, scoped FS); require explicit consent for anything else. Stage 9.
+- **Forge/NeoForge processors — trust the source (NOT a sandbox).** Installer processors
+  are JVM build code; `anvil build` runs them **by default** (trust-the-source, like git
+  hooks / `npm install` / `docker build`). The standalone tool does **not** sandbox
+  against its own inputs and must **not** ship a false "official-coordinate/trusted-host
+  allowlist." Pin every processor jar by sha256 for **reproducibility** (not trust). Keep
+  the host hooks — `allowProcessor` (default allow) and an injectable `ProcessorRunner` —
+  so an embedder building from untrusted sources can deny/confine. Only build from sources
+  you trust; see `SECURITY.md`. Stage 9.
 - **Read `yauzl` not `unzipper`** for zips (`unzipper` eagerly pulls `@aws-sdk` — a prior
   app boot bug). **No telemetry / no phone-home**; any update check is opt-out.
 

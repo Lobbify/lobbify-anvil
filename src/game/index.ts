@@ -6,6 +6,56 @@
 
 export { GameAcquirer } from "./acquire.js";
 export type { GameAcquirerOptions } from "./acquire.js";
+export { runForgeProcessors } from "./forge-build.js";
+export type { RunForgeProcessorsInput } from "./forge-build.js";
+export {
+  classifyBinding,
+  coordOfToken,
+  isCoordToken,
+  outputPathForCoord,
+  parseForgePlan,
+  parseInstallProfile,
+  parseLauncherProfile,
+  serializeForgePlan,
+} from "./forge-install.js";
+export type {
+  ForgeBinding,
+  ForgePlan,
+  ForgeProcessorPlan,
+  InstallLibrary,
+  InstallProcessor,
+  InstallProfile,
+} from "./forge-install.js";
+export {
+  allowAllProcessors,
+  buildExecSpec,
+  checkProcessorAllowed,
+  DEFAULT_PROCESSOR_LIMITS,
+  JvmProcessorRunner,
+} from "./forge-processors.js";
+export type {
+  BuildExecSpecInput,
+  JvmProcessorRunnerOptions,
+  ProcessorCheckInput,
+  ProcessorExecSpec,
+  ProcessorLimits,
+  ProcessorRunner,
+  ProcessorRunResult,
+  ProcessorSpawn,
+} from "./forge-processors.js";
+export {
+  compareForgeVersions,
+  defaultForgeEndpoints,
+  parseMavenMetadataVersions,
+  resolveForge,
+  selectForgeVersion,
+} from "./forge.js";
+export type {
+  ForgeEndpoints,
+  ForgeFlavor,
+  ForgeResolution,
+  ResolveForgeInput,
+} from "./forge.js";
 export {
   joinMavenUrl,
   LoaderApi,

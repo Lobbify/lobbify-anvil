@@ -109,6 +109,29 @@ export interface ManifestItem {
 export type AllowSource = (ref: ResolvedRef) => boolean;
 
 /**
+ * The identity of a Forge/NeoForge installer processor shown to the host-app policy
+ * hook before it runs.
+ */
+export interface ProcessorIdentity {
+  /** The processor jar's maven coordinate (`group:artifact:version[:classifier]`). */
+  readonly coordinate: string;
+  /** The maven repository host the jar was resolved from, when known. */
+  readonly repo?: string;
+  /** The processor jar's sha256 (a reproducibility pin, not a trust token). */
+  readonly sha256: string;
+}
+
+/**
+ * A host-app policy hook for Forge/NeoForge installer processors. Running a
+ * processor is arbitrary code execution driven by the installer you chose to build —
+ * anvil follows the **trust-the-source** model (like `git` hooks, `npm install`
+ * scripts, `docker build`, Gradle), so this **defaults to allow**. It is the seam
+ * where an embedder building from UNTRUSTED sources denies (returns `false`) a
+ * processor before it runs — see SECURITY.md. Modeled on {@link AllowSource}.
+ */
+export type AllowProcessor = (proc: ProcessorIdentity) => boolean;
+
+/**
  * How a materialized object lands in the instance tree. A discriminated union
  * executed by the placement executor.
  *
@@ -122,12 +145,21 @@ export type AllowSource = (ref: ResolvedRef) => boolean;
  * - `store-only` — keep the object in the shared store but place nothing into the
  *   instance tree (e.g. a classpath library or client jar referenced by store
  *   path). Additive member landed in Stage 1 to complete the placement table.
+ * - `forge-build` — the object under `hash` is a **generated Forge/NeoForge install
+ *   plan** (the processor DAG + data bindings, pinned like any object). The build
+ *   reads it, runs each installer processor (Stage 9; trust-the-source, see
+ *   SECURITY.md) reusing the pinned JRE, and writes the produced files (the patched
+ *   client jar +
+ *   any generated libraries) to `outputs` — the complete, deterministic set of
+ *   instance-relative paths the processors produce, declared at lock time so the
+ *   atomic swap and the incremental delta see them as normal targets.
  */
 export type Placement =
   | { readonly method: "link"; readonly target: string }
   | { readonly method: "extract"; readonly targetDir: string }
   | { readonly method: "asset-tree"; readonly indexTarget: string }
   | { readonly method: "runtime-tree"; readonly targetDir: string }
+  | { readonly method: "forge-build"; readonly outputs: readonly string[] }
   | { readonly method: "store-only" };
 
 /**
@@ -369,6 +401,13 @@ export interface AnvilOptions {
   readonly curseforgeKey?: string;
   /** Host-app source policy. Defaults to allow-all for the standalone CLI. */
   readonly allowSource?: AllowSource;
+  /**
+   * Host-app policy hook for Forge/NeoForge installer processors, which execute
+   * build code from the installer you build (trust-the-source; see SECURITY.md).
+   * **Defaults to allow.** An embedder building from untrusted sources returns
+   * `false` here to block a processor, and/or injects a confining processor runner.
+   */
+  readonly allowProcessor?: AllowProcessor;
   /** Build purely from the populated store; error on the first missing object. */
   readonly offline?: boolean;
   /** Explicit proxy override; otherwise `HTTP(S)_PROXY` env is honored. */

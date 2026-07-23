@@ -505,6 +505,76 @@ export class StoreRegistryCorrupt extends AnvilError {
 }
 
 /**
+ * A Forge/NeoForge installer used a layout anvil cannot process (a legacy
+ * pre-`install_profile.json` installer, a missing `install_profile.json` /
+ * `version.json`, or a `spec` version this build does not implement). We fail
+ * loudly and name the requirement rather than half-building a broken instance.
+ */
+export class UnsupportedInstaller extends AnvilError {
+  readonly subject: string;
+
+  constructor(subject: string, reason: string) {
+    super(
+      "UNSUPPORTED_INSTALLER",
+      `Cannot process the "${subject}" installer: ${reason}. This Forge/NeoForge layout is not supported.`,
+    );
+    this.subject = subject;
+  }
+}
+
+/**
+ * A Forge/NeoForge installer **processor** will not run. anvil follows the
+ * trust-the-source model (running an installer's processors is arbitrary build code,
+ * like `git` hooks / `npm install` scripts / `docker build`), so a processor runs by
+ * default — this is raised only when the host app's `allowProcessor` policy hook
+ * **denies** it (an embedder building from untrusted sources), or when the jar lacks
+ * the sha256 **reproducibility** pin required to run it deterministically. It is a
+ * host-policy / reproducibility refusal, NOT anvil enforcing a security boundary
+ * against a malicious input — see SECURITY.md.
+ */
+export class ProcessorRefused extends AnvilError {
+  readonly coordinate: string;
+  readonly reason: string;
+
+  constructor(coordinate: string, reason: string) {
+    super(
+      "PROCESSOR_REFUSED",
+      `Will not run installer processor "${coordinate}": ${reason}. anvil runs the processors of the installer you build by default (trust-the-source); this is a host-policy (allowProcessor) or reproducibility-pin refusal — only build instances from sources you trust.`,
+    );
+    this.coordinate = coordinate;
+    this.reason = reason;
+  }
+}
+
+/**
+ * An installer processor did not complete successfully: a non-zero exit, a timeout,
+ * or it failed to produce a declared output. Distinct from a refusal (it never ran) —
+ * this ran and failed.
+ */
+export class ProcessorFailed extends AnvilError {
+  readonly subject: string;
+
+  constructor(subject: string, reason: string) {
+    super("PROCESSOR_FAILED", `Installer processor "${subject}" failed: ${reason}.`);
+    this.subject = subject;
+  }
+}
+
+/**
+ * A processor needs a JVM but none is available. The build already installs a
+ * pinned per-platform JRE; processors reuse that java binary and never shell to an
+ * ambient `java` on `PATH`. This names the missing requirement.
+ */
+export class JreUnavailable extends AnvilError {
+  constructor(reason: string) {
+    super(
+      "JRE_UNAVAILABLE",
+      `No pinned JRE is available to run installer processors: ${reason}. The build installs a per-platform JRE which processors reuse — anvil never runs an ambient \`java\`.`,
+    );
+  }
+}
+
+/**
  * A stubbed capability that Stage 0 has typed but not yet implemented. Every
  * public `Anvil` method throws this until its owning stage lands.
  */

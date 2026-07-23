@@ -32,8 +32,8 @@ import {
 } from "./build/index.js";
 import type { AnvilEvent, ProgressListener } from "./events.js";
 import { exportMrpack } from "./export/index.js";
-import type { MojangApiOptions } from "./game/index.js";
-import { GameAcquirer, isGamePackage, resolveGame } from "./game/index.js";
+import type { ForgeEndpoints, MojangApiOptions, ProcessorRunner } from "./game/index.js";
+import { GameAcquirer, JvmProcessorRunner, isGamePackage, resolveGame } from "./game/index.js";
 import {
   ApiIdentityResolver,
   importCurseForgeZip,
@@ -145,8 +145,17 @@ export interface AnvilEnv {
   readonly mojangOptions?: MojangApiOptions;
   /** Fabric/Quilt loader-meta base override. */
   readonly loaderMetaBase?: string;
+  /** Forge/NeoForge maven + promotions endpoint overrides (mirrors / fixtures). */
+  readonly forgeEndpoints?: ForgeEndpoints;
   /** Mojang asset-object CDN base override. */
   readonly resourcesBase?: string;
+  /**
+   * The JVM runner Forge/NeoForge installer processors replay through (Stage 9).
+   * Defaults to {@link JvmProcessorRunner} (launches the pinned `java`, no
+   * confinement — trust the source). A host app building from untrusted sources
+   * injects a confining runner here; tests inject a hermetic fake.
+   */
+  readonly processorRunner?: () => ProcessorRunner;
   /**
    * The clock version control stamps commits with (ms). Display-only — history
    * order is by generation number, never wall-clock. Tests inject a controlled
@@ -653,6 +662,16 @@ export class Anvil {
   }
 
   /**
+   * The JVM runner Forge/NeoForge installer processors replay through. Defaults to
+   * {@link JvmProcessorRunner}, which launches the build's pinned `java` (no
+   * confinement — trust the source you build). A host app building from untrusted
+   * sources injects a confining runner; a test injects a hermetic fake.
+   */
+  #processorRunner(): ProcessorRunner {
+    return this.#env.processorRunner?.() ?? new JvmProcessorRunner();
+  }
+
+  /**
    * Resolve the game install (client + libraries + natives + assets + pinned JRE
    * + optional loader) at lock time, or — offline — carry the prior lock's game
    * pins forward verbatim (a full game re-resolve needs the network).
@@ -690,6 +709,8 @@ export class Anvil {
       store,
       ...(this.#env.mojangOptions ? { mojangOptions: this.#env.mojangOptions } : {}),
       ...(this.#env.loaderMetaBase ? { loaderMetaBase: this.#env.loaderMetaBase } : {}),
+      ...(this.#env.forgeEndpoints ? { forgeEndpoints: this.#env.forgeEndpoints } : {}),
+      ...(this.#options.allowProcessor ? { allowProcessor: this.#options.allowProcessor } : {}),
     });
     return { packages: game.packages, java: game.java, loader: game.loader };
   }
@@ -786,6 +807,10 @@ export class Anvil {
           replayCache,
           platform: currentPlatform(),
           previousLock,
+          // The processor runner (+ host allowProcessor policy) for a Forge/NeoForge
+          // lock; harmless for any other build.
+          processorRunner: this.#processorRunner(),
+          ...(this.#options.allowProcessor ? { allowProcessor: this.#options.allowProcessor } : {}),
           // Honor a mapped `[paths].assets` shared pool; absent → the instance's
           // own `assets/` is materialized self-contained (index + objects).
           ...(paths.assets ? { assetsDir: paths.assets } : {}),
@@ -1276,6 +1301,8 @@ export class Anvil {
         acquire,
         replayCache,
         platform: currentPlatform(),
+        processorRunner: this.#processorRunner(),
+        ...(this.#options.allowProcessor ? { allowProcessor: this.#options.allowProcessor } : {}),
         ...(previousLock ? { previousLock } : {}),
         emit,
       });
