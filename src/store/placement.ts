@@ -5,8 +5,10 @@
  *   - `link`       — link the object to a single target path (mod/resourcepack).
  *   - `extract`    — safe-extract the object (a natives jar) under a target dir,
  *                    excluding `META-INF/`, through the hardened `safeExtract`.
- *   - `asset-tree` — fan a Mojang asset index into the sha1 store: assert every
- *                    referenced asset object is present, then place the index file.
+ *   - `asset-tree` — materialize a Mojang asset index AND every object it names
+ *                    into the instance's `assets/` tree (`indexes/<id>.json` +
+ *                    `objects/<xx>/<sha1>`), so the folder is a complete,
+ *                    launch-ready `.minecraft` assets dir — not just the index.
  *   - `store-only` — assert the object is present; place nothing in the instance.
  *
  * Every target path passes through `safeJoin`, so a placement can never write
@@ -15,11 +17,12 @@
 
 import { chmod, symlink } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { LinkStrategy } from "../events.js";
-import { ensureDir, safeJoin } from "../internal/fs.js";
+import { ensureDir, pathExists, safeJoin } from "../internal/fs.js";
 import { MissingObject, PathEscape, UnsatisfiableTarget } from "../types/errors.js";
 import type { Hash, LockPackage } from "../types/index.js";
+import { shardOf } from "./hash.js";
 import type { ReplayCache } from "./replay-cache.js";
 import { excludeMetaInf, safeExtract } from "./safe-extract.js";
 import type { ContentStore } from "./store.js";
@@ -50,6 +53,21 @@ export interface PlacementContext {
   readonly store: ContentStore;
   /** The stage root the build materializes into before the atomic swap. */
   readonly stageRoot: string;
+  /**
+   * The instance root. An `asset-tree` fans its object closure into this
+   * instance's `assets/objects/<xx>/<sha1>` (additive, content-addressed,
+   * idempotent) so the built folder is a self-contained, launch-ready
+   * `.minecraft` — the index alone (staged + swapped) is not enough.
+   */
+  readonly instanceDir: string;
+  /**
+   * The mapped `[paths].assets` shared object pool, when the instance redirects
+   * `assets` to a directory the machine already has (e.g. an existing
+   * `.minecraft/assets`). Asset objects then land in THAT pool instead of a
+   * per-instance copy, and the instance references it through a single
+   * `assets/objects` symlink — the folder stays a complete `.minecraft` either way.
+   */
+  readonly assetsDir?: string;
   /**
    * The per-instance replay cache. A `provenance: "replay"` package is
    * materialized **from here**, never from the shared store — the storage-layer
@@ -173,17 +191,8 @@ export async function executePlacement(
       await safeExtract(ctx.store.objectPath(pkg.hash), destDir, { exclude: excludeMetaInf });
       return { targets: [p.targetDir] };
     }
-    case "asset-tree": {
-      const index = await readAssetIndex(ctx.store, pkg.hash);
-      for (const hash of assetHashes(index)) {
-        if (!(await ctx.store.has(hash))) {
-          throw new MissingObject(hash, `asset of ${pkg.name}`);
-        }
-      }
-      const dest = safeJoin(ctx.stageRoot, p.indexTarget);
-      const strategy = await ctx.store.materialize(pkg.hash, dest);
-      return { targets: [p.indexTarget], strategy };
-    }
+    case "asset-tree":
+      return materializeAssetTree(pkg, p.indexTarget, ctx);
     case "runtime-tree": {
       const destRoot = safeJoin(ctx.stageRoot, p.targetDir);
       await materializeRuntime(pkg, destRoot, ctx);
@@ -198,6 +207,71 @@ export async function executePlacement(
     default:
       return { targets: [] };
   }
+}
+
+/**
+ * Materialize an asset index AND its whole object closure so the instance's
+ * `assets/` is a complete, launch-ready `.minecraft` assets dir (index +
+ * objects) — the fix for a build that placed only the index and left
+ * `assets/objects/` empty (neither the instance nor the store was, on its own, a
+ * complete assets dir).
+ *
+ * Every sha1 object the index names is fanned out of the store's asset domain
+ * into `assets/objects/<xx>/<sha1>` through the store's reflink→hardlink→symlink→
+ * copy chain, **idempotently**: an object already present (a prior build, a shared
+ * MC version, or the mapped pool) is left untouched, so a rebuild re-links nothing
+ * and the tree stays byte-deterministic. Objects are additive and content-
+ * addressed, so writing them straight into the instance (before the index is
+ * swapped in) can never corrupt the currently-live build — the old index still
+ * references only objects that remain present.
+ *
+ * The small index file itself flips atomically through the stage → swap, so a
+ * launcher never observes an index without the objects it references.
+ *
+ * `[paths].assets` mapping: when `ctx.assetsDir` redirects assets to a shared
+ * external pool, objects land THERE (no per-instance copy) and the instance
+ * references the pool through a single `assets/objects` symlink.
+ */
+async function materializeAssetTree(
+  pkg: LockPackage,
+  indexTarget: string,
+  ctx: PlacementContext,
+): Promise<PlacementOutcome> {
+  const index = await readAssetIndex(ctx.store, pkg.hash);
+
+  const instanceAssets = resolve(ctx.instanceDir, "assets");
+  const assetsRoot = ctx.assetsDir ? resolve(ctx.assetsDir) : instanceAssets;
+  const objectsRoot = join(assetsRoot, "objects");
+  const external = assetsRoot !== instanceAssets;
+
+  // Fan every referenced object out of the store into the object pool. Presence
+  // is asserted first (the acquirer brings these ahead of the build) so a missing
+  // object is a clear MissingObject, never a silent gap in a "built" instance.
+  for (const hash of assetHashes(index)) {
+    if (!(await ctx.store.has(hash))) {
+      throw new MissingObject(hash, `asset of ${pkg.name}`);
+    }
+    const dest = safeJoin(objectsRoot, join(shardOf(hash.value), hash.value));
+    if (await pathExists(dest)) {
+      continue; // idempotent — an object already in the pool is never re-linked
+    }
+    await ctx.store.materialize(hash, dest);
+  }
+
+  // A mapped external pool is referenced through one symlink — no per-instance
+  // copy — so the instance folder is still a complete `.minecraft` to point at.
+  if (external) {
+    const link = join(instanceAssets, "objects");
+    if (!(await pathExists(link))) {
+      await ensureDir(instanceAssets);
+      await symlink(objectsRoot, link);
+    }
+  }
+
+  // The index flips atomically through the stage → swap (its objects are down).
+  const dest = safeJoin(ctx.stageRoot, indexTarget);
+  const strategy = await ctx.store.materialize(pkg.hash, dest);
+  return { targets: [indexTarget], strategy };
 }
 
 /** File modes for a materialized JRE entry — the executable bit is load-bearing. */

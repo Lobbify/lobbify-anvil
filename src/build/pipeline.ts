@@ -42,6 +42,12 @@ export interface BuildEngineInput {
    * lock contains a replay item; a copy-only build may omit it.
    */
   readonly replayCache?: ReplayCache;
+  /**
+   * The mapped `[paths].assets` shared object pool, when set. Asset-tree objects
+   * land there (referenced by an `assets/objects` symlink) instead of a
+   * per-instance copy; absent → the instance's own `assets/` is self-contained.
+   */
+  readonly assetsDir?: string;
   readonly platform: Platform;
   /** The previous built lock, for the incremental delta (usually from refs). */
   readonly previousLock?: Lockfile;
@@ -135,6 +141,8 @@ export async function buildInstance(input: BuildEngineInput): Promise<BuildEngin
     const outcome = await executePlacement(pkg, {
       store,
       stageRoot,
+      instanceDir,
+      ...(input.assetsDir ? { assetsDir: input.assetsDir } : {}),
       ...(input.replayCache ? { replayCache: input.replayCache } : {}),
     });
     if (outcome.targets.length > 0) {

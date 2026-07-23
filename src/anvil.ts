@@ -754,6 +754,9 @@ export class Anvil {
           replayCache,
           platform: currentPlatform(),
           previousLock,
+          // Honor a mapped `[paths].assets` shared pool; absent → the instance's
+          // own `assets/` is materialized self-contained (index + objects).
+          ...(paths.assets ? { assetsDir: paths.assets } : {}),
           emit,
         });
         return { dir: result.dir, objects: result.objects };
@@ -768,9 +771,12 @@ export class Anvil {
 
   /**
    * `anvil verify` — check the materialized instance matches the lock it was
-   * built from (re-hashing every single-file target against its pin). With
-   * `strict`, additionally fails if the instance has drifted from the current
-   * input lock (i.e. a `build` is due).
+   * built from. Re-hashes every single-file `link` target against its pin, and
+   * for every `asset-tree` re-hashes both the index file AND every object it
+   * names under `assets/objects/` — so an instance whose `assets/objects/` is
+   * empty or incomplete FAILS (it is not the launch-ready `.minecraft` the lock
+   * describes). With `strict`, additionally fails if the instance has drifted
+   * from the current input lock (i.e. a `build` is due).
    */
   async verify(options?: VerifyOptions): Promise<VerifyResult> {
     const built = await readBuiltLock(this.dir);
@@ -781,18 +787,19 @@ export class Anvil {
     this.progress.emit({ type: "verify:start", items: targets.length });
     const mismatches: string[] = [];
     for (const pkg of targets) {
-      const rel =
-        pkg.placement.method === "link"
-          ? pkg.placement.target
-          : pkg.placement.method === "asset-tree"
-            ? pkg.placement.indexTarget
-            : "";
-      let ok = false;
-      try {
-        const actual = await hashFile(`${this.dir}/${rel}`, pkg.hash.algo);
-        ok = actual.value === pkg.hash.value;
-      } catch {
-        ok = false;
+      const placement = pkg.placement;
+      let ok: boolean;
+      if (placement.method === "asset-tree") {
+        ok = await this.#hashMatches(placement.indexTarget, pkg.hash);
+        // The index alone is not the instance — every object it references must
+        // also be materialized + hash-correct, or the folder won't launch.
+        if (ok && (await this.#unmaterializedAssets(placement.indexTarget)) > 0) {
+          ok = false;
+        }
+      } else if (placement.method === "link") {
+        ok = await this.#hashMatches(placement.target, pkg.hash);
+      } else {
+        continue; // filtered to link | asset-tree above — unreachable
       }
       if (!ok) {
         mismatches.push(pkg.name);
@@ -811,6 +818,43 @@ export class Anvil {
       mismatches: mismatches.length,
     });
     return { ok: mismatches.length === 0, mismatches };
+  }
+
+  /** True when the instance file at `rel` re-hashes to `expected` (missing → false). */
+  async #hashMatches(rel: string, expected: Hash): Promise<boolean> {
+    try {
+      const actual = await hashFile(join(this.dir, rel), expected.algo);
+      return actual.value === expected.value;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Count the objects an asset index names that are missing or hash-wrong under
+   * the instance's `assets/objects/` — i.e. how far the instance is from being a
+   * complete assets dir. `0` means every indexed object is materialized and
+   * correct; anything above `0` is a launch-blocking gap `verify` must report.
+   * The objects dir is derived from the index target (`…/indexes/<id>.json` →
+   * `…/objects/<xx>/<sha1>`), so it follows a mapped-assets symlink transparently.
+   */
+  async #unmaterializedAssets(indexTarget: string): Promise<number> {
+    let objects: Record<string, { hash: string }>;
+    try {
+      const raw = await readFile(join(this.dir, indexTarget), "utf8");
+      objects = (JSON.parse(raw) as { objects?: Record<string, { hash: string }> }).objects ?? {};
+    } catch {
+      return 1; // an unreadable/corrupt index is itself a failure
+    }
+    const assetsBase = indexTarget.split("/").slice(0, -2); // drop `indexes/<id>.json`
+    let missing = 0;
+    for (const { hash } of Object.values(objects)) {
+      const rel = [...assetsBase, "objects", hash.slice(0, 2), hash].join("/");
+      if (!(await this.#hashMatches(rel, { algo: "sha1", value: hash }))) {
+        missing += 1;
+      }
+    }
+    return missing;
   }
 
   /** The platform-applicable package set of a lock, keyed by name. */
