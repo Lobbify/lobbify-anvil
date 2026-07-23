@@ -103,6 +103,15 @@ describe("CLI end-to-end (offline)", () => {
     expect(lock.stdout.trim().split("\n")).toHaveLength(1);
   });
 
+  it("a usage error still honors the --json contract (one object, non-zero exit)", async () => {
+    const res = await cli.run(["init", "--name", "pack", "--json"]); // missing --minecraft
+    expect(res.code).not.toBe(0);
+    const parsed = JSON.parse(res.stdout.trim());
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.exitCode).toBe(res.code);
+    expect(res.stdout.trim().split("\n")).toHaveLength(1);
+  });
+
   it("GATE: --offline errors clearly on a missing object with a stable exit code", async () => {
     await cli.run(["init", "--name", "pack", "--mc", MC, "--loader", `fabric ${FABRIC_LOADER}`]);
     await cli.run(["add", "modrinth:sodium"]);

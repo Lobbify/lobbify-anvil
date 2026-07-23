@@ -27,7 +27,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
 import { writeGraph } from "../build/graph.js";
@@ -41,7 +41,13 @@ import type { DependencyEdge } from "../resolver/index.js";
 import { canonicalKeyOf } from "../resolver/index.js";
 import { defaultAllowSource, guardHop, safeBasename } from "../sources/index.js";
 import { hashBuffer, safeExtract } from "../store/index.js";
-import { AnvilError, ManifestError, ShaMismatch, SourceNotAllowed } from "../types/errors.js";
+import {
+  AnvilError,
+  DecompressionBomb,
+  ManifestError,
+  ShaMismatch,
+  SourceNotAllowed,
+} from "../types/errors.js";
 import type {
   AllowSource,
   Http,
@@ -56,6 +62,12 @@ import { readZipEntry } from "./zip-read.js";
 
 /** A single byte-download bomb bound during import. */
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
+
+/** Reject a `.mrpack` archive larger than this before reading it into memory. */
+const MAX_MRPACK_BYTES = 128 * 1024 * 1024;
+
+/** Cap the file fan-out so a pack listing millions of entries can't exhaust us. */
+const MAX_PACK_FILES = 10_000;
 
 /** The pre-resolved game install a pack's `[game]` deps expand to. */
 export interface GamePinsForImport {
@@ -223,7 +235,9 @@ function pickMirror(downloads: readonly string[], subject: string): string {
   const https = downloads.filter((u) => /^https:\/\//i.test(u));
   const modrinth = https.find((u) => {
     try {
-      return new URL(u).hostname.endsWith("modrinth.com");
+      // Exact-suffix match so `evilmodrinth.com` is NOT treated as the CDN.
+      const h = new URL(u).hostname.toLowerCase();
+      return h === "modrinth.com" || h.endsWith(".modrinth.com");
     } catch {
       return false;
     }
@@ -288,6 +302,13 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
   const allowSource = input.allowSource ?? defaultAllowSource;
   const warnings: string[] = [];
 
+  // Size-gate the untrusted archive before slurping it into memory (OOM guard).
+  const archiveSize = (await stat(input.archivePath)).size;
+  if (archiveSize > MAX_MRPACK_BYTES) {
+    throw new DecompressionBomb(
+      `.mrpack "${input.archivePath}" is ${archiveSize} bytes, over the ${MAX_MRPACK_BYTES} limit`,
+    );
+  }
   const archiveBytes = new Uint8Array(await readFile(input.archivePath));
   const indexBytes = await readZipEntry(archiveBytes, "modrinth.index.json");
   if (!indexBytes) {
@@ -296,6 +317,11 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
     );
   }
   const index = parseIndex(indexBytes);
+  if ((index.files?.length ?? 0) > MAX_PACK_FILES) {
+    throw new DecompressionBomb(
+      `.mrpack lists ${index.files?.length} files, over the ${MAX_PACK_FILES} limit`,
+    );
+  }
 
   const deps = index.dependencies ?? {};
   const minecraft = deps.minecraft;
@@ -324,7 +350,7 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
       warnings.push(`skipped unsafe file path: ${file.path}`);
       continue;
     }
-    const top = file.path.split("/")[0] ?? "";
+    const top = file.path.split(/[/\\]/)[0] ?? "";
     if (isProtectedTop(top)) {
       warnings.push(`skipped file targeting a protected path: ${file.path}`);
       continue;
@@ -411,49 +437,53 @@ async function importOverrides(
   await rm(stageDir, { recursive: true, force: true });
   await ensureDir(stageDir);
 
-  // safeExtract applies every zip-slip / symlink / bomb guard; we only keep the
-  // two override subtrees.
-  await safeExtract(input.archivePath, stageDir, {
-    exclude: (name) => !(name.startsWith("overrides/") || name.startsWith("client-overrides/")),
-  });
-
-  // Map destRel → absolute staged source; client-overrides/ processed last so it
-  // overwrites plain overrides/ for the same path (config precedence).
-  const chosen = new Map<string, string>();
-  for (const prefix of ["overrides", "client-overrides"]) {
-    const sub = join(stageDir, prefix);
-    for await (const rel of walkFiles(sub)) {
-      chosen.set(rel, join(sub, rel));
-    }
-  }
-
   let count = 0;
-  for (const [destRel, absSrc] of chosen) {
-    const top = destRel.split("/")[0] ?? "";
-    if (isProtectedTop(top) || isUnsafePackPath(destRel)) {
-      warnings.push(`skipped override targeting a protected/unsafe path: ${destRel}`);
-      continue;
-    }
-    const bytes = new Uint8Array(await readFile(absSrc));
-    const hash = hashBuffer(bytes, "sha256");
-    await input.store.putBuffer(bytes, "sha256", hash);
-    const trackedPath = join(trackedRoot, destRel);
-    await mkdir(join(trackedPath, ".."), { recursive: true });
-    await copyFile(absSrc, trackedPath);
-    placeable.set(destRel, {
-      name: safeBasename(destRel, ".txt"),
-      kind: kindForPackPath(destRel),
-      source: "local",
-      hash,
-      provenance: "copy",
-      placement: { method: "link", target: destRel },
-      size: bytes.byteLength,
-      url: pathToFileURL(trackedPath).toString(),
+  try {
+    // safeExtract applies every zip-slip / symlink / bomb guard; we only keep the
+    // two override subtrees.
+    await safeExtract(input.archivePath, stageDir, {
+      exclude: (name) => !(name.startsWith("overrides/") || name.startsWith("client-overrides/")),
     });
-    onStored(hash);
-    count += 1;
-  }
 
-  await rm(stageDir, { recursive: true, force: true });
+    // Map destRel → absolute staged source; client-overrides/ processed last so
+    // it overwrites plain overrides/ for the same path (config precedence).
+    const chosen = new Map<string, string>();
+    for (const prefix of ["overrides", "client-overrides"]) {
+      const sub = join(stageDir, prefix);
+      for await (const rel of walkFiles(sub)) {
+        chosen.set(rel, join(sub, rel));
+      }
+    }
+
+    for (const [destRel, absSrc] of chosen) {
+      const top = destRel.split(/[/\\]/)[0] ?? "";
+      if (isProtectedTop(top) || isUnsafePackPath(destRel)) {
+        warnings.push(`skipped override targeting a protected/unsafe path: ${destRel}`);
+        continue;
+      }
+      const bytes = new Uint8Array(await readFile(absSrc));
+      const hash = hashBuffer(bytes, "sha256");
+      await input.store.putBuffer(bytes, "sha256", hash);
+      const trackedPath = join(trackedRoot, destRel);
+      await mkdir(join(trackedPath, ".."), { recursive: true });
+      // Write the already-read+hashed bytes (no re-read → no TOCTOU on absSrc).
+      await writeFile(trackedPath, bytes);
+      placeable.set(destRel, {
+        name: safeBasename(destRel, ".txt"),
+        kind: kindForPackPath(destRel),
+        source: "local",
+        hash,
+        provenance: "copy",
+        placement: { method: "link", target: destRel },
+        size: bytes.byteLength,
+        url: pathToFileURL(trackedPath).toString(),
+      });
+      onStored(hash);
+      count += 1;
+    }
+  } finally {
+    // Always reap the staging dir, even if extraction/placement threw.
+    await rm(stageDir, { recursive: true, force: true });
+  }
   return count;
 }

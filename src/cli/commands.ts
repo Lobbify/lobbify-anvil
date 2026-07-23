@@ -100,7 +100,16 @@ export class InitCommand extends AnvilCommand {
 
   override async execute(): Promise<number> {
     if (!this.minecraft) {
-      this.context.stderr.write("error: --minecraft <version> is required for `init`\n");
+      const message = "`init` requires --minecraft <version>";
+      // Keep the --json contract: exactly one JSON object on stdout, else plain
+      // stderr — never a mixed/empty payload a CI parser would choke on.
+      if (this.json) {
+        this.context.stdout.write(
+          `${JSON.stringify({ ok: false, error: { code: "USAGE", message, exitCode: EXIT_ERROR } })}\n`,
+        );
+      } else {
+        this.context.stderr.write(`error: ${message}\n`);
+      }
       return EXIT_ERROR;
     }
     const name = this.name ?? basename(this.instanceDir());
