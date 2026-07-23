@@ -208,6 +208,41 @@ export class CurseForgeApi {
     );
     return doc.data ?? null;
   }
+
+  /**
+   * `POST /v1/fingerprints` — reverse-lookup files by their Murmur2 fingerprint
+   * (see {@link curseforgeFingerprint}). Used by the Prism importer to re-identify
+   * a local jar as a CurseForge project/file. Returns the matched
+   * `{ fingerprint → { modId, fileId } }` pairs. Requires an `Http` that supports
+   * POST (the batch endpoint is POST-only); a GET-only client yields no matches.
+   */
+  async matchFingerprints(
+    fingerprints: readonly number[],
+  ): Promise<Map<number, { modId: number; fileId: number }>> {
+    const out = new Map<number, { modId: number; fileId: number }>();
+    if (fingerprints.length === 0 || !this.#http.post) {
+      return out;
+    }
+    const body = new TextEncoder().encode(JSON.stringify({ fingerprints: [...fingerprints] }));
+    const res = await this.#http.post(`${this.#base}/v1/fingerprints`, body, {
+      headers: this.#headers(),
+      maxBytes: MAX_FILE_BYTES,
+    });
+    const doc = decodeJson<{
+      data?: { exactMatches?: ReadonlyArray<{ file?: { id?: number; modId?: number } }> };
+    }>(res.body);
+    for (const match of doc.data?.exactMatches ?? []) {
+      const file = match.file;
+      if (file && typeof file.id === "number" && typeof file.modId === "number") {
+        // The endpoint echoes back the input fingerprint on each match.
+        const fp = (match.file as { fileFingerprint?: number }).fileFingerprint;
+        if (typeof fp === "number") {
+          out.set(fp, { modId: file.modId, fileId: file.id });
+        }
+      }
+    }
+    return out;
+  }
 }
 
 /**

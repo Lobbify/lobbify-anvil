@@ -12,11 +12,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  Anvil,
   ContentStore,
   CurseForgeSource,
   NetworkAcquirer,
-  NotImplemented,
   ReplayAcquirer,
   ReplayCache,
   UnsatisfiableTarget,
@@ -218,12 +216,23 @@ describe("ToS/replay audit — CF bytes never reach a shared/pushable/exported l
     expect(roots).not.toContain(sha256hex(cfBytes)); // replay is NOT
   });
 
-  it("no export / push transfer path exists yet — no surface can exfiltrate replay bytes", async () => {
-    const dir = await mkTmp("inst");
-    dirs.push(dir);
-    const anvil = new Anvil({ dir });
-    await expect(anvil.export(join(dir, "out.mrpack"))).rejects.toBeInstanceOf(NotImplemented);
-    await expect(anvil.push()).rejects.toBeInstanceOf(NotImplemented);
+  it("the Stage-7 export / push / pull paths never enumerate the replay cache", async () => {
+    // The transfer + export code physically cannot see a replay object: it reads
+    // only the shared store and skips `provenance: "replay"` rows. Assert none of
+    // the new surfaces references the replay cache at all, and that each explicitly
+    // excludes replay rows.
+    const exportSrc = await src("export/mrpack-export.ts");
+    const syncSrc = await src("remote/sync.ts");
+    const transferSrc = await src("remote/transfer.ts");
+    for (const text of [exportSrc, syncSrc, transferSrc]) {
+      expect(text).not.toMatch(/replay-cache/i);
+      expect(text).not.toMatch(/ReplayCache/);
+      expect(text).not.toMatch(/replayCache/);
+    }
+    // export omits replay; push/transfer skip replay rows before any byte moves.
+    expect(exportSrc).toMatch(/provenance === "replay"/);
+    expect(syncSrc).toMatch(/provenance === "replay"/);
+    expect(transferSrc).toMatch(/provenance !== "copy"/);
   });
 
   // --- (4) source code-path trace: the store layer cannot see the cache -------

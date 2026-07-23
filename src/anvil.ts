@@ -12,9 +12,9 @@
  * replay-never-rehosted) are enforced as these methods gain real bodies.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Acquirer, WhyResult } from "./build/index.js";
+import type { Acquirer, BuildEngineResult, WhyResult } from "./build/index.js";
 import {
   StoreOnlyAcquirer,
   buildInstance,
@@ -30,10 +30,18 @@ import {
   writeGraph,
 } from "./build/index.js";
 import type { AnvilEvent, ProgressListener } from "./events.js";
+import { exportMrpack } from "./export/index.js";
 import type { MojangApiOptions } from "./game/index.js";
 import { GameAcquirer, isGamePackage, resolveGame } from "./game/index.js";
-import { importCurseForgeZip, importMrpack, readZipEntry } from "./import/index.js";
+import {
+  ApiIdentityResolver,
+  importCurseForgeZip,
+  importMrpack,
+  importPrism,
+  readZipEntry,
+} from "./import/index.js";
 import { ensureDir, pathExists } from "./internal/fs.js";
+import { instanceLockPath, storeLockPath, withLock } from "./internal/lock.js";
 import { comparePackages, readInputLock, readLockIfPresent, writeLock } from "./lock/index.js";
 import {
   MANIFEST_FILENAME,
@@ -43,10 +51,26 @@ import {
   refKey,
   writeManifest,
 } from "./manifest/index.js";
+import type { CloneOutcome, PullOutcome, PushOutcome, RunBuild } from "./remote/index.js";
+import {
+  RemotePullAcquirer,
+  addRemote as addRemoteToConfig,
+  cloneInstance,
+  listRemotes,
+  makeDescriptor,
+  makeTransport,
+  pullInstance,
+  pushInstance,
+  removeRemote as removeRemoteFromConfig,
+  resolveRemote,
+} from "./remote/index.js";
+import type { RemoteDescriptor, RemoteKind } from "./remote/index.js";
 import type { DependencyEdge } from "./resolver/index.js";
 import { pinsFromLock, resolveManifest } from "./resolver/index.js";
 import type { SourceRegistry } from "./sources/index.js";
 import {
+  CurseForgeApi,
+  ModrinthApi,
   NetworkAcquirer,
   RateLimitedHttp,
   ReplayAcquirer,
@@ -58,7 +82,7 @@ import { ContentStore, ReplayCache, hashBuffer, hashFile } from "./store/index.j
 import {
   AnvilError,
   ManifestError,
-  NotImplemented,
+  RemoteNotFound,
   UnsatisfiableTarget,
   VcStateError,
 } from "./types/errors.js";
@@ -354,10 +378,57 @@ export interface RebaseOptions {
   readonly onConflict?: OnConflict;
 }
 
+/** Options for {@link Anvil.clone}. */
+export interface CloneOptions {
+  /** The remote name to record (default `origin`). */
+  readonly name?: string;
+  /** The branch/ref to track (default `main`). */
+  readonly ref?: string;
+  /** Force a remote kind instead of inferring it from the URL. */
+  readonly kind?: RemoteKind;
+}
+
+/** Result of a {@link Anvil.clone}. */
+export interface CloneResult {
+  readonly dir: string;
+  /** The commit HEAD was set to (`algo:value`). */
+  readonly commit: string;
+  readonly branch: string;
+  /** Content objects transferred during the in-place build. */
+  readonly objects: number;
+}
+
 /** Result of a {@link Anvil.pull}. */
 export interface PullResult {
+  /** Commits fast-forwarded past (0 when already up to date). */
   readonly fastForwarded: number;
+  /** Content objects transferred (fetched, not deduped). */
   readonly objects: number;
+  /** True when the local branch already contained the remote tip. */
+  readonly upToDate: boolean;
+  /** The `local/<ts>` branch local commits were stashed onto, on divergence. */
+  readonly stashedTo?: string;
+}
+
+/** Result of a {@link Anvil.push}. */
+export interface PushResult {
+  /** The commit published (`algo:value`). */
+  readonly commit: string;
+  readonly branch: string;
+  /** Copy content objects published (never a replay object). */
+  readonly objects: number;
+}
+
+/** Result of a {@link Anvil.export}. */
+export interface ExportResult {
+  readonly path: string;
+  /** `files[]` entries written (copy items with a rehostable URL). */
+  readonly files: number;
+  /** `overrides/` files written. */
+  readonly overrides: number;
+  /** CurseForge (replay) items omitted per the ToS. */
+  readonly omitted: readonly string[];
+  readonly warnings: readonly string[];
 }
 
 /** Result of a store GC pass. */
@@ -660,28 +731,33 @@ export class Anvil {
       this.progress.emit(event);
     };
     try {
-      await recoverSwap(this.dir);
-      const paths = await resolvePaths(this.dir, this.#options);
-      const store = new ContentStore({ root: paths.store });
-      const lock = await readInputLock(this.dir);
-      const previousLock = await readBuiltLock(this.dir);
-      const offline = options?.offline ?? this.#options.offline ?? false;
-      // The per-instance replay cache — where CurseForge (replay) bytes are
-      // materialized from. Physically separate from the shared store so the
-      // store-serve / GC / transfer / export code cannot enumerate CF bytes.
-      const replayCache = new ReplayCache({ instanceDir: this.dir });
-      const acquire = this.#buildAcquirer(store, replayCache, offline, emit);
-      const result = await buildInstance({
-        instanceDir: this.dir,
-        lock,
-        store,
-        acquire,
-        replayCache,
-        platform: currentPlatform(),
-        previousLock,
-        emit,
+      // The per-instance process lock (`.anvil/lock`) serializes mutating ops on
+      // this instance, so two concurrent builds (or a build racing a pull) can
+      // never interleave the atomic swap or the VC ref database.
+      return await withLock(instanceLockPath(this.dir), async () => {
+        await recoverSwap(this.dir);
+        const paths = await resolvePaths(this.dir, this.#options);
+        const store = new ContentStore({ root: paths.store });
+        const lock = await readInputLock(this.dir);
+        const previousLock = await readBuiltLock(this.dir);
+        const offline = options?.offline ?? this.#options.offline ?? false;
+        // The per-instance replay cache — where CurseForge (replay) bytes are
+        // materialized from. Physically separate from the shared store so the
+        // store-serve / GC / transfer / export code cannot enumerate CF bytes.
+        const replayCache = new ReplayCache({ instanceDir: this.dir });
+        const acquire = this.#buildAcquirer(store, replayCache, offline, emit);
+        const result = await buildInstance({
+          instanceDir: this.dir,
+          lock,
+          store,
+          acquire,
+          replayCache,
+          platform: currentPlatform(),
+          previousLock,
+          emit,
+        });
+        return { dir: result.dir, objects: result.objects };
       });
-      return { dir: result.dir, objects: result.objects };
     } catch (err) {
       if (err instanceof AnvilError) {
         emit({ type: "error", code: err.code, message: err.message });
@@ -923,17 +999,26 @@ export class Anvil {
   }
 
   /**
+   * Run a **mutating** operation under the per-instance process lock, so a VC write
+   * (commit / branch / switch / merge / revert / rebase) can never interleave with a
+   * concurrent build / pull / gc on the same instance's ref database + working tree.
+   */
+  #locked<T>(fn: () => Promise<T>): Promise<T> {
+    return withLock(instanceLockPath(this.dir), fn);
+  }
+
+  /**
    * `anvil commit` — snapshot the tracked working tree (manifest + lock + ignore +
    * the carried local-blob closure) into history, advancing HEAD's branch. Refuses
    * when the lock is stale relative to the manifest (the manifest is the index).
    */
   async commit(message: string): Promise<CommitRef> {
-    return this.#withErrors(async () => (await this.#vc()).commit(message));
+    return this.#withErrors(() => this.#locked(async () => (await this.#vc()).commit(message)));
   }
 
   /** `anvil branch` — create a branch at HEAD (does not switch to it). */
   async branch(name: string): Promise<CommitRef> {
-    return this.#withErrors(async () => (await this.#vc()).branch(name));
+    return this.#withErrors(() => this.#locked(async () => (await this.#vc()).branch(name)));
   }
 
   /**
@@ -942,11 +1027,12 @@ export class Anvil {
    * `saves/` and the build product are never touched.
    */
   async switch(ref: string): Promise<CommitRef> {
-    return this.#withErrors(async () => (await this.#vc()).switchTo(ref));
+    return this.#withErrors(() => this.#locked(async () => (await this.#vc()).switchTo(ref)));
   }
 
   /** `anvil log` — history reachable from `start` (default HEAD), newest-first by generation. */
   async log(start?: string): Promise<LogEntry[]> {
+    // Read-only — no instance lock needed.
     return this.#withErrors(async () => (await this.#vc()).log(start));
   }
 
@@ -957,12 +1043,14 @@ export class Anvil {
    * aborts without committing.
    */
   async merge(branch: string, options?: MergeOptions): Promise<MergeResult> {
-    return this.#withErrors(async () => (await this.#vc()).merge(branch, options ?? {}));
+    return this.#withErrors(() =>
+      this.#locked(async () => (await this.#vc()).merge(branch, options ?? {})),
+    );
   }
 
   /** `anvil revert` — a new commit that undoes a past commit's item-delta, then re-locks. */
   async revert(ref: string): Promise<RevertResult> {
-    return this.#withErrors(async () => (await this.#vc()).revert(ref));
+    return this.#withErrors(() => this.#locked(async () => (await this.#vc()).revert(ref)));
   }
 
   /**
@@ -971,43 +1059,242 @@ export class Anvil {
    * Modes: `onto` (start), `continue`, `skip`, `abort` (restore `ORIG_HEAD`).
    */
   async rebase(options: RebaseOptions): Promise<RebaseResult> {
+    return this.#withErrors(() =>
+      this.#locked(async () => {
+        const vc = await this.#vc();
+        const policy = {
+          ...(options.strategy ? { strategy: options.strategy } : {}),
+          ...(options.onConflict ? { onConflict: options.onConflict } : {}),
+        };
+        if (options.abort) {
+          return vc.rebaseAbort();
+        }
+        if (options.continue) {
+          return vc.rebaseContinue(policy);
+        }
+        if (options.skip) {
+          return vc.rebaseSkip(policy);
+        }
+        if (!options.onto) {
+          throw new VcStateError("rebase needs an `onto` ref (or --continue / --skip / --abort)");
+        }
+        return vc.rebase(options.onto, policy);
+      }),
+    );
+  }
+
+  // --- remotes (clone / pull / push) --------------------------------------
+
+  /** An HTTP client for http(s) served-tree remotes + room reads (SSRF-guarded). */
+  #remoteHttp(): Http {
+    return this.#env.gameHttp?.() ?? new RateLimitedHttp({ userAgent: USER_AGENT });
+  }
+
+  /** Construct the per-instance stores + the transport for a remote descriptor. */
+  async #remoteContext(descriptor: RemoteDescriptor): Promise<{
+    store: ContentStore;
+    replayCache: ReplayCache;
+    vcStore: VcObjectStore;
+    refs: Refs;
+    transport: ReturnType<typeof makeTransport>;
+  }> {
+    const paths = await resolvePaths(this.dir, this.#options);
+    const store = new ContentStore({ root: paths.store });
+    const replayCache = new ReplayCache({ instanceDir: this.dir });
+    const anvilDir = join(this.dir, ".anvil");
+    const vcStore = new VcObjectStore({ anvilDir });
+    const refs = new Refs(anvilDir);
+    const transport = makeTransport(descriptor, {
+      http: this.#remoteHttp(),
+      clonesDir: join(anvilDir, "remotes"),
+      gitAuthor: { name: this.#env.author ?? "anvil", email: "anvil@lobbify.games" },
+    });
+    return { store, replayCache, vcStore, refs, transport };
+  }
+
+  /**
+   * The `clone`/`pull` build step: materialize the just-fast-forwarded lock,
+   * fetching only the changed objects through the {@link RemotePullAcquirer}
+   * (local store → remote endpoint → source). Replay items are re-fetched
+   * per-client (never transferred); the incremental delta keeps unchanged objects
+   * linked.
+   */
+  #syncRunBuild(
+    store: ContentStore,
+    replayCache: ReplayCache,
+    transport: ReturnType<typeof makeTransport>,
+  ): RunBuild {
+    return async ({ previousLock, emit }): Promise<BuildEngineResult> => {
+      const lock = await readInputLock(this.dir);
+      const base = this.#buildAcquirer(store, replayCache, false, emit);
+      const acquire = new RemotePullAcquirer({ base, transport, store, emit });
+      return buildInstance({
+        instanceDir: this.dir,
+        lock,
+        store,
+        acquire,
+        replayCache,
+        platform: currentPlatform(),
+        ...(previousLock ? { previousLock } : {}),
+        emit,
+      });
+    };
+  }
+
+  /** The shared source-policy / clock / author for a sync op. */
+  #syncPrincipals(): {
+    allowSource: NonNullable<AnvilOptions["allowSource"]>;
+    author: string;
+    now: () => number;
+  } {
+    return {
+      allowSource: this.#options.allowSource ?? defaultAllowSource,
+      author: this.#env.author ?? "anvil",
+      now: this.#env.now ?? (() => Date.now()),
+    };
+  }
+
+  /**
+   * `anvil clone` — create an instance from a remote and build it in place. The
+   * remote's (untrusted) lock is vetoed through `allowSource` before any transfer;
+   * the `.anvil/` history (or a single initial commit) is set up, then the pack is
+   * built with objects fetched from the remote endpoint or re-fetched from source.
+   */
+  async clone(url: string, options?: CloneOptions): Promise<CloneResult> {
+    const emit = (event: AnvilEvent): void => this.progress.emit(event);
+    return this.#withErrors(() =>
+      withLock(instanceLockPath(this.dir), async () => {
+        if (await pathExists(join(this.dir, MANIFEST_FILENAME))) {
+          throw new ManifestError(
+            `"${this.dir}" already contains an ${MANIFEST_FILENAME} — clone into an empty directory`,
+          );
+        }
+        const descriptor = makeDescriptor(options?.name ?? "origin", url, {
+          ...(options?.ref ? { ref: options.ref } : {}),
+          ...(options?.kind ? { kind: options.kind } : {}),
+        });
+        const ctx = await this.#remoteContext(descriptor);
+        const principals = this.#syncPrincipals();
+        const outcome: CloneOutcome = await cloneInstance({
+          descriptor,
+          transport: ctx.transport,
+          instanceDir: this.dir,
+          vcStore: ctx.vcStore,
+          refs: ctx.refs,
+          sharedStore: ctx.store,
+          ...principals,
+          runBuild: this.#syncRunBuild(ctx.store, ctx.replayCache, ctx.transport),
+          ...(options?.ref ? { ref: options.ref } : {}),
+          emit,
+        });
+        return {
+          dir: outcome.dir,
+          commit: `${outcome.commit.algo}:${outcome.commit.value}`,
+          branch: outcome.branch,
+          objects: outcome.objects,
+        };
+      }),
+    );
+  }
+
+  /**
+   * `anvil pull` — content-addressed fast-forward to a remote's latest. Joiners
+   * only ever fast-forward; on divergence local commits are preserved on a
+   * `local/<ts>` branch and the pack is fast-forwarded to the remote tip
+   * (`saves/` untouched). Only the changed objects transfer.
+   */
+  async pull(remote?: string): Promise<PullResult> {
+    const emit = (event: AnvilEvent): void => this.progress.emit(event);
     return this.#withErrors(async () => {
-      const vc = await this.#vc();
-      const policy = {
-        ...(options.strategy ? { strategy: options.strategy } : {}),
-        ...(options.onConflict ? { onConflict: options.onConflict } : {}),
-      };
-      if (options.abort) {
-        return vc.rebaseAbort();
+      const descriptor = await resolveRemote(this.dir, remote);
+      if (!descriptor) {
+        throw new RemoteNotFound(remote ?? "origin");
       }
-      if (options.continue) {
-        return vc.rebaseContinue(policy);
-      }
-      if (options.skip) {
-        return vc.rebaseSkip(policy);
-      }
-      if (!options.onto) {
-        throw new VcStateError("rebase needs an `onto` ref (or --continue / --skip / --abort)");
-      }
-      return vc.rebase(options.onto, policy);
+      return withLock(instanceLockPath(this.dir), async () => {
+        const ctx = await this.#remoteContext(descriptor);
+        const principals = this.#syncPrincipals();
+        const outcome: PullOutcome = await pullInstance({
+          descriptor,
+          transport: ctx.transport,
+          instanceDir: this.dir,
+          vcStore: ctx.vcStore,
+          refs: ctx.refs,
+          sharedStore: ctx.store,
+          ...principals,
+          runBuild: this.#syncRunBuild(ctx.store, ctx.replayCache, ctx.transport),
+          emit,
+        });
+        return {
+          fastForwarded: outcome.fastForwarded,
+          objects: outcome.objects,
+          upToDate: outcome.upToDate,
+          ...(outcome.stashedTo ? { stashedTo: outcome.stashedTo } : {}),
+        };
+      });
     });
   }
 
-  // --- remotes (git clone/pull/push) --------------------------------------
-
-  /** `anvil clone` — create an instance from a remote and build in place. */
-  async clone(_url: string): Promise<void> {
-    throw new NotImplemented("Anvil.clone");
+  /**
+   * `anvil push` — publish the current branch to a writable remote (git remote or
+   * a writable directory; a static `url` is read-only). Transfers the two files +
+   * VC history + **copy-only** content objects; replay rows are skipped and the
+   * replay cache is never read.
+   */
+  async push(remote?: string): Promise<PushResult> {
+    const emit = (event: AnvilEvent): void => this.progress.emit(event);
+    return this.#withErrors(async () => {
+      const descriptor = await resolveRemote(this.dir, remote);
+      if (!descriptor) {
+        throw new RemoteNotFound(remote ?? "origin");
+      }
+      return withLock(instanceLockPath(this.dir), async () => {
+        const ctx = await this.#remoteContext(descriptor);
+        const principals = this.#syncPrincipals();
+        const outcome: PushOutcome = await pushInstance({
+          descriptor,
+          transport: ctx.transport,
+          instanceDir: this.dir,
+          vcStore: ctx.vcStore,
+          refs: ctx.refs,
+          sharedStore: ctx.store,
+          ...principals,
+          // push never builds; a stub satisfies the shared deps shape.
+          runBuild: async () => {
+            throw new VcStateError("internal: push does not build");
+          },
+          emit,
+        });
+        return {
+          commit: `${outcome.commit.algo}:${outcome.commit.value}`,
+          branch: outcome.branch,
+          objects: outcome.objects,
+        };
+      });
+    });
   }
 
-  /** `anvil pull` — content-addressed fast-forward to the remote's latest. */
-  async pull(): Promise<PullResult> {
-    throw new NotImplemented("Anvil.pull");
+  /** `anvil remote list` — the configured remotes for this instance. */
+  async remotes(): Promise<readonly RemoteDescriptor[]> {
+    return listRemotes(this.dir);
   }
 
-  /** `anvil push` — publish local commits + changed objects to a remote. */
-  async push(_remote?: string): Promise<void> {
-    throw new NotImplemented("Anvil.push");
+  /** `anvil remote add` — record a remote in `.anvil/config.toml`. */
+  async addRemote(
+    name: string,
+    url: string,
+    options?: { ref?: string; kind?: RemoteKind },
+  ): Promise<RemoteDescriptor> {
+    const descriptor = makeDescriptor(name, url, {
+      ...(options?.ref ? { ref: options.ref } : {}),
+      ...(options?.kind ? { kind: options.kind } : {}),
+    });
+    await addRemoteToConfig(this.dir, descriptor);
+    return descriptor;
+  }
+
+  /** `anvil remote remove` — drop a remote from `.anvil/config.toml`. */
+  async removeRemote(name: string): Promise<boolean> {
+    return removeRemoteFromConfig(this.dir, name);
   }
 
   // --- import / export (docker load/save) ---------------------------------
@@ -1049,6 +1336,32 @@ export class Anvil {
       const store = new ContentStore({ root: paths.store });
       const registry = this.#registry();
 
+      // A directory input is a Prism/MultiMC instance → re-identify its jars.
+      const st = await stat(archive).catch(() => undefined);
+      if (st?.isDirectory()) {
+        const mrHttp = registry.get("modrinth")?.http ?? this.#gameHttp();
+        const cfEntry = registry.get("curseforge");
+        const modrinthApi = new ModrinthApi(mrHttp);
+        const curseforgeApi =
+          cfEntry?.http && this.#options.curseforgeKey
+            ? new CurseForgeApi(cfEntry.http, this.#options.curseforgeKey)
+            : undefined;
+        const identify = new ApiIdentityResolver(modrinthApi, curseforgeApi);
+        const result = await importPrism({
+          prismDir: archive,
+          instanceDir: this.dir,
+          store,
+          resolveGame: this.#importGameResolver(store),
+          identify,
+          emit,
+        });
+        return {
+          files: result.modrinth + result.curseforge,
+          overrides: result.local,
+          warnings: result.warnings,
+        };
+      }
+
       // Peek at the archive to route: Modrinth (.mrpack) vs CurseForge zip.
       const archiveBytes = new Uint8Array(await readFile(archive));
       const isMrpack = (await readZipEntry(archiveBytes, "modrinth.index.json")) !== undefined;
@@ -1089,9 +1402,30 @@ export class Anvil {
     }
   }
 
-  /** `anvil export` — write an `.mrpack` (CF replay items omitted, with a warning). */
-  async export(_target: string): Promise<void> {
-    throw new NotImplemented("Anvil.export");
+  /**
+   * `anvil export` — write an `.mrpack` from the built instance. Copy items with a
+   * rehostable URL become `files[]`, local items become `overrides/`, and
+   * **CurseForge replay items are omitted with a clear warning** (the ToS forbids
+   * re-hosting their bytes). The exporter reads only the shared store — it never
+   * opens the replay cache.
+   */
+  async export(target: string): Promise<ExportResult> {
+    const emit = (event: AnvilEvent): void => this.progress.emit(event);
+    return this.#withErrors(async () => {
+      const paths = await resolvePaths(this.dir, this.#options);
+      const store = new ContentStore({ root: paths.store });
+      const manifest = await readManifest(this.dir);
+      const built = await readBuiltLock(this.dir);
+      const lock = built ?? (await readInputLock(this.dir));
+      const result = await exportMrpack({ manifest, lock, store, targetPath: target, emit });
+      return {
+        path: result.path,
+        files: result.files,
+        overrides: result.overrides,
+        omitted: result.omitted,
+        warnings: result.warnings,
+      };
+    });
   }
 
   // --- store maintenance (git gc / fsck) ----------------------------------
@@ -1115,30 +1449,44 @@ export class Anvil {
   async gc(): Promise<GcResult> {
     const paths = await resolvePaths(this.dir, this.#options);
     const store = new ContentStore({ root: paths.store });
-    const anvilDir = join(this.dir, ".anvil");
-    const vcStore = new VcObjectStore({ anvilDir });
-    const refs = new Refs(anvilDir);
+    // The shared-store write lock serializes the destructive mark-sweep against a
+    // concurrent GC on the same store; the per-instance lock keeps the VC prune
+    // consistent with a concurrent build/pull on this instance. NOTE: `graceMs: 0`
+    // means an object is protected ONLY by reachability from THIS instance's roots
+    // — a build on a DIFFERENT instance sharing this store is not yet fenced from
+    // this sweep (it takes only its own instance lock, not the store lock). Full
+    // cross-instance safety is the store-level instance-registry union, a later
+    // stage (see the note above); until then, run `gc` when no other instance is
+    // building against the shared store.
+    await ensureDir(paths.store);
+    return withLock(storeLockPath(paths.store), () =>
+      withLock(instanceLockPath(this.dir), async () => {
+        const anvilDir = join(this.dir, ".anvil");
+        const vcStore = new VcObjectStore({ anvilDir });
+        const refs = new Refs(anvilDir);
 
-    // 1. VC object store: keep the full ref/reflog/in-progress closure + carried.
-    const reach = await vcReachability(refs, vcStore, anvilDir);
-    const vcPruned = await vcStore.prune(reach.keep);
+        // 1. VC object store: keep the full ref/reflog/in-progress closure + carried.
+        const reach = await vcReachability(refs, vcStore, anvilDir);
+        const vcPruned = await vcStore.prune(reach.keep);
 
-    // 2. Shared store: built-lock roots ∪ every reachable commit's lock ∪ carried.
-    const roots: Hash[] = [];
-    const built = await readBuiltLock(this.dir);
-    if (built) {
-      roots.push(...(await collectRoots(built, store)));
-    }
-    for (const lock of reach.commitLocks) {
-      roots.push(...(await collectRoots(lock, store)));
-    }
-    roots.push(...reach.carriedContent);
-    const result = await store.gc(roots, { graceMs: 0 });
+        // 2. Shared store: built-lock roots ∪ every reachable commit's lock ∪ carried.
+        const roots: Hash[] = [];
+        const built = await readBuiltLock(this.dir);
+        if (built) {
+          roots.push(...(await collectRoots(built, store)));
+        }
+        for (const lock of reach.commitLocks) {
+          roots.push(...(await collectRoots(lock, store)));
+        }
+        roots.push(...reach.carriedContent);
+        const result = await store.gc(roots, { graceMs: 0 });
 
-    return {
-      removed: result.removed + vcPruned.removed,
-      freedBytes: result.freedBytes + vcPruned.freedBytes,
-    };
+        return {
+          removed: result.removed + vcPruned.removed,
+          freedBytes: result.freedBytes + vcPruned.freedBytes,
+        };
+      }),
+    );
   }
 
   /** `anvil fsck` — re-hash every stored object and report content-address drift. */

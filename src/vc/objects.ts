@@ -311,6 +311,63 @@ export class VcObjectStore {
     return this.put({ type: "blob", bytes });
   }
 
+  /**
+   * Read an object's raw **on-disk (zlib-compressed) bytes**, for transferring VC
+   * history to a remote verbatim (no decode/re-encode round-trip). Returns
+   * `undefined` when the object is absent.
+   */
+  async readRaw(hash: Hash): Promise<Uint8Array | undefined> {
+    try {
+      return new Uint8Array(await readFile(this.#pathOf(hash)));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Import an object received from a remote by its raw on-disk (zlib-compressed)
+   * bytes, **verifying the content address on arrival** (inflate → re-hash the
+   * uncompressed encoding → reject a mismatch). This is the VC-layer half of
+   * sha-verify-on-arrival: a corrupted/hostile mirror can never inject an object
+   * under a hash it does not actually hash to. Dedups when already present.
+   */
+  async importRaw(id: Hash, compressed: Uint8Array): Promise<void> {
+    if (await this.has(id)) {
+      return;
+    }
+    let encoded: Uint8Array;
+    try {
+      encoded = new Uint8Array(inflateSync(compressed));
+    } catch (err) {
+      throw new LockParseError(
+        `remote VC object ${hashToString(id)} is not valid zlib (${(err as Error).message})`,
+      );
+    }
+    const actual = idOfEncoding(encoded);
+    if (actual.value !== id.value) {
+      throw new LockParseError(
+        `remote VC object ${hashToString(id)} failed content-address verification ` +
+          `(bytes hash to ${actual.value})`,
+      );
+    }
+    const dest = this.#pathOf(id);
+    const tmpDir = join(this.#objectsDir, "tmp");
+    await mkdir(tmpDir, { recursive: true });
+    const tmp = join(tmpDir, `${randomUUID()}.tmp`);
+    await writeFile(tmp, compressed);
+    await mkdir(dirname(dest), { recursive: true });
+    try {
+      await rename(tmp, dest);
+    } catch (err) {
+      if (await this.has(id)) {
+        await rm(tmp, { force: true });
+        return;
+      }
+      throw err;
+    }
+    await chmod(dest, 0o444).catch(() => undefined);
+  }
+
   /** Read + inflate + decode the object at `hash`, re-verifying its content address. */
   async get(hash: Hash): Promise<VcObject> {
     const compressed = await readFile(this.#pathOf(hash));

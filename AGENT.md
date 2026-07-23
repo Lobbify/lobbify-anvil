@@ -16,8 +16,9 @@ and the interactive TUI are thin skins that carry **no logic**. It is standalone
 source-agnostic (Modrinth / CurseForge / URL / local); a host app (e.g. Lobbify) supplies
 an `allowSource` policy and calls the library directly.
 
-This repo is at **Stage 6 — the CurseForge (BYO-key, replay) source is complete**
-(MVP tier Stages 0–4 + v1-tier Stages 5–6). On top of the Stage-0 scaffold, the Stage-1
+This repo is at **Stage 7 — remotes (clone / pull / push) + `.mrpack` export + Prism import
+are complete**, closing the v1 sync tier (MVP Stages 0–4 + v1 Stages 5–7; the colorful
+TUI is Stage 8). On top of the Stage-0 scaffold, the Stage-1
 content-addressed store (`src/store/`) + atomic build engine (`src/build/`), the
 Stage-2 manifest/sources/resolver/lock, the Stage-3 full game installer
 (`src/game/`: Mojang walk + Fabric/Quilt), and the Stage-4 thin CLI + `.mrpack`
@@ -54,11 +55,24 @@ never a copy-from-elsewhere). CurseForge-zip import (`src/import/cfzip.ts`) turn
 `files[]` into replay items and its `overrides/` into local copies. The ToS/replay audit
 (`test/security/replay-tos-audit.test.ts`) is a standing hard review gate.
 
+**Stage 7 adds `src/remote/`** — remote descriptors in `.anvil/config.toml` (`[remote.<name>]`),
+a transport layer over a served tree (a writable **directory**, a read-only **http(s)** base, a
+**git** repo, or a **`lobby://` room** seam), content-addressed object transfer (local store →
+remote endpoint → re-fetch-from-source, sha-verified on arrival), and the `clone` / `pull` / `push`
+orchestration. **Joiners fast-forward only**; on divergence the local commits are stashed to a
+`local/<ts>` branch and the pack is fast-forwarded (never discarded, `saves/` untouched). The
+**untrusted remote lock is vetoed** through `allowSource` + the SSRF checks before any byte moves.
+Plus **`src/export/`** (`.mrpack` export — CurseForge replay items omitted with a warning; a
+dependency-free deterministic zip writer) and **Prism/MultiMC import** (`src/import/prism.ts` —
+jars re-identified via the Modrinth/CurseForge fingerprint APIs through the `IdentityResolver`
+seam: matched → copy/replay items, unmatched → local). **The replay boundary holds under transport:
+push/pull/export skip `provenance:"replay"` rows and never read `.anvil/replay-cache/`** (a standing
+hard review rule; see `test/security/replay-tos-audit.test.ts` + `test/remote/replay-export.test.ts`).
+
 The CLI is a **thin skin**: it parses args and calls one `Anvil` method — no business
 logic. The library is testable offline via the optional `AnvilEnv` constructor arg (the
 mirror/endpoint + fixture injection seam; `AnvilEnv.now`/`author` inject the VC clock +
-author). The remaining subsystems (remotes, TUI) land in Stages 7–9; those `Anvil` methods
-(`clone`/`pull`/`push`/`export`) still throw `NotImplemented`. See
+author). The remaining subsystem (the colorful Ink TUI) lands in Stage 8. See
 `lobbify-anvil-implementation-plan.md`.
 
 ## Commands
@@ -147,7 +161,10 @@ src/types/          # the type spine: core.ts (Hash, LockPackage, Placement, Sou
 src/events.ts       # the typed progress-event taxonomy (discriminated unions)
 src/anvil.ts        # the Anvil class + ProgressBus + the AnvilEnv injection seam
 src/game/           # the Mojang installer + Fabric/Quilt loaders (Stage 3)
-src/import/         # .mrpack import (Stage 4): mrpack.ts + the hardened zip reader
-src/cli/            # the thin `lobbify-anvil` bin (Stage 4): commands, reporter, errors, run
-test/               # vitest — determinism/crash/game/CLI-e2e/import/error fixtures (offline)
+src/vc/             # the anvil-native version-control engine (Stage 5)
+src/import/         # pack import: mrpack (S4) + cfzip (S6) + prism (S7) + the hardened zip reader
+src/remote/         # remotes (Stage 7): descriptor, config.toml, transports, transfer, clone/pull/push
+src/export/         # .mrpack export (Stage 7): the exporter + a deterministic zip writer
+src/cli/            # the thin `lobbify-anvil` bin (Stage 4+): commands, reporter, errors, run
+test/               # vitest — determinism/crash/game/CLI-e2e/import/remote/error fixtures (offline)
 ```

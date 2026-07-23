@@ -20,7 +20,7 @@
 
 import * as semver from "semver";
 import { hashBuffer } from "../store/hash.js";
-import { ShaMismatch, UnsatisfiableTarget } from "../types/errors.js";
+import { HttpError, ShaMismatch, UnsatisfiableTarget } from "../types/errors.js";
 import type {
   FetchPlan,
   Http,
@@ -118,6 +118,28 @@ export class ModrinthApi {
     const params = new URLSearchParams();
     params.set("ids", JSON.stringify(ids));
     return this.#getJson<ModrinthVersion[]>("/versions", params);
+  }
+
+  /**
+   * `GET /version_file/{hash}?algorithm=sha1` — reverse-lookup the version a file
+   * belongs to by its content hash. Used by the Prism importer to re-identify a
+   * local jar as a Modrinth project. Returns `undefined` on a 404 (no match).
+   */
+  async getVersionFile(hash: string, algorithm = "sha1"): Promise<ModrinthVersion | undefined> {
+    const params = new URLSearchParams();
+    params.set("algorithm", algorithm);
+    try {
+      return await this.#getJson<ModrinthVersion>(
+        `/version_file/${encodeURIComponent(hash)}`,
+        params,
+      );
+    } catch (err) {
+      // A 404 (unknown hash) is "no match", not a hard failure.
+      if (err instanceof HttpError && err.status === 404) {
+        return undefined;
+      }
+      throw err;
+    }
   }
 
   /** Batch-fetch projects by id. */

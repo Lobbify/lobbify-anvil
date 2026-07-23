@@ -17,4 +17,13 @@ export type {
 export { importMrpack } from "./mrpack.js";
 export type { ImportOverrideTreeInput } from "./pack-common.js";
 export { importOverrideTree, isUnsafePackPath, kindForPackPath } from "./pack-common.js";
+export type {
+  CurseForgeMatch,
+  IdentityResolver,
+  ImportPrismInput,
+  ImportPrismResult,
+  ModrinthMatch,
+} from "./prism.js";
+export { importPrism } from "./prism.js";
+export { ApiIdentityResolver } from "./prism-identify.js";
 export { readZipEntry } from "./zip-read.js";

@@ -9,9 +9,21 @@
 import { basename, resolve } from "node:path";
 import { Command, Option } from "clipanion";
 import type { Anvil } from "../anvil.js";
+import type { RemoteKind } from "../remote/index.js";
 import type { AnvilOptions } from "../types/index.js";
 import type { ConflictStrategy } from "../vc/index.js";
 import { describeConflict } from "../vc/index.js";
+
+/** Validate a `--kind` string against the allowed remote kinds. */
+function parseRemoteKind(raw: string | undefined): RemoteKind | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === "git" || raw === "url" || raw === "room") {
+    return raw;
+  }
+  throw new Error(`invalid --kind "${raw}" (expected git | url | room)`);
+}
 import type { AnvilCliContext } from "./context.js";
 import { EXIT_ERROR, EXIT_OK, renderError } from "./errors.js";
 import { describeEvent } from "./reporter.js";
@@ -272,7 +284,8 @@ export class VerifyCommand extends AnvilCommand {
 export class ImportCommand extends AnvilCommand {
   static override paths = [["import"]];
   static override usage = Command.Usage({
-    description: "Adopt a .mrpack (Modrinth modpack) into this instance",
+    description:
+      "Adopt a pack into this instance: a .mrpack, a CurseForge zip, or a Prism/MultiMC directory",
   });
   archive = Option.String({ required: true, name: "archive" });
 
@@ -646,6 +659,183 @@ export class RebaseCommand extends ResolvingCommand {
   }
 }
 
+// --- remotes (Stage 7) ------------------------------------------------------
+
+export class RemoteAddCommand extends AnvilCommand {
+  static override paths = [["remote", "add"]];
+  static override usage = Command.Usage({
+    description: "Record a remote (git | url | room) in .anvil/config.toml",
+  });
+  remoteName = Option.String({ required: true, name: "name" });
+  url = Option.String({ required: true, name: "url" });
+  ref = Option.String("--ref", { description: "Default branch/ref to track (default main)" });
+  kind = Option.String("--kind", { description: "Force the remote kind: git | url | room" });
+
+  override async execute(): Promise<number> {
+    let kind: RemoteKind | undefined;
+    try {
+      kind = parseRemoteKind(this.kind);
+    } catch (err) {
+      this.context.stderr.write(`error: ${(err as Error).message}\n`);
+      return EXIT_ERROR;
+    }
+    return this.run(
+      (anvil) =>
+        anvil.addRemote(this.remoteName, this.url, {
+          ...(this.ref ? { ref: this.ref } : {}),
+          ...(kind ? { kind } : {}),
+        }),
+      {
+        plain: (d) => [`added remote "${d.name}" → ${d.url} (${d.kind})`],
+        json: (d) => ({ remote: d }),
+      },
+    );
+  }
+}
+
+export class RemoteRemoveCommand extends AnvilCommand {
+  static override paths = [["remote", "remove"]];
+  static override usage = Command.Usage({ description: "Remove a configured remote" });
+  remoteName = Option.String({ required: true, name: "name" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.removeRemote(this.remoteName), {
+      plain: (removed) => [removed ? `removed remote "${this.remoteName}"` : "no such remote"],
+      json: (removed) => ({ removed }),
+    });
+  }
+}
+
+export class RemoteListCommand extends AnvilCommand {
+  static override paths = [["remote", "list"]];
+  static override usage = Command.Usage({ description: "List the configured remotes" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.remotes(), {
+      plain: (remotes) =>
+        remotes.length === 0
+          ? ["no remotes configured"]
+          : remotes.map((r) => `${r.name}\t${r.kind}\t${r.url}${r.ref ? ` (${r.ref})` : ""}`),
+      json: (remotes) => ({ remotes }),
+    });
+  }
+}
+
+export class CloneCommand extends AnvilCommand {
+  static override paths = [["clone"]];
+  static override usage = Command.Usage({
+    description: "Create an instance from a remote and build it in place",
+  });
+  url = Option.String({ required: true, name: "url" });
+  name = Option.String("--name", { description: "Remote name to record (default origin)" });
+  ref = Option.String("--ref", { description: "Branch/ref to track (default main)" });
+  kind = Option.String("--kind", { description: "Force the remote kind: git | url | room" });
+
+  override async execute(): Promise<number> {
+    let kind: RemoteKind | undefined;
+    try {
+      kind = parseRemoteKind(this.kind);
+    } catch (err) {
+      this.context.stderr.write(`error: ${(err as Error).message}\n`);
+      return EXIT_ERROR;
+    }
+    return this.run(
+      (anvil) =>
+        anvil.clone(this.url, {
+          ...(this.name ? { name: this.name } : {}),
+          ...(this.ref ? { ref: this.ref } : {}),
+          ...(kind ? { kind } : {}),
+        }),
+      {
+        plain: (r) => [
+          `cloned ${this.url} → ${r.dir} (branch ${r.branch}, ${r.objects} object(s) transferred)`,
+        ],
+        json: (r) => ({ dir: r.dir, commit: r.commit, branch: r.branch, objects: r.objects }),
+      },
+    );
+  }
+}
+
+export class PullCommand extends AnvilCommand {
+  static override paths = [["pull"]];
+  static override usage = Command.Usage({
+    description: "Fast-forward to a remote's latest (divergent local commits are stashed)",
+  });
+  remote = Option.String({ required: false, name: "remote" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.pull(this.remote), {
+      plain: (r) => {
+        if (r.upToDate) {
+          return ["already up to date"];
+        }
+        const lines = [
+          `pulled — fast-forwarded ${r.fastForwarded} commit(s), ${r.objects} object(s) transferred`,
+        ];
+        if (r.stashedTo) {
+          lines.push(
+            `  note: local history diverged; your commits are preserved on "${r.stashedTo}"`,
+          );
+        }
+        return lines;
+      },
+      json: (r) => ({
+        fastForwarded: r.fastForwarded,
+        objects: r.objects,
+        upToDate: r.upToDate,
+        ...(r.stashedTo ? { stashedTo: r.stashedTo } : {}),
+      }),
+    });
+  }
+}
+
+export class PushCommand extends AnvilCommand {
+  static override paths = [["push"]];
+  static override usage = Command.Usage({
+    description: "Publish the current branch to a writable remote (git / dir; url is read-only)",
+  });
+  remote = Option.String({ required: false, name: "remote" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.push(this.remote), {
+      plain: (r) => {
+        const hex = r.commit.slice(r.commit.indexOf(":") + 1).slice(0, 12);
+        return [`pushed ${hex} → ${r.branch} (${r.objects} object(s))`];
+      },
+      json: (r) => ({ commit: r.commit, branch: r.branch, objects: r.objects }),
+    });
+  }
+}
+
+export class ExportCommand extends AnvilCommand {
+  static override paths = [["export"]];
+  static override usage = Command.Usage({
+    description:
+      "Write an .mrpack from the built instance (CurseForge items omitted with a warning)",
+  });
+  target = Option.String({ required: true, name: "target" });
+
+  override async execute(): Promise<number> {
+    const target = resolve(this.context.cwd, this.target);
+    return this.run((anvil) => anvil.export(target), {
+      plain: (r) => [
+        `exported ${this.target} (${r.files} file(s), ${r.overrides} override(s))`,
+        ...(r.omitted.length > 0
+          ? [`  omitted ${r.omitted.length} CurseForge item(s): ${r.omitted.join(", ")}`]
+          : []),
+        ...r.warnings.map((w) => `  ! ${w}`),
+      ],
+      json: (r) => ({
+        path: r.path,
+        files: r.files,
+        overrides: r.overrides,
+        omitted: r.omitted,
+        warnings: r.warnings,
+      }),
+    });
+  }
+}
+
 /** Every non-builtin command, in help-listing order. */
 export const COMMANDS = [
   InitCommand,
@@ -665,6 +855,13 @@ export const COMMANDS = [
   MergeCommand,
   RevertCommand,
   RebaseCommand,
+  CloneCommand,
+  PullCommand,
+  PushCommand,
+  ExportCommand,
+  RemoteAddCommand,
+  RemoteRemoveCommand,
+  RemoteListCommand,
   GcCommand,
   FsckCommand,
 ] as const;

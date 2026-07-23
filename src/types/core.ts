@@ -259,6 +259,14 @@ export interface HttpGetOptions {
  */
 export interface Http {
   get(url: string, options?: HttpGetOptions): Promise<HttpResult>;
+  /**
+   * A JSON POST — used only by the batch identity endpoints (Modrinth
+   * `version_files`, CurseForge `fingerprints`) the Prism importer re-identifies
+   * jars through. Optional: a client that only ever GETs (every `Source` at lock
+   * time, every build-time fetch) need not implement it. When absent, a caller
+   * that needs a POST falls back to a per-item GET or fails clearly.
+   */
+  post?(url: string, body: Uint8Array, options?: HttpGetOptions): Promise<HttpResult>;
 }
 
 /** The outcome of admitting bytes to the store: the content hash + a dedup flag. */

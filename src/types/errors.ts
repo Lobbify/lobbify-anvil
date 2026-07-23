@@ -358,6 +358,72 @@ export class NoCompatibleVersion extends AnvilError {
 }
 
 /**
+ * A configured remote name could not be resolved (no `[remote.<name>]` in the
+ * instance's `.anvil/config.toml`), or a `pull`/`push` was run with no remotes
+ * configured at all.
+ */
+export class RemoteNotFound extends AnvilError {
+  readonly remote: string;
+
+  constructor(remote: string, message?: string) {
+    super(
+      "REMOTE_NOT_FOUND",
+      message ??
+        `no remote named "${remote}" is configured — add one with \`anvil remote add ${remote} <url>\`.`,
+    );
+    this.remote = remote;
+  }
+}
+
+/**
+ * A transport-level failure talking to a remote: the served tree is missing its
+ * `anvil.toml`/`anvil.lock`, a `git` invocation failed, or a published VC object
+ * was unreadable. Distinct from an `HttpError` (a single request) — it names the
+ * remote-sync operation that could not complete.
+ */
+export class RemoteError extends AnvilError {
+  readonly remote: string;
+
+  constructor(remote: string, message: string) {
+    super("REMOTE_ERROR", `remote "${remote}": ${message}`);
+    this.remote = remote;
+  }
+}
+
+/**
+ * A `push` was attempted against a remote that is not a push target — a static
+ * `url`/`http(s)` remote is **read-only** (it serves a manifest + lock but cannot
+ * receive one). Push to a `git` remote, a writable local directory, or publish
+ * through a Lobbify room instead. A clear, typed refusal — never a silent no-op.
+ */
+export class PushNotSupported extends AnvilError {
+  readonly remote: string;
+
+  constructor(remote: string, kind: string, message?: string) {
+    super(
+      "PUSH_NOT_SUPPORTED",
+      message ??
+        `remote "${remote}" (${kind}) is read-only and cannot be pushed to. Push to a git remote or a writable local directory, or publish via a Lobbify room.`,
+    );
+    this.remote = remote;
+  }
+}
+
+/**
+ * A per-instance / shared-store advisory file lock could not be acquired within
+ * the timeout — another anvil process is operating on the same instance or store.
+ * A clear, retryable signal rather than a corrupting concurrent mutation.
+ */
+export class LockBusy extends AnvilError {
+  constructor(lockPath: string, holder: string) {
+    super(
+      "LOCK_BUSY",
+      `could not acquire the lock "${lockPath}" — it is held by ${holder}. Another anvil process is operating on this instance/store; retry when it finishes.`,
+    );
+  }
+}
+
+/**
  * A stubbed capability that Stage 0 has typed but not yet implemented. Every
  * public `Anvil` method throws this until its owning stage lands.
  */

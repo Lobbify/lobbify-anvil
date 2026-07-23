@@ -41,6 +41,12 @@ export const EXIT_CODES: Readonly<Record<string, number>> = {
   NON_FAST_FORWARD: 18,
   KIND_INFERENCE_FAILED: 19,
   NOT_IMPLEMENTED: 20,
+  REMOTE_NOT_FOUND: 21,
+  REMOTE_ERROR: 22,
+  PUSH_NOT_SUPPORTED: 23,
+  VC_STATE: 24,
+  NO_COMPATIBLE_VERSION: 25,
+  LOCK_BUSY: 26,
 };
 
 /** An actionable hint per error code — what the user should do next. */
@@ -67,6 +73,12 @@ const HINTS: Readonly<Record<string, string>> = {
   NON_FAST_FORWARD: "local history diverged; your commits are preserved on a local/ branch.",
   KIND_INFERENCE_FAILED: "anvil can't tell the item's kind — set an explicit `kind` for it.",
   NOT_IMPLEMENTED: "this capability lands in a later stage — see the roadmap in README.md.",
+  REMOTE_NOT_FOUND: "no such remote — add one with `anvil remote add <name> <url>`.",
+  REMOTE_ERROR: "the remote could not be reached or is not an anvil instance — check the URL.",
+  PUSH_NOT_SUPPORTED: "this remote is read-only — push to a git remote or a writable directory.",
+  VC_STATE: "a version-control operation is in an unexpected state — check `anvil log`.",
+  NO_COMPATIBLE_VERSION: "an item has no version compatible with the merged game — pin or drop it.",
+  LOCK_BUSY: "another anvil process holds the instance/store lock — retry once it finishes.",
 };
 
 /** The exit code for an error code (unknown codes fall back to {@link EXIT_ERROR}). */

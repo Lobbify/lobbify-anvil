@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { Anvil, type AnvilEvent, NotImplemented, ProgressBus } from "../index.js";
+import {
+  Anvil,
+  AnvilError,
+  type AnvilEvent,
+  NotImplemented,
+  ProgressBus,
+  RemoteNotFound,
+} from "../index.js";
 
 describe("Anvil scaffold", () => {
   it("constructs with minimal options", () => {
@@ -8,9 +15,9 @@ describe("Anvil scaffold", () => {
     expect(anvil.dir).toBe("/tmp/anvil-smoke");
   });
 
-  it("throws NotImplemented from a still-stubbed async method", async () => {
-    const anvil = new Anvil({ dir: "/tmp/anvil-smoke" });
-    await expect(anvil.pull()).rejects.toBeInstanceOf(NotImplemented);
+  it("pull with no configured remote rejects with a typed RemoteNotFound", async () => {
+    const anvil = new Anvil({ dir: "/tmp/anvil-smoke-remote" });
+    await expect(anvil.pull()).rejects.toBeInstanceOf(RemoteNotFound);
   });
 
   it("carries a stable error code + name on NotImplemented", () => {
@@ -20,23 +27,22 @@ describe("Anvil scaffold", () => {
     expect(err.code).toBe("NOT_IMPLEMENTED");
   });
 
-  it("every not-yet-owned method is stubbed to throw NotImplemented", async () => {
-    // Stage 1 implements build/verify/gc/fsck; Stage 2 adds lock; Stage 4 adds
-    // init/add/remove/status/diff/why/import; Stage 5 adds the VC verbs
-    // (commit/branch/switch/log/merge/rebase/revert). Only the remote verbs
-    // (clone/pull/push) and export remain stubbed until Stages 6–7.
-    const anvil = new Anvil({ dir: "/tmp/anvil-smoke" });
-    const calls: Array<Promise<unknown>> = [
-      anvil.clone("https://example.com/pack"),
+  it("the Stage-7 remote/export verbs are wired (reject with typed AnvilErrors)", async () => {
+    // Stage 7 lands clone/pull/push + export. Against an empty, unconfigured dir
+    // they fail with typed, actionable AnvilErrors (a missing remote / manifest),
+    // never a bare Error or a NotImplemented stub. (clone is exercised in the
+    // remote suite with a real fixture transport — it would hit the network here.)
+    const anvil = new Anvil({ dir: "/tmp/anvil-smoke-verbs" });
+    const results = await Promise.allSettled([
       anvil.pull(),
       anvil.push(),
       anvil.export("pack.mrpack"),
-    ];
-    const results = await Promise.allSettled(calls);
+    ]);
     for (const r of results) {
       expect(r.status).toBe("rejected");
       if (r.status === "rejected") {
-        expect(r.reason).toBeInstanceOf(NotImplemented);
+        expect(r.reason).toBeInstanceOf(AnvilError);
+        expect(r.reason).not.toBeInstanceOf(NotImplemented);
       }
     }
   });

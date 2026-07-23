@@ -38,6 +38,7 @@ export interface FetchInitLike {
   readonly method: string;
   readonly headers: Record<string, string>;
   readonly redirect: "manual";
+  readonly body?: Uint8Array;
   readonly dispatcher?: unknown;
 }
 
@@ -139,7 +140,7 @@ export class RateLimitedHttp implements Http {
         throw new HttpError(url, `too many redirects (> ${this.#maxRedirects})`);
       }
       const { addresses, pin } = await this.#resolveAndGuard(current, options);
-      const res = await this.#requestWithRetry(current, options.headers ?? {}, pin);
+      const res = await this.#requestWithRetry("GET", current, options.headers ?? {}, pin);
       if (isRedirect(res.status)) {
         const location = res.headers.get("location");
         if (!location) {
@@ -187,15 +188,50 @@ export class RateLimitedHttp implements Http {
     return { addresses, pin: addresses[0] };
   }
 
+  /**
+   * A JSON POST for the batch identity endpoints (Modrinth `version_files`,
+   * CurseForge `fingerprints`). Single-hop: the SSRF guard runs on the target and
+   * a redirect is refused (an API POST endpoint does not legitimately redirect a
+   * body), so a 3xx cannot bounce a request body to an unvetted host.
+   */
+  async post(url: string, body: Uint8Array, options: HttpGetOptions = {}): Promise<HttpResult> {
+    const { pin } = await this.#resolveAndGuard(url, options);
+    const headers = { "content-type": "application/json", ...(options.headers ?? {}) };
+    const res = await this.#requestWithRetry("POST", url, headers, pin, body);
+    if (isRedirect(res.status)) {
+      throw new HttpError(
+        url,
+        `refusing to follow a redirect on a POST (${res.status})`,
+        res.status,
+      );
+    }
+    if (res.status >= 400) {
+      throw new HttpError(url, `unexpected status ${res.status}`, res.status);
+    }
+    const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new HttpError(url, `response declares ${declared} > ${maxBytes} bytes`, res.status);
+    }
+    const respBody = new Uint8Array(await res.arrayBuffer());
+    if (respBody.byteLength > maxBytes) {
+      throw new HttpError(url, `response exceeds ${maxBytes} bytes`, res.status);
+    }
+    return { status: res.status, headers: collectHeaders(res), url, body: respBody };
+  }
+
   async #requestWithRetry(
+    method: string,
     url: string,
     headers: Readonly<Record<string, string>>,
     pin: string | undefined,
+    body?: Uint8Array,
   ): Promise<FetchResponseLike> {
     const init: FetchInitLike = {
-      method: "GET",
+      method,
       redirect: "manual",
       headers: { "user-agent": this.#ua, "accept-encoding": "identity", ...headers },
+      ...(body !== undefined ? { body } : {}),
       // Pin the vetted IP on the real path; harmless/ignored under an injected fetch.
       ...(pin && !this.#injectedFetch ? { dispatcher: pinnedDispatcher(pin) } : {}),
     };
@@ -300,6 +336,7 @@ const defaultFetch: FetchLike = async (url, init) => {
     method: init.method,
     headers: init.headers,
     redirect: init.redirect,
+    ...(init.body !== undefined ? { body: init.body } : {}),
     ...(init.dispatcher ? { dispatcher: init.dispatcher as Agent } : {}),
   });
   return res as unknown as FetchResponseLike;

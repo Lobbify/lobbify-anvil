@@ -11,6 +11,9 @@ export type {
   AnvilEnv,
   BuildOptions,
   BuildResult,
+  CloneOptions,
+  CloneResult,
+  ExportResult,
   FsckResult,
   GcResult,
   ImportSummary,
@@ -21,6 +24,7 @@ export type {
   MergeOptions,
   MergeResult,
   PullResult,
+  PushResult,
   RebaseOptions,
   RebaseResult,
   RevertResult,
@@ -54,6 +58,10 @@ export * from "./src/game/index.js";
 
 // Stage 4 — `.mrpack` import (the thin CLI ships as the `lobbify-anvil` bin).
 export * from "./src/import/index.js";
+
+// Stage 7 — remotes (clone/pull/push), `.mrpack` export, Prism import.
+export * from "./src/remote/index.js";
+export * from "./src/export/index.js";
 
 // Stage 5 — the anvil-native version-control engine (commit/branch/merge/rebase).
 export type {
