@@ -15,13 +15,18 @@
  * outside the instance or into a protected path (`saves/`, `.anvil/`).
  */
 
+import { randomUUID } from "node:crypto";
 import { chmod, symlink } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import type { Platform } from "../build/preflight.js";
 import type { LinkStrategy } from "../events.js";
-import { ensureDir, pathExists, safeJoin } from "../internal/fs.js";
+import { runForgeProcessors } from "../game/forge-build.js";
+import { parseForgePlan } from "../game/forge-install.js";
+import { type ProcessorRunner, denyAllProcessors } from "../game/forge-processors.js";
+import { ensureDir, pathExists, removePath, safeJoin } from "../internal/fs.js";
 import { MissingObject, PathEscape, UnsatisfiableTarget } from "../types/errors.js";
-import type { Hash, LockPackage } from "../types/index.js";
+import type { AllowProcessor, Hash, LockPackage } from "../types/index.js";
 import { shardOf } from "./hash.js";
 import type { ReplayCache } from "./replay-cache.js";
 import { excludeMetaInf, safeExtract } from "./safe-extract.js";
@@ -75,6 +80,16 @@ export interface PlacementContext {
    * contains a replay package; absent is fine for a copy-only build.
    */
   readonly replayCache?: ReplayCache;
+  /**
+   * The sandboxed JVM runner a `forge-build` placement replays installer processors
+   * through (Stage 9). Required whenever the delta contains a Forge/NeoForge install
+   * plan; absent is fine for any other build.
+   */
+  readonly processorRunner?: ProcessorRunner;
+  /** The build platform — needed to locate the pinned JRE for `forge-build`. */
+  readonly platform?: Platform;
+  /** Host-app consent for non-allowlisted installer processors (default deny). */
+  readonly allowProcessor?: AllowProcessor;
   readonly onWarn?: (message: string) => void;
 }
 
@@ -97,6 +112,8 @@ export function targetsOf(pkg: LockPackage): readonly string[] {
       return [p.indexTarget];
     case "runtime-tree":
       return [p.targetDir];
+    case "forge-build":
+      return [...p.outputs];
     case "store-only":
       return [];
     default:
@@ -197,6 +214,10 @@ export async function executePlacement(
       const destRoot = safeJoin(ctx.stageRoot, p.targetDir);
       await materializeRuntime(pkg, destRoot, ctx);
       return { targets: [p.targetDir] };
+    }
+    case "forge-build": {
+      const produced = await materializeForgeBuild(pkg, ctx);
+      return { targets: produced };
     }
     case "store-only": {
       if (!(await ctx.store.has(pkg.hash))) {
@@ -338,4 +359,39 @@ async function materializeRuntime(
 /** safeJoin a manifest-relative entry under an absolute runtime root. */
 function safeChild(root: string, rel: string): string {
   return safeJoin(root, rel, { allowProtected: true });
+}
+
+/**
+ * Replay a pinned Forge/NeoForge install plan (the object under `pkg.hash`) under
+ * the processor sandbox, materializing the produced files (the patched client
+ * libraries) into the stage. Requires the build to have supplied a
+ * {@link ProcessorRunner} + platform — running installer processors is opt-in and
+ * carried explicitly, never implicit.
+ */
+async function materializeForgeBuild(
+  pkg: LockPackage,
+  ctx: PlacementContext,
+): Promise<readonly string[]> {
+  if (!ctx.processorRunner || !ctx.platform) {
+    throw new UnsatisfiableTarget(
+      pkg.name,
+      "a Forge/NeoForge build requires a processor runner and platform in the build context",
+    );
+  }
+  const plan = parseForgePlan(await readFile(ctx.store.objectPath(pkg.hash)));
+  const scratchDir = join(ctx.instanceDir, ".anvil", `forge-${randomUUID()}`);
+  try {
+    return await runForgeProcessors({
+      plan,
+      store: ctx.store,
+      scratchDir,
+      stageRoot: ctx.stageRoot,
+      platform: ctx.platform,
+      runner: ctx.processorRunner,
+      consent: ctx.allowProcessor ?? denyAllProcessors,
+      instanceDir: ctx.instanceDir,
+    });
+  } finally {
+    await removePath(scratchDir);
+  }
 }

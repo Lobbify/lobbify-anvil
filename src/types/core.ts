@@ -109,6 +109,28 @@ export interface ManifestItem {
 export type AllowSource = (ref: ResolvedRef) => boolean;
 
 /**
+ * The identity of a Forge/NeoForge installer processor the host app is asked to
+ * consent to, when its jar is **not** on the built-in trusted-coordinate allowlist.
+ */
+export interface ProcessorIdentity {
+  /** The processor jar's maven coordinate (`group:artifact:version[:classifier]`). */
+  readonly coordinate: string;
+  /** The maven repository host the jar was resolved from, when known. */
+  readonly repo?: string;
+  /** The pinned sha256 of the processor jar (a pin is mandatory regardless). */
+  readonly sha256: string;
+}
+
+/**
+ * A host-app consent hook for Forge/NeoForge installer processors that are not on
+ * the built-in official-coordinate allowlist. Modeled on {@link AllowSource}: it is
+ * consulted **before** anvil will run a non-allowlisted processor jar, and it
+ * **defaults to deny** (running arbitrary installer code is an RCE surface). A pin
+ * is always required — consent never waives the mandatory sha256 pin.
+ */
+export type AllowProcessor = (proc: ProcessorIdentity) => boolean;
+
+/**
  * How a materialized object lands in the instance tree. A discriminated union
  * executed by the placement executor.
  *
@@ -122,12 +144,20 @@ export type AllowSource = (ref: ResolvedRef) => boolean;
  * - `store-only` — keep the object in the shared store but place nothing into the
  *   instance tree (e.g. a classpath library or client jar referenced by store
  *   path). Additive member landed in Stage 1 to complete the placement table.
+ * - `forge-build` — the object under `hash` is a **generated Forge/NeoForge install
+ *   plan** (the sandboxed processor DAG + data bindings, pinned like any object).
+ *   The build reads it, runs each installer processor through the sandbox (Stage 9)
+ *   reusing the pinned JRE, and writes the produced files (the patched client jar +
+ *   any generated libraries) to `outputs` — the complete, deterministic set of
+ *   instance-relative paths the processors produce, declared at lock time so the
+ *   atomic swap and the incremental delta see them as normal targets.
  */
 export type Placement =
   | { readonly method: "link"; readonly target: string }
   | { readonly method: "extract"; readonly targetDir: string }
   | { readonly method: "asset-tree"; readonly indexTarget: string }
   | { readonly method: "runtime-tree"; readonly targetDir: string }
+  | { readonly method: "forge-build"; readonly outputs: readonly string[] }
   | { readonly method: "store-only" };
 
 /**
@@ -369,6 +399,12 @@ export interface AnvilOptions {
   readonly curseforgeKey?: string;
   /** Host-app source policy. Defaults to allow-all for the standalone CLI. */
   readonly allowSource?: AllowSource;
+  /**
+   * Host-app consent policy for **non-allowlisted** Forge/NeoForge installer
+   * processors (an RCE surface). Defaults to deny; official, sha256-pinned
+   * processors from trusted repos run without consulting it.
+   */
+  readonly allowProcessor?: AllowProcessor;
   /** Build purely from the populated store; error on the first missing object. */
   readonly offline?: boolean;
   /** Explicit proxy override; otherwise `HTTP(S)_PROXY` env is honored. */

@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { AnvilEvent } from "../events.js";
+import type { ProcessorRunner } from "../game/forge-processors.js";
 import type { FaultHook } from "../internal/faults.js";
 import { ensureDir } from "../internal/fs.js";
 import type { ContentStore } from "../store/index.js";
@@ -15,7 +16,7 @@ import { executePlacement } from "../store/index.js";
 import { hashFile } from "../store/index.js";
 import type { ReplayCache } from "../store/replay-cache.js";
 import { ShaMismatch } from "../types/errors.js";
-import type { LockPackage, Lockfile } from "../types/index.js";
+import type { AllowProcessor, LockPackage, Lockfile } from "../types/index.js";
 import type { Acquirer } from "./acquire.js";
 import type { IgnoreSet } from "./anvilignore.js";
 import { loadIgnoreSet } from "./anvilignore.js";
@@ -56,6 +57,14 @@ export interface BuildEngineInput {
   readonly ignore?: IgnoreSet;
   /** Optional per-package platform rules (Stage 2/3 feeds these). */
   readonly rules?: ReadonlyMap<string, readonly Rule[]>;
+  /**
+   * The sandboxed JVM runner installer processors replay through, for a lock that
+   * carries a Forge/NeoForge install plan (Stage 9). Threaded to the placement
+   * context; a copy-only / Fabric build may omit it.
+   */
+  readonly processorRunner?: ProcessorRunner;
+  /** Host-app consent for non-allowlisted installer processors (default deny). */
+  readonly allowProcessor?: AllowProcessor;
   /** Test-only crash hook threaded into the swap (and store writes). */
   readonly fault?: FaultHook;
   readonly emit?: (event: AnvilEvent) => void;
@@ -149,8 +158,11 @@ export async function buildInstance(input: BuildEngineInput): Promise<BuildEngin
       store,
       stageRoot,
       instanceDir,
+      platform,
       ...(input.assetsDir ? { assetsDir: input.assetsDir } : {}),
       ...(input.replayCache ? { replayCache: input.replayCache } : {}),
+      ...(input.processorRunner ? { processorRunner: input.processorRunner } : {}),
+      ...(input.allowProcessor ? { allowProcessor: input.allowProcessor } : {}),
     });
     if (outcome.targets.length > 0) {
       emit({
