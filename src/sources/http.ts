@@ -23,7 +23,7 @@
 import { isIP } from "node:net";
 import type { LookupFunction } from "node:net";
 import { Agent, fetch as undiciFetch } from "undici";
-import { HttpError } from "../types/errors.js";
+import { AnvilError, HttpError, NetworkError } from "../types/errors.js";
 import type { Http, HttpGetOptions, HttpHop, HttpResult } from "../types/index.js";
 import { assertHttpScheme, guardHop } from "./ssrf.js";
 
@@ -79,6 +79,75 @@ const MAX_DELAY_MS = 60_000;
 
 function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+/**
+ * Known transport-level (DNS/connect) error codes → a short, human-readable
+ * reason. Covers both node's `errno` codes and undici's `UND_ERR_*` codes. A
+ * `fetch failed` `TypeError` carries the real cause under `.cause`.
+ */
+const NETWORK_REASONS: Readonly<Record<string, string>> = {
+  ENOTFOUND: "DNS lookup failed (host not found)",
+  EAI_AGAIN: "temporary DNS failure — try again",
+  ECONNREFUSED: "connection refused",
+  ECONNRESET: "the connection was reset",
+  ETIMEDOUT: "the connection timed out",
+  UND_ERR_CONNECT_TIMEOUT: "the connection timed out",
+  UND_ERR_HEADERS_TIMEOUT: "the server took too long to respond",
+  UND_ERR_BODY_TIMEOUT: "the server took too long to send the response",
+  UND_ERR_SOCKET: "the connection was closed unexpectedly",
+  ENETUNREACH: "the network is unreachable",
+  EHOSTUNREACH: "the host is unreachable",
+  EPIPE: "the connection was closed unexpectedly",
+};
+
+/** The best transport error code from an error (its own, else its `cause`'s). */
+function transportErrorCode(err: unknown): string | undefined {
+  const e = err as { code?: unknown; cause?: unknown };
+  const direct = typeof e?.code === "string" ? e.code : undefined;
+  const cause = e?.cause as { code?: unknown } | undefined;
+  const nested = typeof cause?.code === "string" ? cause.code : undefined;
+  if (direct !== undefined && direct in NETWORK_REASONS) {
+    return direct;
+  }
+  if (nested !== undefined && nested in NETWORK_REASONS) {
+    return nested;
+  }
+  return direct ?? nested;
+}
+
+/** The bare hostname of a URL, for naming it in a {@link NetworkError}. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^\[|\]$/g, "") || url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Convert a raw DNS/transport failure into a typed {@link NetworkError} naming the
+ * host + a human reason. Only *recognizable* transport failures are converted (a
+ * known errno/undici code, or undici's generic `fetch failed`); anything else is
+ * returned untouched so a genuine bug still surfaces as an unexpected error rather
+ * than being masked as a network problem. An already-typed {@link AnvilError}
+ * (e.g. an SSRF rejection) passes through unchanged.
+ */
+function toNetworkError(url: string, err: unknown): unknown {
+  if (err instanceof AnvilError) {
+    return err;
+  }
+  const code = transportErrorCode(err);
+  const message = err instanceof Error ? err.message : String(err);
+  const isFetchFailed = /fetch failed/i.test(message);
+  if (!isFetchFailed && !(code !== undefined && code in NETWORK_REASONS)) {
+    return err;
+  }
+  const reason =
+    code !== undefined && code in NETWORK_REASONS
+      ? (NETWORK_REASONS[code] as string)
+      : "the network request could not be completed";
+  return new NetworkError(hostOf(url), reason, err instanceof Error ? { cause: err } : {});
 }
 
 function realSleep(ms: number): Promise<void> {
@@ -206,7 +275,13 @@ export class RateLimitedHttp implements Http {
     // Reject a bad scheme BEFORE any DNS resolution.
     assertHttpScheme(url);
     const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-    const addresses = isIP(host) ? [host] : await this.#lookup(host);
+    let addresses: string[];
+    try {
+      addresses = isIP(host) ? [host] : await this.#lookup(host);
+    } catch (err) {
+      // A DNS failure is a reach-the-host problem, not an internal bug.
+      throw toNetworkError(url, err);
+    }
     const hop: HttpHop = { url, host, addresses };
     await guard(hop);
     return { addresses, pin: addresses[0] };
@@ -261,7 +336,14 @@ export class RateLimitedHttp implements Http {
     };
     for (let attempt = 0; ; attempt += 1) {
       await this.#takeToken();
-      const res = await this.#fetch(url, init);
+      let res: FetchResponseLike;
+      try {
+        res = await this.#fetch(url, init);
+      } catch (err) {
+        // A transport failure (connection refused/reset/timeout, `fetch failed`)
+        // becomes a typed, host-named network error — not an internal bug.
+        throw toNetworkError(url, err);
+      }
       if ((res.status === 429 || res.status === 503) && attempt < this.#maxRetries) {
         await this.#sleep(this.#retryDelayMs(res, attempt));
         continue;

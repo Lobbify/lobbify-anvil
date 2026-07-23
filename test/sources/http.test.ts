@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HttpError, SsrfBlocked, guardHop } from "../../index.js";
+import { HttpError, NetworkError, SsrfBlocked, guardHop } from "../../index.js";
 import { type ScriptedResponse, makeScriptedHttp } from "../helpers/net.js";
 
 const ok = (body = "ok"): ScriptedResponse => ({
@@ -83,5 +83,64 @@ describe("RateLimitedHttp", () => {
       maxRedirects: 3,
     });
     await expect(s.http.get("https://public.example/start")).rejects.toBeInstanceOf(HttpError);
+  });
+
+  it("maps a transport failure to a typed NetworkError naming the host + reason", async () => {
+    const fetchFailed = () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:443"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+    };
+    const s = makeScriptedHttp({ handler: fetchFailed });
+    const err = await s.http.get("https://api.modrinth.com/v2/project/sodium").catch((e) => e);
+    expect(err).toBeInstanceOf(NetworkError);
+    expect((err as NetworkError).code).toBe("NETWORK_ERROR");
+    expect((err as NetworkError).host).toBe("api.modrinth.com");
+    expect((err as Error).message).toContain("could not reach api.modrinth.com");
+    expect((err as Error).message).toContain("connection refused");
+    // The raw cause is preserved for debugging, but not part of the rendered text.
+    expect((err as NetworkError).cause).toBeDefined();
+    expect((err as Error).message).not.toContain("10.0.0.1");
+  });
+
+  it("maps a DNS resolution failure to a NetworkError (host not found)", async () => {
+    const s = makeScriptedHttp({
+      handler: () => ok(),
+      lookup: async () => {
+        throw Object.assign(new Error("getaddrinfo ENOTFOUND nope.invalid"), {
+          code: "ENOTFOUND",
+        });
+      },
+    });
+    const err = await s.http.get("https://nope.invalid/mod.jar").catch((e) => e);
+    expect(err).toBeInstanceOf(NetworkError);
+    expect((err as Error).message).toContain("nope.invalid");
+    expect((err as Error).message.toLowerCase()).toContain("dns");
+    // No fetch was ever attempted — it failed at name resolution.
+    expect(s.requests).toHaveLength(0);
+  });
+
+  it("maps a connection timeout to a NetworkError", async () => {
+    const s = makeScriptedHttp({
+      handler: () => {
+        throw Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" });
+      },
+    });
+    const err = await s.http.get("https://slow.example/x").catch((e) => e);
+    expect(err).toBeInstanceOf(NetworkError);
+    expect((err as Error).message).toContain("timed out");
+  });
+
+  it("does NOT mask a genuinely-unexpected (non-transport) error as a network failure", async () => {
+    const s = makeScriptedHttp({
+      handler: () => {
+        throw new Error("a real bug in our code");
+      },
+    });
+    const err = await s.http.get("https://api.example/x").catch((e) => e);
+    expect(err).not.toBeInstanceOf(NetworkError);
+    expect((err as Error).message).toBe("a real bug in our code");
   });
 });

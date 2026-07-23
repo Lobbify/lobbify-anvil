@@ -7,15 +7,28 @@
 import { rename, writeFile } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { LockMissing } from "../types/errors.js";
 import type { Lockfile } from "../types/index.js";
 import { parseLock, serializeLock } from "./serialize.js";
 
 /** The lockfile name at the instance root — the build's sole input. */
 export const LOCK_FILENAME = "anvil.lock";
 
-/** Read + parse `<dir>/anvil.lock`. Rejects if absent (a build needs a lock). */
+/**
+ * Read + parse `<dir>/anvil.lock`. A build/verify needs a lock, so an absent file
+ * is surfaced as a typed {@link LockMissing} ("run `anvil lock` first") rather than
+ * a raw `ENOENT` that the CLI would render as an internal bug.
+ */
 export async function readLock(instanceDir: string): Promise<Lockfile> {
-  const text = await readFile(join(instanceDir, LOCK_FILENAME), "utf8");
+  let text: string;
+  try {
+    text = await readFile(join(instanceDir, LOCK_FILENAME), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new LockMissing(instanceDir);
+    }
+    throw err;
+  }
   return parseLock(text);
 }
 
@@ -24,7 +37,7 @@ export async function readLockIfPresent(instanceDir: string): Promise<Lockfile |
   try {
     return await readLock(instanceDir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+    if (err instanceof LockMissing) {
       return undefined;
     }
     throw err;

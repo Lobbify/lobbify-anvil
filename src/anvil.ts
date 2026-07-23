@@ -361,7 +361,14 @@ const DEFAULT_ANVILIGNORE = `# .anvilignore — top-level entries a build must n
 
 /** The manifest-vs-lock-vs-built dirty state reported by {@link Anvil.status}. */
 export interface StatusResult {
+  /** An `anvil.toml` file is present on disk (whether or not it parses). */
   readonly hasManifest: boolean;
+  /**
+   * The manifest file is present but could not be parsed; the reason, when so.
+   * Distinguishes a genuinely-absent manifest ("run `anvil init`") from a broken
+   * one ("fix the manifest") — `status` never crashes on a malformed manifest.
+   */
+  readonly manifestError?: string;
   readonly hasLock: boolean;
   readonly hasBuilt: boolean;
   /** The manifest changed since the lock was written — a re-`lock` is due. */
@@ -1000,7 +1007,20 @@ export class Anvil {
    * lock has changed since the last build (a `build` is due). Offline.
    */
   async status(): Promise<StatusResult> {
-    const manifest = await readManifest(this.dir).catch(() => undefined);
+    // Distinguish a truly-absent manifest from one that is present but won't
+    // parse: probe presence first, then attempt the parse and capture (never
+    // throw) its reason. A broken manifest must not crash `status`.
+    const manifestPresent = await pathExists(join(this.dir, MANIFEST_FILENAME));
+    let manifest: Manifest | undefined;
+    let manifestError: string | undefined;
+    if (manifestPresent) {
+      try {
+        manifest = await readManifest(this.dir);
+      } catch (err) {
+        manifestError =
+          err instanceof AnvilError ? err.message : String((err as Error)?.message ?? err);
+      }
+    }
     const input = await readLockIfPresent(this.dir);
     const built = await readBuiltLock(this.dir);
     let manifestDirty = false;
@@ -1010,8 +1030,16 @@ export class Anvil {
     }
     const buildDirty = input ? this.#buildDirty(input, built) : false;
     let summary: string;
-    if (!manifest) {
+    if (!manifestPresent) {
       summary = "no anvil.toml — run `anvil init`";
+    } else if (manifestError) {
+      // Strip the parser's own "could not parse anvil.toml:" prefix and keep only
+      // the first line so the one summary line reads cleanly (the TOML parser
+      // appends a multi-line source snippet; the full detail is shown by `lock`).
+      const reason = (
+        manifestError.replace(/^could not parse anvil\.toml:\s*/i, "").split("\n")[0] ?? ""
+      ).trim();
+      summary = `anvil.toml present but could not be parsed: ${reason} — fix the manifest`;
     } else if (!input) {
       summary = "not locked — run `anvil lock`";
     } else if (manifestDirty) {
@@ -1024,7 +1052,8 @@ export class Anvil {
       summary = "clean — manifest, lock, and instance are in sync";
     }
     return {
-      hasManifest: manifest !== undefined,
+      hasManifest: manifestPresent,
+      ...(manifestError ? { manifestError } : {}),
       hasLock: input !== undefined,
       hasBuilt: built !== undefined,
       manifestDirty,

@@ -283,6 +283,24 @@ export class HttpError extends AnvilError {
   }
 }
 
+/**
+ * A transport-level failure reaching a host: DNS resolution failed, the
+ * connection was refused / reset / timed out, or `fetch` failed outright — the
+ * host could not be reached *at all*. Distinct from {@link HttpError} (the host
+ * answered, with a non-2xx status). Names the host and a short human reason so a
+ * user can tell a connectivity problem (offline, host down, DNS) from a bad URL —
+ * an expected condition, never an internal bug. The underlying node/undici error
+ * is preserved on `cause` for debugging but never rendered.
+ */
+export class NetworkError extends AnvilError {
+  readonly host: string;
+
+  constructor(host: string, reason: string, options?: ErrorOptions) {
+    super("NETWORK_ERROR", `could not reach ${host}: ${reason}`, options);
+    this.host = host;
+  }
+}
+
 /** The `anvil.toml` manifest was malformed or referenced an unknown source. */
 export class ManifestError extends AnvilError {
   constructor(message: string) {
@@ -294,6 +312,24 @@ export class ManifestError extends AnvilError {
 export class LockParseError extends AnvilError {
   constructor(message: string) {
     super("LOCK_INVALID", message);
+  }
+}
+
+/**
+ * A command that requires a frozen `anvil.lock` (e.g. `build`, `verify`) was run
+ * before the manifest was ever locked — the lock file is simply absent. A clear,
+ * expected first-run condition, never an internal bug: resolve the manifest first.
+ */
+export class LockMissing extends AnvilError {
+  readonly dir: string;
+
+  constructor(dir: string, message?: string) {
+    super(
+      "LOCK_MISSING",
+      message ??
+        `no anvil.lock found in "${dir}" — run \`anvil lock\` to resolve and pin the manifest first`,
+    );
+    this.dir = dir;
   }
 }
 

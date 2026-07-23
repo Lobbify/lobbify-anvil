@@ -47,6 +47,8 @@ export const EXIT_CODES: Readonly<Record<string, number>> = {
   VC_STATE: 24,
   NO_COMPATIBLE_VERSION: 25,
   LOCK_BUSY: 26,
+  LOCK_MISSING: 27,
+  NETWORK_ERROR: 28,
 };
 
 /** An actionable hint per error code — what the user should do next. */
@@ -79,6 +81,9 @@ const HINTS: Readonly<Record<string, string>> = {
   VC_STATE: "a version-control operation is in an unexpected state — check `anvil log`.",
   NO_COMPATIBLE_VERSION: "an item has no version compatible with the merged game — pin or drop it.",
   LOCK_BUSY: "another anvil process holds the instance/store lock — retry once it finishes.",
+  LOCK_MISSING: "resolve the manifest first — run `anvil lock`, then retry.",
+  NETWORK_ERROR:
+    "the host could not be reached — check your connection, DNS, or any HTTP(S)_PROXY.",
 };
 
 /** The exit code for an error code (unknown codes fall back to {@link EXIT_ERROR}). */

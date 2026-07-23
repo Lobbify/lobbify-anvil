@@ -128,6 +128,10 @@ export class InitCommand extends AnvilCommand {
     description: "Scaffold anvil.toml (and a .anvilignore) for a fresh instance",
   });
 
+  // An optional positional target dir/name (`anvil init my-pack`), git init <dir> /
+  // uv init <name> style — an alias for --dir. Both may be given only if they name
+  // the same directory.
+  directory = Option.String({ required: false, name: "dir" });
   name = Option.String("--name", { description: "Project name (default: directory name)" });
   minecraft = Option.String("--minecraft,--mc", { description: "Minecraft version (required)" });
   loader = Option.String("--loader", {
@@ -139,19 +143,41 @@ export class InitCommand extends AnvilCommand {
   summary = Option.String("--summary", { description: "One-line project summary" });
   force = Option.Boolean("--force", false, { description: "Overwrite an existing anvil.toml" });
 
+  /**
+   * Emit a usage error honoring the --json contract (exactly one JSON object on
+   * stdout) or a plain `error: …` on stderr — never a mixed/empty payload a CI
+   * parser would choke on.
+   */
+  #usage(message: string): number {
+    if (this.json) {
+      this.context.stdout.write(
+        `${JSON.stringify({ ok: false, error: { code: "USAGE", message, exitCode: EXIT_ERROR } })}\n`,
+      );
+    } else {
+      this.context.stderr.write(`error: ${message}\n`);
+    }
+    return EXIT_ERROR;
+  }
+
   override async execute(): Promise<number> {
-    if (!this.minecraft) {
-      const message = "`init` requires --minecraft <version>";
-      // Keep the --json contract: exactly one JSON object on stdout, else plain
-      // stderr — never a mixed/empty payload a CI parser would choke on.
-      if (this.json) {
-        this.context.stdout.write(
-          `${JSON.stringify({ ok: false, error: { code: "USAGE", message, exitCode: EXIT_ERROR } })}\n`,
+    // Reconcile the positional dir/name with --dir: both set the target instance
+    // directory, and are accepted together only when they agree — a genuine
+    // mismatch is a clear error, never a silent pick of one.
+    if (this.directory !== undefined) {
+      if (
+        this.dir !== undefined &&
+        resolve(this.context.cwd, this.dir) !== resolve(this.context.cwd, this.directory)
+      ) {
+        return this.#usage(
+          `conflicting target directory: positional "${this.directory}" and --dir "${this.dir}" differ — pass only one`,
         );
-      } else {
-        this.context.stderr.write(`error: ${message}\n`);
       }
-      return EXIT_ERROR;
+      this.dir = this.directory;
+    }
+    if (!this.minecraft) {
+      return this.#usage(
+        "a Minecraft version is required — pass --minecraft <version> (e.g. --minecraft 26.2)",
+      );
     }
     const name = this.name ?? basename(this.instanceDir());
     const minecraft = this.minecraft;
@@ -312,13 +338,26 @@ export class StatusCommand extends AnvilCommand {
     return this.run((anvil) => anvil.status(), {
       plain: (s) => [
         s.summary,
-        `  manifest: ${s.hasManifest ? "present" : "missing"}  ·  lock: ${
+        `  manifest: ${manifestState(s)}  ·  lock: ${
           s.hasLock ? (s.manifestDirty ? "stale" : "present") : "missing"
         }  ·  built: ${s.hasBuilt ? (s.buildDirty ? "out-of-date" : "current") : "never"}`,
       ],
       json: (s) => ({ status: s }),
+      // A present-but-unparseable manifest is a real problem, not a clean state.
+      exitCode: (s) => (s.manifestError ? EXIT_ERROR : EXIT_OK),
     });
   }
+}
+
+/** The manifest cell for the status detail line. */
+function manifestState(s: {
+  hasManifest: boolean;
+  manifestError?: string;
+}): string {
+  if (!s.hasManifest) {
+    return "missing";
+  }
+  return s.manifestError ? "unparseable" : "present";
 }
 
 export class DiffCommand extends AnvilCommand {
