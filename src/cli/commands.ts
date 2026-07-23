@@ -10,9 +10,38 @@ import { basename, resolve } from "node:path";
 import { Command, Option } from "clipanion";
 import type { Anvil } from "../anvil.js";
 import type { AnvilOptions } from "../types/index.js";
+import type { ConflictStrategy } from "../vc/index.js";
+import { describeConflict } from "../vc/index.js";
 import type { AnvilCliContext } from "./context.js";
 import { EXIT_ERROR, EXIT_OK, renderError } from "./errors.js";
 import { describeEvent } from "./reporter.js";
+
+/** The one-of `--ours/--theirs/--newest/--manual` conflict strategy from four booleans. */
+function pickStrategy(flags: {
+  ours: boolean;
+  theirs: boolean;
+  newest: boolean;
+  manual: boolean;
+}): ConflictStrategy | undefined {
+  if (flags.ours) {
+    return "ours";
+  }
+  if (flags.theirs) {
+    return "theirs";
+  }
+  if (flags.newest) {
+    return "newest";
+  }
+  if (flags.manual) {
+    return "manual";
+  }
+  return undefined;
+}
+
+/** The compact `algo:value` short form used in plain command output. */
+function shortId(hash: { algo: string; value: string }): string {
+  return `${hash.value.slice(0, 12)}`;
+}
 
 /** A rendered command result: plain-mode lines + a JSON payload. */
 type Render<T> = {
@@ -371,6 +400,252 @@ export class FsckCommand extends AnvilCommand {
   }
 }
 
+// --- version control (Stage 5) ---------------------------------------------
+
+export class CommitCommand extends AnvilCommand {
+  static override paths = [["commit"]];
+  static override usage = Command.Usage({
+    description: "Snapshot the manifest + lock into history (the manifest is the index)",
+  });
+  message = Option.String("-m,--message", { description: "Commit message (required)" });
+
+  override async execute(): Promise<number> {
+    if (!this.message) {
+      const msg = "`commit` requires -m <message>";
+      this.context.stderr.write(`error: ${msg}\n`);
+      return EXIT_ERROR;
+    }
+    const message = this.message;
+    return this.run((anvil) => anvil.commit(message), {
+      plain: (c) => [`committed ${shortId(c.id)} (generation ${c.generation})`],
+      json: (c) => ({ id: `${c.id.algo}:${c.id.value}`, generation: c.generation }),
+    });
+  }
+}
+
+export class BranchCommand extends AnvilCommand {
+  static override paths = [["branch"]];
+  static override usage = Command.Usage({
+    description: "Create a branch at HEAD (does not switch to it)",
+  });
+  name = Option.String({ required: true, name: "name" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.branch(this.name), {
+      plain: (c) => [`created branch "${this.name}" at ${shortId(c.id)}`],
+      json: (c) => ({ branch: this.name, at: `${c.id.algo}:${c.id.value}` }),
+    });
+  }
+}
+
+export class SwitchCommand extends AnvilCommand {
+  static override paths = [["switch"]];
+  static override usage = Command.Usage({
+    description: "Move the working tree + HEAD to a branch / tag / commit (by hash-diff)",
+  });
+  ref = Option.String({ required: true, name: "ref" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.switch(this.ref), {
+      plain: (c) => [`switched to ${this.ref} (${shortId(c.id)})`],
+      json: (c) => ({ ref: this.ref, id: `${c.id.algo}:${c.id.value}` }),
+    });
+  }
+}
+
+export class LogCommand extends AnvilCommand {
+  static override paths = [["log"]];
+  static override usage = Command.Usage({
+    description: "Show history reachable from HEAD (newest-first by generation)",
+  });
+  start = Option.String({ required: false, name: "start" });
+  graph = Option.Boolean("--graph", false, { description: "Prefix each commit with a graph rail" });
+  stat = Option.Boolean("--stat", false, { description: "Show the item-set delta per commit" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.log(this.start), {
+      plain: (entries) => {
+        if (entries.length === 0) {
+          return ["no commits yet"];
+        }
+        const lines: string[] = [];
+        for (const e of entries) {
+          const rail = this.graph ? "* " : "";
+          const refs = e.refs.length > 0 ? ` (${e.refs.join(", ")})` : "";
+          lines.push(`${rail}${shortId(e.id)} [gen ${e.gen}] ${e.op}: ${e.message}${refs}`);
+          if (this.stat) {
+            if (e.stat.game) {
+              lines.push(
+                `    @game ${e.stat.game.from.minecraft}/${e.stat.game.from.loader} → ${e.stat.game.to.minecraft}/${e.stat.game.to.loader}`,
+              );
+            }
+            for (const a of e.stat.added) {
+              lines.push(`    + ${a.key}`);
+            }
+            for (const c of e.stat.changed) {
+              lines.push(`    ~ ${c.to.key}`);
+            }
+            for (const r of e.stat.removed) {
+              lines.push(`    - ${r.key}`);
+            }
+          }
+        }
+        return lines;
+      },
+      json: (entries) => ({
+        commits: entries.map((e) => ({
+          id: `${e.id.algo}:${e.id.value}`,
+          gen: e.gen,
+          op: e.op,
+          message: e.message,
+          parents: e.parents.map((p) => `${p.algo}:${p.value}`),
+          refs: e.refs,
+        })),
+      }),
+    });
+  }
+}
+
+/** Shared `--ours/--theirs/--newest/--manual` flags for merge + rebase. */
+abstract class ResolvingCommand extends AnvilCommand {
+  ours = Option.Boolean("--ours", false, {
+    description: "Resolve every conflict in favor of ours",
+  });
+  theirs = Option.Boolean("--theirs", false, {
+    description: "Resolve every conflict in favor of theirs",
+  });
+  newest = Option.Boolean("--newest", false, {
+    description: "Resolve conflicts to the newer version",
+  });
+  manual = Option.Boolean("--manual", false, {
+    description: "Leave conflicts for manual resolution",
+  });
+
+  protected strategyOption(): { strategy: ConflictStrategy } | Record<string, never> {
+    const strategy = pickStrategy(this);
+    return strategy ? { strategy } : {};
+  }
+}
+
+export class MergeCommand extends ResolvingCommand {
+  static override paths = [["merge"]];
+  static override usage = Command.Usage({
+    description: "3-way merge a branch's item set into HEAD, then a constrained re-lock",
+  });
+  branch = Option.String({ required: true, name: "branch" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.merge(this.branch, this.strategyOption()), {
+      plain: (r) => {
+        if (r.upToDate) {
+          return ["already up to date"];
+        }
+        if (r.committed) {
+          const kind = r.fastForward ? "fast-forwarded to" : "merged as";
+          return [
+            ...r.warnings.map((w) => `warning: ${w}`),
+            `${kind} ${shortId(r.committed.id)} (generation ${r.committed.generation})`,
+          ];
+        }
+        return [
+          `merge stopped — ${r.conflicts.length} conflict(s), nothing committed:`,
+          ...r.conflicts.map((c) => `  ${describeConflict(c)}`),
+        ];
+      },
+      json: (r) => ({
+        committed: r.committed ? `${r.committed.id.algo}:${r.committed.id.value}` : null,
+        fastForward: r.fastForward,
+        upToDate: r.upToDate,
+        conflicts: r.conflicts,
+        warnings: r.warnings,
+      }),
+      exitCode: (r) => (r.conflicts.length > 0 ? EXIT_ERROR : EXIT_OK),
+    });
+  }
+}
+
+export class RevertCommand extends AnvilCommand {
+  static override paths = [["revert"]];
+  static override usage = Command.Usage({
+    description: "Create a new commit that undoes a past commit's item-delta, then re-locks",
+  });
+  ref = Option.String({ required: true, name: "ref" });
+
+  override async execute(): Promise<number> {
+    return this.run((anvil) => anvil.revert(this.ref), {
+      plain: (r) =>
+        r.committed
+          ? [
+              `reverted — committed ${shortId(r.committed.id)} (generation ${r.committed.generation})`,
+            ]
+          : [
+              `revert stopped — ${r.conflicts.length} conflict(s), nothing committed:`,
+              ...r.conflicts.map((c) => `  ${describeConflict(c)}`),
+            ],
+      json: (r) => ({
+        committed: r.committed ? `${r.committed.id.algo}:${r.committed.id.value}` : null,
+        conflicts: r.conflicts,
+      }),
+      exitCode: (r) => (r.conflicts.length > 0 ? EXIT_ERROR : EXIT_OK),
+    });
+  }
+}
+
+export class RebaseCommand extends ResolvingCommand {
+  static override paths = [["rebase"]];
+  static override usage = Command.Usage({
+    description:
+      "Replay the current branch onto another ref (per-commit re-lock, crash-survivable)",
+  });
+  onto = Option.String({ required: false, name: "onto" });
+  continue = Option.Boolean("--continue", false, { description: "Resume a paused rebase" });
+  skip = Option.Boolean("--skip", false, { description: "Drop the current commit and continue" });
+  abort = Option.Boolean("--abort", false, { description: "Abort, restoring ORIG_HEAD" });
+
+  override async execute(): Promise<number> {
+    return this.run(
+      (anvil) =>
+        anvil.rebase({
+          ...(this.onto ? { onto: this.onto } : {}),
+          continue: this.continue,
+          skip: this.skip,
+          abort: this.abort,
+          ...this.strategyOption(),
+        }),
+      {
+        plain: (r) => {
+          switch (r.status) {
+            case "done":
+              return r.head
+                ? [
+                    `rebase complete — HEAD at ${shortId(r.head.id)} (generation ${r.head.generation})`,
+                  ]
+                : ["rebase complete"];
+            case "up-to-date":
+              return ["already up to date — nothing to rebase"];
+            case "aborted":
+              return ["rebase aborted — restored ORIG_HEAD"];
+            default:
+              return [
+                `rebase paused — ${r.conflicts.length} conflict(s), ${r.remaining} commit(s) remaining:`,
+                ...r.conflicts.map((c) => `  ${describeConflict(c)}`),
+                "resolve, then `rebase --continue` (or `--skip` / `--abort`)",
+              ];
+          }
+        },
+        json: (r) => ({
+          status: r.status,
+          head: r.head ? `${r.head.id.algo}:${r.head.id.value}` : null,
+          remaining: r.remaining,
+          conflicts: r.conflicts,
+          warnings: r.warnings,
+        }),
+        exitCode: (r) => (r.status === "conflicts" ? EXIT_ERROR : EXIT_OK),
+      },
+    );
+  }
+}
+
 /** Every non-builtin command, in help-listing order. */
 export const COMMANDS = [
   InitCommand,
@@ -383,6 +658,13 @@ export const COMMANDS = [
   StatusCommand,
   DiffCommand,
   WhyCommand,
+  CommitCommand,
+  BranchCommand,
+  SwitchCommand,
+  LogCommand,
+  MergeCommand,
+  RevertCommand,
+  RebaseCommand,
   GcCommand,
   FsckCommand,
 ] as const;

@@ -54,7 +54,13 @@ import {
   defaultAllowSource,
 } from "./sources/index.js";
 import { ContentStore, hashBuffer, hashFile } from "./store/index.js";
-import { AnvilError, ManifestError, NotImplemented, UnsatisfiableTarget } from "./types/errors.js";
+import {
+  AnvilError,
+  ManifestError,
+  NotImplemented,
+  UnsatisfiableTarget,
+  VcStateError,
+} from "./types/errors.js";
 import type {
   AnvilOptions,
   Hash,
@@ -64,6 +70,18 @@ import type {
   Manifest,
   ManifestItem,
 } from "./types/index.js";
+import type {
+  CommitRef,
+  Conflict,
+  ConflictStrategy,
+  LogEntry,
+  MergeOutcome,
+  OnConflict,
+  RebaseOutcome,
+  RelockFn,
+  RevertOutcome,
+} from "./vc/index.js";
+import { Refs, VcObjectStore, VcRepo, vcReachability } from "./vc/index.js";
 
 /**
  * The runtime environment an {@link Anvil} resolves/fetches through. Every field
@@ -84,6 +102,14 @@ export interface AnvilEnv {
   readonly loaderMetaBase?: string;
   /** Mojang asset-object CDN base override. */
   readonly resourcesBase?: string;
+  /**
+   * The clock version control stamps commits with (ms). Display-only — history
+   * order is by generation number, never wall-clock. Tests inject a controlled
+   * (even backwards-running) clock through here to prove clock-skew safety.
+   */
+  readonly now?: () => number;
+  /** The author label recorded on commits + reflog entries. Defaults to `"anvil"`. */
+  readonly author?: string;
 }
 
 /**
@@ -296,16 +322,35 @@ export interface StatusResult {
   readonly summary: string;
 }
 
-/** A commit reference. Generation numbers order history — wall-clock never is. */
-export interface CommitRef {
-  readonly id: Hash;
-  readonly generation: number;
+/** Result of a {@link Anvil.merge} — the item-set 3-way + constrained re-lock. */
+export type MergeResult = MergeOutcome;
+
+/** Result of a {@link Anvil.revert}. */
+export type RevertResult = RevertOutcome;
+
+/** Result of a {@link Anvil.rebase} (start / `--continue` / `--skip` / `--abort`). */
+export type RebaseResult = RebaseOutcome;
+
+/** Options for {@link Anvil.merge}. Non-interactive resolution of item conflicts. */
+export interface MergeOptions {
+  /** Auto-resolve every item conflict with this strategy. */
+  readonly strategy?: ConflictStrategy;
+  /** A per-conflict resolution callback (takes precedence over `strategy`). */
+  readonly onConflict?: OnConflict;
 }
 
-/** Result of a {@link Anvil.merge}. */
-export interface MergeResult {
-  readonly conflicts: readonly string[];
-  readonly committed?: CommitRef;
+/** Options for {@link Anvil.rebase}. Exactly one mode: onto / continue / skip / abort. */
+export interface RebaseOptions {
+  /** The ref to rebase the current branch onto (start a new rebase). */
+  readonly onto?: string;
+  /** Resume a paused rebase from the resolved working tree. */
+  readonly continue?: boolean;
+  /** Drop the current (conflicting) commit and continue. */
+  readonly skip?: boolean;
+  /** Abort, restoring `ORIG_HEAD` and the pre-rebase working tree. */
+  readonly abort?: boolean;
+  readonly strategy?: ConflictStrategy;
+  readonly onConflict?: OnConflict;
 }
 
 /** Result of a {@link Anvil.pull}. */
@@ -783,36 +828,138 @@ export class Anvil {
     return whyChains(graph, item);
   }
 
-  // --- version control (git) ----------------------------------------------
+  // --- version control (anvil-native VCS over the item set) ----------------
 
-  /** `anvil commit` — snapshot manifest + lock into history. */
-  async commit(_message: string): Promise<CommitRef> {
-    throw new NotImplemented("Anvil.commit");
+  /** Emit an `error` event for a surfaced {@link AnvilError}, then rethrow. */
+  async #withErrors<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof AnvilError) {
+        this.progress.emit({ type: "error", code: err.code, message: err.message });
+      }
+      throw err;
+    }
   }
 
-  /** `anvil branch` — create a variant branch. */
-  async branch(_name: string): Promise<void> {
-    throw new NotImplemented("Anvil.branch");
+  /**
+   * Construct the {@link VcRepo} for this instance: the `.anvil/` object + ref
+   * database, plus the **constrained pin-preserving re-lock** wired to the Stage-2
+   * resolver. Merge/rebase never merge two derived locks — they merge the item set
+   * and re-derive the lock here, reusing every untouched pin verbatim and forcing
+   * only the game-cascade items back through resolution.
+   */
+  async #vc(): Promise<VcRepo> {
+    const paths = await resolvePaths(this.dir, this.#options);
+    const store = new ContentStore({ root: paths.store });
+    const registry = this.#registry();
+    const allowSource = this.#options.allowSource ?? defaultAllowSource;
+    const nowFn = this.#env.now ?? (() => Date.now());
+    const anvilDir = join(this.dir, ".anvil");
+    const vcStore = new VcObjectStore({ anvilDir });
+    const relock: RelockFn = async (req) => {
+      const itemLock = await resolveManifest({
+        manifest: req.manifest,
+        registry,
+        allowSource,
+        now: nowFn(),
+        baseDir: this.dir,
+        offline: false,
+        store,
+        ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
+        lockedPins: req.seedPins,
+        ...(req.reResolveKeys.size > 0 ? { upgrade: req.reResolveKeys } : {}),
+      });
+      return {
+        meta: {
+          ...itemLock.meta,
+          minecraft: req.gameMeta.minecraft,
+          loader: req.gameMeta.loader,
+          java: req.gameMeta.java,
+        },
+        resolved: [...itemLock.resolved, ...req.gamePackages].sort(comparePackages),
+      };
+    };
+    return new VcRepo({
+      instanceDir: this.dir,
+      anvilDir,
+      sharedStore: store,
+      vcStore,
+      relock,
+      author: this.#env.author ?? "anvil",
+      now: nowFn,
+    });
   }
 
-  /** `anvil switch` — switch the working branch/ref. */
-  async switch(_ref: string): Promise<void> {
-    throw new NotImplemented("Anvil.switch");
+  /**
+   * `anvil commit` — snapshot the tracked working tree (manifest + lock + ignore +
+   * the carried local-blob closure) into history, advancing HEAD's branch. Refuses
+   * when the lock is stale relative to the manifest (the manifest is the index).
+   */
+  async commit(message: string): Promise<CommitRef> {
+    return this.#withErrors(async () => (await this.#vc()).commit(message));
   }
 
-  /** `anvil merge` — item-set 3-way merge of a branch, then a constrained re-lock. */
-  async merge(_branch: string): Promise<MergeResult> {
-    throw new NotImplemented("Anvil.merge");
+  /** `anvil branch` — create a branch at HEAD (does not switch to it). */
+  async branch(name: string): Promise<CommitRef> {
+    return this.#withErrors(async () => (await this.#vc()).branch(name));
   }
 
-  /** `anvil rebase` — replay local changes onto another branch, crash-survivable. */
-  async rebase(_onto: string): Promise<void> {
-    throw new NotImplemented("Anvil.rebase");
+  /**
+   * `anvil switch` — move the working tree + HEAD to a branch / tag / commit,
+   * materializing the tracked files by hash-diff. Refuses on a dirty working tree;
+   * `saves/` and the build product are never touched.
+   */
+  async switch(ref: string): Promise<CommitRef> {
+    return this.#withErrors(async () => (await this.#vc()).switchTo(ref));
   }
 
-  /** `anvil revert` — roll back to a past version. */
-  async revert(_ref: string): Promise<CommitRef> {
-    throw new NotImplemented("Anvil.revert");
+  /** `anvil log` — history reachable from `start` (default HEAD), newest-first by generation. */
+  async log(start?: string): Promise<LogEntry[]> {
+    return this.#withErrors(async () => (await this.#vc()).log(start));
+  }
+
+  /**
+   * `anvil merge` — a 3-way merge of `branch`'s item set into HEAD keyed by stable
+   * identity, then a constrained pin-preserving re-lock. A phase-1 item conflict or
+   * a phase-2 secondary (e.g. an `@game` bump orphaning a mod → `no-compatible-version`)
+   * aborts without committing.
+   */
+  async merge(branch: string, options?: MergeOptions): Promise<MergeResult> {
+    return this.#withErrors(async () => (await this.#vc()).merge(branch, options ?? {}));
+  }
+
+  /** `anvil revert` — a new commit that undoes a past commit's item-delta, then re-locks. */
+  async revert(ref: string): Promise<RevertResult> {
+    return this.#withErrors(async () => (await this.#vc()).revert(ref));
+  }
+
+  /**
+   * `anvil rebase` — replay the current branch's commits onto another ref, one
+   * item-delta + per-step re-lock at a time, crash-survivable via `REBASE_STATE`.
+   * Modes: `onto` (start), `continue`, `skip`, `abort` (restore `ORIG_HEAD`).
+   */
+  async rebase(options: RebaseOptions): Promise<RebaseResult> {
+    return this.#withErrors(async () => {
+      const vc = await this.#vc();
+      const policy = {
+        ...(options.strategy ? { strategy: options.strategy } : {}),
+        ...(options.onConflict ? { onConflict: options.onConflict } : {}),
+      };
+      if (options.abort) {
+        return vc.rebaseAbort();
+      }
+      if (options.continue) {
+        return vc.rebaseContinue(policy);
+      }
+      if (options.skip) {
+        return vc.rebaseSkip(policy);
+      }
+      if (!options.onto) {
+        throw new VcStateError("rebase needs an `onto` ref (or --continue / --skip / --abort)");
+      }
+      return vc.rebase(options.onto, policy);
+    });
   }
 
   // --- remotes (git clone/pull/push) --------------------------------------
@@ -887,21 +1034,48 @@ export class Anvil {
   // --- store maintenance (git gc / fsck) ----------------------------------
 
   /**
-   * `anvil store gc` — mark-sweep unreachable objects, rooted at this instance's
-   * built lock (and the assets its indexes name).
+   * `anvil store gc` — mark-sweep unreachable objects from **both** object stores:
    *
-   * NOTE — Stage 1 roots GC at this single instance. The store-level instance
-   * registry that unions every instance's roots before sweeping (so GC from one
-   * instance can't delete another's objects) is a later-stage addition; the
-   * underlying {@link ContentStore.gc} already takes an explicit root set.
+   *   - the per-instance **VC object store** (`.anvil/objects/`): kept objects are
+   *     the full ref-closure — every branch/tag/remote ref, `HEAD`/`ORIG_HEAD`/
+   *     `MERGE_HEAD`, every reflog entry, and any in-progress `REBASE_STATE` — each
+   *     expanded through its snapshot to the manifest/lock/ignore blobs **and the
+   *     carried local blobs**, so switching to an old commit after a GC never hits
+   *     a missing object;
+   *   - the shared **content store**: rooted at the built lock **and every reachable
+   *     commit's lock** (plus carried local content), so a mod pinned only by an old
+   *     commit is not reclaimed out from under a future `switch` + `build`.
+   *
+   * NOTE — the shared store is still rooted at this single instance; the store-level
+   * instance registry that unions every instance's roots is a later-stage addition.
    */
   async gc(): Promise<GcResult> {
     const paths = await resolvePaths(this.dir, this.#options);
     const store = new ContentStore({ root: paths.store });
+    const anvilDir = join(this.dir, ".anvil");
+    const vcStore = new VcObjectStore({ anvilDir });
+    const refs = new Refs(anvilDir);
+
+    // 1. VC object store: keep the full ref/reflog/in-progress closure + carried.
+    const reach = await vcReachability(refs, vcStore, anvilDir);
+    const vcPruned = await vcStore.prune(reach.keep);
+
+    // 2. Shared store: built-lock roots ∪ every reachable commit's lock ∪ carried.
+    const roots: Hash[] = [];
     const built = await readBuiltLock(this.dir);
-    const roots = built ? await collectRoots(built, store) : [];
+    if (built) {
+      roots.push(...(await collectRoots(built, store)));
+    }
+    for (const lock of reach.commitLocks) {
+      roots.push(...(await collectRoots(lock, store)));
+    }
+    roots.push(...reach.carriedContent);
     const result = await store.gc(roots, { graceMs: 0 });
-    return { removed: result.removed, freedBytes: result.freedBytes };
+
+    return {
+      removed: result.removed + vcPruned.removed,
+      freedBytes: result.freedBytes + vcPruned.freedBytes,
+    };
   }
 
   /** `anvil fsck` — re-hash every stored object and report content-address drift. */

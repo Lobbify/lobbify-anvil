@@ -277,6 +277,66 @@ export class LockParseError extends AnvilError {
 }
 
 /**
+ * A `commit` was refused because the lock is stale relative to the manifest (a
+ * re-`lock` is due), or a snapshot's carried local bytes could not be found. The
+ * manifest is the index: we never snapshot a manifest/lock pair that disagree.
+ */
+export class LockStale extends AnvilError {
+  constructor(message: string) {
+    super("LOCK_STALE", message);
+  }
+}
+
+/**
+ * A `switch` (or other history-moving op) was refused because the working tree has
+ * uncommitted changes that would be lost. Commit or discard them first.
+ */
+export class DirtyWorkingTree extends AnvilError {
+  constructor(message?: string) {
+    super(
+      "DIRTY_WORKING_TREE",
+      message ??
+        "the working tree has uncommitted changes — commit or discard them before switching",
+    );
+  }
+}
+
+/** A branch / tag / commit reference could not be resolved to a commit. */
+export class UnknownRef extends AnvilError {
+  readonly ref: string;
+
+  constructor(ref: string, message?: string) {
+    super("UNKNOWN_REF", message ?? `no such branch, tag, or commit: "${ref}"`);
+    this.ref = ref;
+  }
+}
+
+/**
+ * A version-control invariant was violated: a merge/rebase started while one is
+ * already in progress, a `--continue` with nothing to continue, or unrelated
+ * histories with no common ancestor.
+ */
+export class VcStateError extends AnvilError {
+  constructor(message: string) {
+    super("VC_STATE", message);
+  }
+}
+
+/**
+ * A phase-2 secondary conflict during a merge/rebase re-lock: an item has no
+ * version compatible with the merged game (e.g. a Minecraft bump orphaned a mod).
+ * Surfaced as a first-class conflict — the merge/rebase does not commit.
+ */
+export class NoCompatibleVersion extends AnvilError {
+  readonly item: string;
+
+  constructor(item: string, reason: string) {
+    super("NO_COMPATIBLE_VERSION", `No compatible version for "${item}": ${reason}.`);
+    this.item = item;
+  }
+}
+
+/**
  * A stubbed capability that Stage 0 has typed but not yet implemented. Every
  * public `Anvil` method throws this until its owning stage lands.
  */

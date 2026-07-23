@@ -11,7 +11,6 @@ export type {
   AnvilEnv,
   BuildOptions,
   BuildResult,
-  CommitRef,
   FsckResult,
   GcResult,
   ImportSummary,
@@ -19,8 +18,12 @@ export type {
   LockDiff,
   LockDiffEntry,
   LockOptions,
+  MergeOptions,
   MergeResult,
   PullResult,
+  RebaseOptions,
+  RebaseResult,
+  RevertResult,
   StatusResult,
   VerifyOptions,
   VerifyResult,
@@ -51,3 +54,42 @@ export * from "./src/game/index.js";
 
 // Stage 4 — `.mrpack` import (the thin CLI ships as the `lobbify-anvil` bin).
 export * from "./src/import/index.js";
+
+// Stage 5 — the anvil-native version-control engine (commit/branch/merge/rebase).
+export type {
+  CarriedBlob,
+  CommitObject,
+  CommitOp,
+  CommitRef,
+  Conflict,
+  ConflictKind,
+  ConflictStrategy,
+  ItemDelta,
+  ItemEntry,
+  ItemSet,
+  LogEntry,
+  MergeOutcome,
+  OnConflict,
+  RebaseOutcome,
+  RebaseState,
+  RelockFn,
+  RelockRequest,
+  Resolution,
+  RevertOutcome,
+  SnapshotObject,
+  VcObject,
+} from "./src/vc/index.js";
+export {
+  ancestors,
+  describeConflict,
+  diffItemSets,
+  encodeObject,
+  findLca,
+  idOf,
+  idOfEncoding,
+  isAncestor,
+  nextGeneration,
+  Refs,
+  VcObjectStore,
+  VcRepo,
+} from "./src/vc/index.js";

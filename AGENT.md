@@ -16,25 +16,37 @@ and the interactive TUI are thin skins that carry **no logic**. It is standalone
 source-agnostic (Modrinth / CurseForge / URL / local); a host app (e.g. Lobbify) supplies
 an `allowSource` policy and calls the library directly.
 
-This repo is at **Stage 4 — the MVP tier (Stages 0–4) is complete.** On top of the
-Stage-0 scaffold, the Stage-1 content-addressed store (`src/store/`) + atomic build
-engine (`src/build/`), the Stage-2 manifest/sources/resolver/lock, and the Stage-3
-full game installer (`src/game/`: Mojang walk + Fabric/Quilt), **Stage 4 adds**:
+This repo is at **Stage 5 — the version-control engine is complete** (MVP tier
+Stages 0–4 + the first v1-tier stage). On top of the Stage-0 scaffold, the Stage-1
+content-addressed store (`src/store/`) + atomic build engine (`src/build/`), the
+Stage-2 manifest/sources/resolver/lock, the Stage-3 full game installer
+(`src/game/`: Mojang walk + Fabric/Quilt), and the Stage-4 thin CLI + `.mrpack`
+import, **Stage 5 adds `src/vc/`** — anvil's **own** version control (NOT a git
+wrapper):
 
-- the thin `clipanion` **CLI** (`src/cli/`) — `init` / `add` / `remove` / `lock` /
-  `build` / `verify` / `status` / `diff` / `why` / `import` / `gc` / `fsck`, with
-  plain + `--json` output and a documented **exit-code table** (`src/cli/errors.ts`);
-- **`.mrpack` import** (`src/import/`) — `modrinth.index.json` → `[game]` + `files[]`
-  as copy entries + `overrides/` as tracked local files, emitting a pre-resolved lock
-  (sha512-verified downloads, `env=server`-only files filtered, mirror selection);
-- the `Anvil` **authoring / introspection** methods (`init`, `addItems`, `removeItems`,
-  `status`, `diff`, `why`, `import`) and the `.anvil/graph.json` dependency sidecar `why` reads.
+- a `.anvil/` **object model** (`objects.ts`) — sha256-addressed blob / snapshot /
+  commit objects, zlib-compressed on disk but **hashed uncompressed** so a commit
+  id is identical across Node 20/22 and every OS; a ref database (`refs.ts`: HEAD /
+  ORIG_HEAD / MERGE_HEAD / refs/heads|tags|remotes / reflog / packed-refs);
+- **generation-number ordering + LCA** (`graph.ts`) — `gen` is authoritative;
+  wall-clock `time` is display-only and never trusted for ordering/ancestry;
+- **commit / branch / switch / log / revert** and the **item-set 3-way merge**
+  (`itemset.ts` + `merge.ts`) keyed by stable identity (`<source>:<id>`,
+  `local:<path>`, `config:<path>`, `@game`), followed by a **constrained
+  pin-preserving re-lock** (reuse Stage-2 `lockedPins`; **never merge two derived
+  locks**); phase-2 secondaries (`no-compatible-version`) are first-class;
+- **rebase** (`rebase.ts` + `repo.ts`) — per-commit item-delta replay + per-step
+  re-lock, `--continue` / `--skip` / `--abort`, crash-survivable via `REBASE_STATE`;
+- an extended **`gc`** (`gc.ts`) that walks the full ref/reflog/in-progress-op
+  closure + carried local blobs (VC store) and unions every reachable commit's lock
+  into the shared-store roots.
 
 The CLI is a **thin skin**: it parses args and calls one `Anvil` method — no business
 logic. The library is testable offline via the optional `AnvilEnv` constructor arg (the
-mirror/endpoint + fixture injection seam). The remaining subsystems (version control,
-CurseForge, remotes, TUI) land in Stages 5–9; those `Anvil` methods still throw
-`NotImplemented`. See `lobbify-anvil-implementation-plan.md`.
+mirror/endpoint + fixture injection seam; `AnvilEnv.now`/`author` inject the VC clock +
+author). The remaining subsystems (CurseForge, remotes, TUI) land in Stages 6–9; those
+`Anvil` methods (`clone`/`pull`/`push`/`export`) still throw `NotImplemented`. See
+`lobbify-anvil-implementation-plan.md`.
 
 ## Commands
 
