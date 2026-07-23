@@ -14,7 +14,7 @@
  * The {@link ForgePlan} is the normalized, host-independent replay of that installer:
  * every input is named by content hash, every `data` binding is classified into a
  * concrete kind, and the produced outputs are the instance-relative library paths
- * the sandboxed processors write. It is serialized canonically (so it is byte-stable
+ * the processors write. It is serialized canonically (so it is byte-stable
  * and pins like any object) and read back by the build-time executor.
  */
 
@@ -110,7 +110,7 @@ export type ForgeBinding =
   | { readonly kind: "library"; readonly coord: string }
   | { readonly kind: "output"; readonly path: string };
 
-/** One processor, fully normalized for deterministic sandboxed replay. */
+/** One processor, fully normalized for deterministic replay. */
 export interface ForgeProcessorPlan {
   readonly coordinate: string;
   /** The maven host the jar was resolved from (part of the trust decision). */
@@ -136,7 +136,7 @@ export interface ForgePlan {
   readonly flavor: "forge" | "neoforge";
   readonly minecraft: string;
   readonly profileId: string;
-  /** The pinned per-platform JRE component (the sandbox reuses its `java`). */
+  /** The pinned per-platform JRE component (processors reuse its `java`). */
   readonly jreComponent: string;
   /** The vanilla client jar (sha1) — processors read it as `{MINECRAFT_JAR}`. */
   readonly clientInput: Hash;

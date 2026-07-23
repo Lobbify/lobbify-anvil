@@ -23,7 +23,7 @@ import type { Platform } from "../build/preflight.js";
 import type { LinkStrategy } from "../events.js";
 import { runForgeProcessors } from "../game/forge-build.js";
 import { parseForgePlan } from "../game/forge-install.js";
-import { type ProcessorRunner, denyAllProcessors } from "../game/forge-processors.js";
+import { type ProcessorRunner, allowAllProcessors } from "../game/forge-processors.js";
 import { ensureDir, pathExists, removePath, safeJoin } from "../internal/fs.js";
 import { MissingObject, PathEscape, UnsatisfiableTarget } from "../types/errors.js";
 import type { AllowProcessor, Hash, LockPackage } from "../types/index.js";
@@ -81,14 +81,14 @@ export interface PlacementContext {
    */
   readonly replayCache?: ReplayCache;
   /**
-   * The sandboxed JVM runner a `forge-build` placement replays installer processors
-   * through (Stage 9). Required whenever the delta contains a Forge/NeoForge install
-   * plan; absent is fine for any other build.
+   * The JVM runner a `forge-build` placement replays installer processors through
+   * (Stage 9). Required whenever the delta contains a Forge/NeoForge install plan;
+   * absent is fine for any other build.
    */
   readonly processorRunner?: ProcessorRunner;
   /** The build platform — needed to locate the pinned JRE for `forge-build`. */
   readonly platform?: Platform;
-  /** Host-app consent for non-allowlisted installer processors (default deny). */
+  /** Host-app policy hook for installer processors (default allow — trust the source). */
   readonly allowProcessor?: AllowProcessor;
   readonly onWarn?: (message: string) => void;
 }
@@ -362,11 +362,11 @@ function safeChild(root: string, rel: string): string {
 }
 
 /**
- * Replay a pinned Forge/NeoForge install plan (the object under `pkg.hash`) under
- * the processor sandbox, materializing the produced files (the patched client
+ * Replay a pinned Forge/NeoForge install plan (the object under `pkg.hash`) through
+ * the {@link ProcessorRunner}, materializing the produced files (the patched client
  * libraries) into the stage. Requires the build to have supplied a
- * {@link ProcessorRunner} + platform — running installer processors is opt-in and
- * carried explicitly, never implicit.
+ * {@link ProcessorRunner} + platform — running installer processors is carried
+ * explicitly, never implicit.
  */
 async function materializeForgeBuild(
   pkg: LockPackage,
@@ -388,7 +388,7 @@ async function materializeForgeBuild(
       stageRoot: ctx.stageRoot,
       platform: ctx.platform,
       runner: ctx.processorRunner,
-      consent: ctx.allowProcessor ?? denyAllProcessors,
+      consent: ctx.allowProcessor ?? allowAllProcessors,
       instanceDir: ctx.instanceDir,
     });
   } finally {

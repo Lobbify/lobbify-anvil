@@ -523,13 +523,14 @@ export class UnsupportedInstaller extends AnvilError {
 }
 
 /**
- * A Forge/NeoForge installer **processor** was refused before execution — the
- * critical trust boundary. A processor jar is only ever run when it resolves to
- * an official maven coordinate from a trusted repo (Forge / NeoForged / Mojang /
- * Maven Central) AND matches a pinned **sha256**; anything else is refused unless
- * the host app's `allowProcessor` consent hook explicitly permits it (default
- * deny) — and even then a sha256 pin is mandatory. This is the RCE gate: an
- * unpinned or unofficial processor is arbitrary code execution and is never run.
+ * A Forge/NeoForge installer **processor** will not run. anvil follows the
+ * trust-the-source model (running an installer's processors is arbitrary build code,
+ * like `git` hooks / `npm install` scripts / `docker build`), so a processor runs by
+ * default — this is raised only when the host app's `allowProcessor` policy hook
+ * **denies** it (an embedder building from untrusted sources), or when the jar lacks
+ * the sha256 **reproducibility** pin required to run it deterministically. It is a
+ * host-policy / reproducibility refusal, NOT anvil enforcing a security boundary
+ * against a malicious input — see SECURITY.md.
  */
 export class ProcessorRefused extends AnvilError {
   readonly coordinate: string;
@@ -538,7 +539,7 @@ export class ProcessorRefused extends AnvilError {
   constructor(coordinate: string, reason: string) {
     super(
       "PROCESSOR_REFUSED",
-      `Refusing to run installer processor "${coordinate}": ${reason}. Only official, sha256-pinned processor jars from a trusted maven repository are executed; anything else requires an explicit host-app consent hook (allowProcessor), which defaults to deny.`,
+      `Will not run installer processor "${coordinate}": ${reason}. anvil runs the processors of the installer you build by default (trust-the-source); this is a host-policy (allowProcessor) or reproducibility-pin refusal — only build instances from sources you trust.`,
     );
     this.coordinate = coordinate;
     this.reason = reason;
@@ -546,30 +547,9 @@ export class ProcessorRefused extends AnvilError {
 }
 
 /**
- * A processor's sandbox policy was violated: a declared input/output path resolved
- * outside the build/temp scratch roots, the exec spec failed its invariant check
- * (network not denied, env not cleared, missing resource limits), or the runner
- * detected the processor attempting network / an out-of-scope filesystem access.
- * The sandbox is a hard boundary — a violation aborts the build, never downgrades.
- */
-export class ProcessorSandboxViolation extends AnvilError {
-  readonly subject: string;
-  readonly reason: string;
-
-  constructor(subject: string, reason: string) {
-    super(
-      "PROCESSOR_SANDBOX_VIOLATION",
-      `Installer processor "${subject}" violated its sandbox: ${reason}.`,
-    );
-    this.subject = subject;
-    this.reason = reason;
-  }
-}
-
-/**
- * A sandboxed processor did not complete successfully: a non-zero exit, a timeout,
- * or it failed to produce a declared output. Distinct from a refusal (the boundary
- * would not run it) — this ran under the sandbox and failed.
+ * An installer processor did not complete successfully: a non-zero exit, a timeout,
+ * or it failed to produce a declared output. Distinct from a refusal (it never ran) —
+ * this ran and failed.
  */
 export class ProcessorFailed extends AnvilError {
   readonly subject: string;
@@ -582,14 +562,14 @@ export class ProcessorFailed extends AnvilError {
 
 /**
  * A processor needs a JVM but none is available. The build already installs a
- * pinned per-platform JRE; the processor sandbox reuses that java binary and never
- * shells to an ambient `java` on `PATH`. This names the missing requirement.
+ * pinned per-platform JRE; processors reuse that java binary and never shell to an
+ * ambient `java` on `PATH`. This names the missing requirement.
  */
 export class JreUnavailable extends AnvilError {
   constructor(reason: string) {
     super(
       "JRE_UNAVAILABLE",
-      `No pinned JRE is available to run installer processors: ${reason}. The build installs a per-platform JRE which the processor sandbox reuses — anvil never runs an ambient \`java\`.`,
+      `No pinned JRE is available to run installer processors: ${reason}. The build installs a per-platform JRE which processors reuse — anvil never runs an ambient \`java\`.`,
     );
   }
 }

@@ -1,18 +1,22 @@
 /**
- * The build-time half of Stage 9: replay a pinned {@link ForgePlan} under the
- * processor sandbox to produce a launch-ready Forge/NeoForge instance.
+ * The build-time half of Stage 9: replay a pinned {@link ForgePlan} to produce a
+ * launch-ready Forge/NeoForge instance, under the honest **trust-the-source** model
+ * (see `forge-processors.ts` and SECURITY.md).
  *
  * Every input the plan names is materialized out of the content store into a
  * per-build **scratch** tree (the vanilla client jar, the installer's embedded
  * `/data/*` files, and each library/processor jar). Then, for each processor in
- * order: the jar is **admitted** (official coordinate + sha256 pin, else host
- * consent — default deny), its args' path tokens are resolved into the scratch
- * roots (a token that escapes is refused), a fully-constrained
- * {@link ProcessorExecSpec} is built and handed to the injected
- * {@link ProcessorRunner}. Nothing runs with network access, an unscoped
- * filesystem, or inherited env — the sandbox policy is enforced on the inputs, not
- * merely documented. The produced outputs are copied into the stage under the same
+ * order: {@link checkProcessorAllowed} confirms the jar is sha256-pinned (a
+ * reproducibility pin) and that the host's `allowProcessor` policy (default allow)
+ * permits it, its args' tokens are resolved into the scratch tree, a
+ * {@link ProcessorExecSpec} is built with a scratch-scoped working dir, and it is
+ * handed to the injected {@link ProcessorRunner}. The default runner just launches
+ * the pinned `java`; an embedder building from untrusted sources injects a confining
+ * runner. The produced outputs are copied into the stage under the same
  * instance-relative paths the plan declared (so the atomic swap installs them).
+ *
+ * Installer-data extraction still goes through the zip-slip-guarded `safeJoin` (a
+ * `..`/absolute entry is a {@link PathEscape}); that guard is genuine and stays.
  */
 
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -23,14 +27,14 @@ import { readZipEntry } from "../import/zip-read.js";
 import { ensureDir, pathExists, safeJoin } from "../internal/fs.js";
 import { hashFile } from "../store/hash.js";
 import type { ContentStore } from "../store/store.js";
-import { ProcessorFailed, ProcessorSandboxViolation } from "../types/errors.js";
+import { ProcessorFailed } from "../types/errors.js";
 import type { AllowProcessor } from "../types/index.js";
 import { type ForgeBinding, type ForgePlan, coordOfToken, isCoordToken } from "./forge-install.js";
 import {
+  type ProcessorLimits,
   type ProcessorRunner,
-  type SandboxLimits,
-  admitProcessor,
   buildExecSpec,
+  checkProcessorAllowed,
 } from "./forge-processors.js";
 
 export interface RunForgeProcessorsInput {
@@ -42,7 +46,7 @@ export interface RunForgeProcessorsInput {
   readonly stageRoot: string;
   readonly platform: Platform;
   readonly runner: ProcessorRunner;
-  /** Host-app consent for non-allowlisted processors (default deny). */
+  /** Host-app policy hook for processors (default allow — trust the source). */
   readonly consent: AllowProcessor;
   /**
    * The pinned JRE `java` binary. When omitted, best-effort located under
@@ -52,7 +56,7 @@ export interface RunForgeProcessorsInput {
   readonly javaBin?: string;
   /** Where the instance lives (to locate an already-materialized JRE). */
   readonly instanceDir?: string;
-  readonly limits?: SandboxLimits;
+  readonly limits?: ProcessorLimits;
   readonly emit?: (event: AnvilEvent) => void;
 }
 
@@ -94,8 +98,8 @@ async function resolveJavaBin(input: RunForgeProcessorsInput): Promise<string> {
 }
 
 /**
- * Replay the plan under the sandbox. Returns the instance-relative paths produced
- * (== the plan's declared outputs), materialized into the stage.
+ * Replay the plan (run each processor in order). Returns the instance-relative paths
+ * produced (== the plan's declared outputs), materialized into the stage.
  */
 export async function runForgeProcessors(input: RunForgeProcessorsInput): Promise<string[]> {
   const { plan, store, scratchDir, stageRoot, runner, consent, emit } = input;
@@ -172,19 +176,18 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
   };
 
   const javaBin = await resolveJavaBin(input);
-  const readRoots = [scratchDir];
-  const writeRoots = [outDir, workDir];
 
-  // 6. Run each processor through the sandbox, in order.
+  // 6. Run each processor, in order.
   for (const proc of plan.processors) {
     const jarPath = libScratch.get(proc.coordinate);
     if (!jarPath) {
       throw new ProcessorFailed(proc.coordinate, "processor jar was not materialized");
     }
-    // Admission: official coordinate + sha256 pin (defense-in-depth re-hash), else
-    // host consent. Refused → typed ProcessorRefused, before anything runs.
+    // Confirm the reproducibility pin (an explicit determinism re-hash) and consult
+    // the host policy hook (default allow — trust the source). A host deny → typed
+    // ProcessorRefused; a pin mismatch → ShaMismatch — before anything runs.
     const actual = await hashFile(jarPath, "sha256");
-    admitProcessor({
+    checkProcessorAllowed({
       coordinate: proc.coordinate,
       ...(proc.repo ? { repo: proc.repo } : {}),
       pin: proc.jar,
@@ -192,14 +195,11 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
       consent,
     });
 
-    const pathArgs: { path: string; write?: boolean }[] = [];
     const resolveToken = (token: string): string => {
       if (token === "{MINECRAFT_JAR}") {
-        pathArgs.push({ path: minecraftJar });
         return minecraftJar;
       }
       if (token === "{ROOT}") {
-        pathArgs.push({ path: scratchDir });
         return scratchDir;
       }
       if (token === "{SIDE}") {
@@ -214,9 +214,6 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
           if (!resolved) {
             throw new ProcessorFailed(proc.coordinate, `unresolved data binding "${key}"`);
           }
-          if (binding.kind !== "literal") {
-            pathArgs.push({ path: resolved.value, ...(resolved.write ? { write: true } : {}) });
-          }
           return resolved.value;
         }
       }
@@ -225,17 +222,15 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
         const coord = coordOfToken(token);
         const lib = libScratch.get(coord);
         if (lib) {
-          pathArgs.push({ path: lib });
           return lib;
         }
         // maybe a produced output referenced directly.
         for (const [rel, dest] of outScratch) {
           if (rel === `libraries/${coordPath(coord)}`) {
-            pathArgs.push({ path: dest, write: true });
             return dest;
           }
         }
-        throw new ProcessorSandboxViolation(
+        throw new ProcessorFailed(
           proc.coordinate,
           `arg token "${token}" names no materialized library or declared output`,
         );
@@ -263,10 +258,7 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
       mainClass: proc.mainClass,
       classpath,
       args,
-      cwd: workDir,
-      readRoots,
-      writeRoots,
-      pathArgs,
+      cwd: workDir, // scoped to the build scratch dir (path hygiene)
       ...(input.limits ? { limits: input.limits } : {}),
     });
 

@@ -79,7 +79,7 @@ async function resolveAndBuildForge(
   return { dir: instanceDir, storeDir, runner, lock };
 }
 
-describe("Forge/NeoForge — end-to-end resolve → lock → build (sandboxed processors)", () => {
+describe("Forge/NeoForge — end-to-end resolve → lock → build (trust-the-source processors)", () => {
   const dirs: string[] = [];
   const track = (r: BuildOut): BuildOut => {
     dirs.push(r.dir, r.storeDir);
@@ -113,19 +113,21 @@ describe("Forge/NeoForge — end-to-end resolve → lock → build (sandboxed pr
     expect(files).toContain("assets/indexes/26.json");
   });
 
-  it("hands each processor a constrained, network-denied, scoped spec", async () => {
+  it("hands the injected runner a scratch-scoped spec including the classpath deps", async () => {
     const out = track(await resolveAndBuildForge());
+    // The injectable ProcessorRunner seam was used (the build handed it the spec).
     expect(out.runner.specs).toHaveLength(1);
     const spec = out.runner.specs[0];
-    expect(spec?.network).toBe(false);
-    expect(spec?.env).toEqual({}); // no inherited env / secrets
-    expect(spec?.readRoots.length).toBeGreaterThan(0);
-    expect(spec?.writeRoots.length).toBeGreaterThan(0);
-    // Every path arg sits under a scratch read root (the sandbox scoping).
+    expect(spec?.env).toEqual({}); // minimal env for reproducibility (not a secrets gate)
+    // The working dir is scoped under the per-build scratch tree (path hygiene).
+    expect(spec?.cwd).toMatch(/[/\\]\.anvil[/\\]forge-[^/\\]+[/\\]work$/);
+    // The classpath admits the processor's trusted deps (part of the source).
+    expect(spec?.classpath.length ?? 0).toBeGreaterThan(0);
+    // Path-valued args resolve into the scratch tree (so a build doesn't scatter files).
+    const scratch = spec?.cwd.replace(/[/\\]work$/, "") ?? "";
     for (const arg of spec?.args ?? []) {
       if (arg.startsWith("/") || /^[a-zA-Z]:[/\\]/.test(arg)) {
-        const underRoot = (spec?.readRoots ?? []).some((r) => arg.startsWith(r));
-        expect(underRoot).toBe(true);
+        expect(arg.startsWith(scratch)).toBe(true);
       }
     }
   });
@@ -138,22 +140,23 @@ describe("Forge/NeoForge — end-to-end resolve → lock → build (sandboxed pr
     expect(ma.length).toBeGreaterThan(0);
   });
 
-  it("REFUSES a non-official processor under default-deny consent (RCE gate at build)", async () => {
-    await expect(resolveAndBuildForge({ processorCoord: "com.evil:pwn:6.6.6" })).rejects.toThrow(
-      ProcessorRefused,
-    );
-  });
-
-  it("an explicit host consent hook can admit a non-official processor", async () => {
-    const out = track(
-      await resolveAndBuildForge({
-        processorCoord: "com.thirdparty:tool:1.0",
-        allowProcessor: (p) => p.coordinate === "com.thirdparty:tool:1.0",
-      }),
-    );
-    // It ran (produced the output) under explicit consent.
+  it("runs a THIRD-PARTY processor by default (trust the source you build)", async () => {
+    // No allowProcessor policy → default allow. A non-Forge coordinate runs and
+    // produces its output; there is no built-in host/coordinate allowlist to cross.
+    const out = track(await resolveAndBuildForge({ processorCoord: "com.thirdparty:tool:1.0" }));
     const forgeFx = makeForgeFixtures({ processorCoord: "com.thirdparty:tool:1.0" });
     expect(await listFiles(out.dir)).toContain(forgeFx.producedPath);
+  });
+
+  it("a host allowProcessor() policy that denies BLOCKS the processor (typed error)", async () => {
+    // The host-policy hook is the seam an embedder building from untrusted sources
+    // uses to refuse a processor before it runs.
+    await expect(
+      resolveAndBuildForge({
+        processorCoord: "com.thirdparty:tool:1.0",
+        allowProcessor: () => false,
+      }),
+    ).rejects.toThrow(ProcessorRefused);
   });
 
   it("REJECTS a zip-slip / path-escape installer-data entry", async () => {

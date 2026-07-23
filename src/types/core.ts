@@ -109,24 +109,25 @@ export interface ManifestItem {
 export type AllowSource = (ref: ResolvedRef) => boolean;
 
 /**
- * The identity of a Forge/NeoForge installer processor the host app is asked to
- * consent to, when its jar is **not** on the built-in trusted-coordinate allowlist.
+ * The identity of a Forge/NeoForge installer processor shown to the host-app policy
+ * hook before it runs.
  */
 export interface ProcessorIdentity {
   /** The processor jar's maven coordinate (`group:artifact:version[:classifier]`). */
   readonly coordinate: string;
   /** The maven repository host the jar was resolved from, when known. */
   readonly repo?: string;
-  /** The pinned sha256 of the processor jar (a pin is mandatory regardless). */
+  /** The processor jar's sha256 (a reproducibility pin, not a trust token). */
   readonly sha256: string;
 }
 
 /**
- * A host-app consent hook for Forge/NeoForge installer processors that are not on
- * the built-in official-coordinate allowlist. Modeled on {@link AllowSource}: it is
- * consulted **before** anvil will run a non-allowlisted processor jar, and it
- * **defaults to deny** (running arbitrary installer code is an RCE surface). A pin
- * is always required — consent never waives the mandatory sha256 pin.
+ * A host-app policy hook for Forge/NeoForge installer processors. Running a
+ * processor is arbitrary code execution driven by the installer you chose to build —
+ * anvil follows the **trust-the-source** model (like `git` hooks, `npm install`
+ * scripts, `docker build`, Gradle), so this **defaults to allow**. It is the seam
+ * where an embedder building from UNTRUSTED sources denies (returns `false`) a
+ * processor before it runs — see SECURITY.md. Modeled on {@link AllowSource}.
  */
 export type AllowProcessor = (proc: ProcessorIdentity) => boolean;
 
@@ -145,9 +146,10 @@ export type AllowProcessor = (proc: ProcessorIdentity) => boolean;
  *   instance tree (e.g. a classpath library or client jar referenced by store
  *   path). Additive member landed in Stage 1 to complete the placement table.
  * - `forge-build` — the object under `hash` is a **generated Forge/NeoForge install
- *   plan** (the sandboxed processor DAG + data bindings, pinned like any object).
- *   The build reads it, runs each installer processor through the sandbox (Stage 9)
- *   reusing the pinned JRE, and writes the produced files (the patched client jar +
+ *   plan** (the processor DAG + data bindings, pinned like any object). The build
+ *   reads it, runs each installer processor (Stage 9; trust-the-source, see
+ *   SECURITY.md) reusing the pinned JRE, and writes the produced files (the patched
+ *   client jar +
  *   any generated libraries) to `outputs` — the complete, deterministic set of
  *   instance-relative paths the processors produce, declared at lock time so the
  *   atomic swap and the incremental delta see them as normal targets.
@@ -400,9 +402,10 @@ export interface AnvilOptions {
   /** Host-app source policy. Defaults to allow-all for the standalone CLI. */
   readonly allowSource?: AllowSource;
   /**
-   * Host-app consent policy for **non-allowlisted** Forge/NeoForge installer
-   * processors (an RCE surface). Defaults to deny; official, sha256-pinned
-   * processors from trusted repos run without consulting it.
+   * Host-app policy hook for Forge/NeoForge installer processors, which execute
+   * build code from the installer you build (trust-the-source; see SECURITY.md).
+   * **Defaults to allow.** An embedder building from untrusted sources returns
+   * `false` here to block a processor, and/or injects a confining processor runner.
    */
   readonly allowProcessor?: AllowProcessor;
   /** Build purely from the populated store; error on the first missing object. */

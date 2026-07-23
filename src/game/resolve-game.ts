@@ -2,7 +2,7 @@
  * `resolveGame` — the top-level game-install resolution invoked at lock time.
  *
  * It walks Mojang for the vanilla install, optionally installs a loader
- * (Fabric/Quilt via meta profiles, Forge/NeoForge via the sandboxed installer —
+ * (Fabric/Quilt via meta profiles, Forge/NeoForge via the installer —
  * Stage 9), generates the canonical merged `version.json`, and returns the complete
  * set of game lock packages plus the `meta.java` component and resolved loader
  * label to fold into the lock. The objects it admits to the store at lock time are
@@ -103,7 +103,7 @@ export async function resolveGame(input: ResolveGameInput): Promise<GameResoluti
     loaderLabel = resolved.loaderLabel;
   } else if (parsed.name === "forge" || parsed.name === "neoforge") {
     // The installer-driven loaders: resolve + pin the installer/libraries/processors
-    // now; the sandboxed processors run at build time (Stage 9).
+    // now; the processors run at build time (Stage 9).
     const loaderVersion = parsed.version ?? input.reuseLoaderVersion;
     forge = await resolveForge({
       flavor: parsed.name,
@@ -123,7 +123,7 @@ export async function resolveGame(input: ResolveGameInput): Promise<GameResoluti
   const mojang = await resolveMojang({ minecraft: input.minecraft, profileId, api: mojangApi });
 
   // Finalize the Forge/NeoForge install plan now that the vanilla client hash + JRE
-  // component are known (the sandboxed processors patch the vanilla client jar).
+  // component are known (the processors patch the vanilla client jar).
   if (forge) {
     const clientInput: Hash = { algo: "sha1", value: mojang.profile.downloads.client.sha1 };
     loaderPackages.push(await forge.finalizePlan(clientInput, mojang.javaComponent));

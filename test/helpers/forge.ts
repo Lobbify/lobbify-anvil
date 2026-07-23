@@ -2,16 +2,15 @@
  * Offline, deterministic Forge/NeoForge fixtures for Stage 9.
  *
  * A {@link FakeForge} serves the maven metadata, promotions feed, installer jar, and
- * library jars from an in-memory dataset keyed by exact URL — using the REAL trusted
- * hostnames (`maven.neoforged.net` / `maven.minecraftforge.net`) so the processor
- * allowlist's host check passes without special-casing. Every hash is computed from
- * the served bytes, so every pin verifies. A {@link FakeProcessorRunner} stands in
- * for the JVM boundary: it re-validates the sandbox policy on every spec, records the
- * (constrained) spec, and deterministically produces the declared outputs.
+ * library jars from an in-memory dataset keyed by exact URL — using the real
+ * hostnames (`maven.neoforged.net` / `maven.minecraftforge.net`). Every hash is
+ * computed from the served bytes, so every pin verifies. A {@link FakeProcessorRunner}
+ * stands in for the JVM boundary: it records the spec and deterministically produces
+ * the declared outputs (simulating a processor writing its patched jar).
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   type ForgeEndpoints,
   type Http,
@@ -20,7 +19,6 @@ import {
   type ProcessorExecSpec,
   type ProcessorRunResult,
   type ProcessorRunner,
-  assertSandboxPolicy,
   mavenPath,
 } from "../../index.js";
 import { sha1hex, sha256hex } from "./net.js";
@@ -249,10 +247,10 @@ export function makeForgeFixtures(options: MakeForgeOptions = {}): ForgeFixture 
 }
 
 /**
- * A hermetic stand-in for the JVM boundary. It re-validates the sandbox policy on
- * every spec (so a test can trust the recorded specs are genuinely constrained),
- * records the spec, and deterministically writes bytes to each output-path arg (an
- * arg under the write root) — simulating a processor producing its patched jar.
+ * A hermetic stand-in for the JVM boundary. It records the spec and deterministically
+ * writes bytes to each output-path arg (an arg under the scratch `out/` dir),
+ * simulating a processor producing its patched jar. The scratch `out/` dir is derived
+ * from the scratch-scoped working dir (`<scratch>/work` → `<scratch>/out`).
  */
 export class FakeProcessorRunner implements ProcessorRunner {
   readonly specs: ProcessorExecSpec[] = [];
@@ -263,12 +261,11 @@ export class FakeProcessorRunner implements ProcessorRunner {
   }
 
   async run(spec: ProcessorExecSpec): Promise<ProcessorRunResult> {
-    assertSandboxPolicy(spec); // the boundary never trusts an unconstrained spec
     this.specs.push(spec);
     if (this.#exitCode === 0) {
-      const outDir = spec.writeRoots[0];
+      const outDir = join(dirname(spec.cwd), "out");
       for (const arg of spec.args) {
-        if (outDir && arg.startsWith(outDir)) {
+        if (arg.startsWith(outDir)) {
           await mkdir(dirname(arg), { recursive: true });
           // Deterministic bytes derived from the STABLE basename (never the scratch
           // uuid), so two independent builds produce byte-identical outputs.

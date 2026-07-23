@@ -27,27 +27,21 @@ export type {
   InstallProfile,
 } from "./forge-install.js";
 export {
-  admitProcessor,
-  assertPathWithinRoots,
-  assertSandboxPolicy,
+  allowAllProcessors,
   buildExecSpec,
-  DEFAULT_SANDBOX_LIMITS,
-  denyAllProcessors,
-  isOfficialProcessor,
-  SandboxedJvmRunner,
-  TRUSTED_MAVEN_HOSTS,
-  TRUSTED_PROCESSOR_GROUPS,
+  checkProcessorAllowed,
+  DEFAULT_PROCESSOR_LIMITS,
+  JvmProcessorRunner,
 } from "./forge-processors.js";
 export type {
   BuildExecSpecInput,
-  ProcessorAdmissionInput,
+  JvmProcessorRunnerOptions,
+  ProcessorCheckInput,
   ProcessorExecSpec,
+  ProcessorLimits,
   ProcessorRunner,
   ProcessorRunResult,
-  SandboxedJvmRunnerOptions,
-  SandboxLimits,
-  SandboxSpawn,
-  SandboxStrategy,
+  ProcessorSpawn,
 } from "./forge-processors.js";
 export {
   compareForgeVersions,

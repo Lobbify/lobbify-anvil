@@ -33,7 +33,7 @@ import {
 import type { AnvilEvent, ProgressListener } from "./events.js";
 import { exportMrpack } from "./export/index.js";
 import type { ForgeEndpoints, MojangApiOptions, ProcessorRunner } from "./game/index.js";
-import { GameAcquirer, SandboxedJvmRunner, isGamePackage, resolveGame } from "./game/index.js";
+import { GameAcquirer, JvmProcessorRunner, isGamePackage, resolveGame } from "./game/index.js";
 import {
   ApiIdentityResolver,
   importCurseForgeZip,
@@ -150,9 +150,10 @@ export interface AnvilEnv {
   /** Mojang asset-object CDN base override. */
   readonly resourcesBase?: string;
   /**
-   * The sandboxed JVM runner Forge/NeoForge installer processors replay through
-   * (Stage 9). Defaults to a fail-closed {@link SandboxedJvmRunner}; tests inject a
-   * hermetic fake here.
+   * The JVM runner Forge/NeoForge installer processors replay through (Stage 9).
+   * Defaults to {@link JvmProcessorRunner} (launches the pinned `java`, no
+   * confinement — trust the source). A host app building from untrusted sources
+   * injects a confining runner here; tests inject a hermetic fake.
    */
   readonly processorRunner?: () => ProcessorRunner;
   /**
@@ -661,12 +662,13 @@ export class Anvil {
   }
 
   /**
-   * The sandboxed JVM runner Forge/NeoForge installer processors replay through.
-   * Defaults to a fail-closed {@link SandboxedJvmRunner} (it refuses to launch a
-   * processor without an OS sandbox wrapper); a host app / test injects its own.
+   * The JVM runner Forge/NeoForge installer processors replay through. Defaults to
+   * {@link JvmProcessorRunner}, which launches the build's pinned `java` (no
+   * confinement — trust the source you build). A host app building from untrusted
+   * sources injects a confining runner; a test injects a hermetic fake.
    */
   #processorRunner(): ProcessorRunner {
-    return this.#env.processorRunner?.() ?? new SandboxedJvmRunner();
+    return this.#env.processorRunner?.() ?? new JvmProcessorRunner();
   }
 
   /**
@@ -805,7 +807,7 @@ export class Anvil {
           replayCache,
           platform: currentPlatform(),
           previousLock,
-          // The sandboxed processor runner (+ host consent) for a Forge/NeoForge
+          // The processor runner (+ host allowProcessor policy) for a Forge/NeoForge
           // lock; harmless for any other build.
           processorRunner: this.#processorRunner(),
           ...(this.#options.allowProcessor ? { allowProcessor: this.#options.allowProcessor } : {}),

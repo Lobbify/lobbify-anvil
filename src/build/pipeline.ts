@@ -58,7 +58,7 @@ export interface BuildEngineInput {
   /** Optional per-package platform rules (Stage 2/3 feeds these). */
   readonly rules?: ReadonlyMap<string, readonly Rule[]>;
   /**
-   * The sandboxed JVM runner installer processors replay through, for a lock that
+   * The JVM runner installer processors replay through, for a lock that
    * carries a Forge/NeoForge install plan (Stage 9). Threaded to the placement
    * context; a copy-only / Fabric build may omit it.
    */

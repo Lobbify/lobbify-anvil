@@ -29,7 +29,6 @@ import {
   parseLauncherProfile,
   serializeForgePlan,
 } from "./forge-install.js";
-import { denyAllProcessors } from "./forge-processors.js";
 import { mavenPath } from "./platform.js";
 import type { LauncherProfile } from "./version-json.js";
 
@@ -267,7 +266,11 @@ export interface ResolveForgeInput {
   readonly http: Http;
   readonly store?: ObjectSink;
   readonly endpoints?: ForgeEndpoints;
-  /** Host-app consent for non-allowlisted processors (default deny). */
+  /**
+   * Host-app policy hook for installer processors (default allow — trust the source).
+   * Carried for API symmetry with the build; processors are only pinned here (at lock
+   * time), never run, so the hook is consulted at build time (see `forge-build.ts`).
+   */
   readonly allowProcessor?: AllowProcessor;
 }
 
@@ -292,7 +295,6 @@ export interface ForgeResolution {
 export async function resolveForge(input: ResolveForgeInput): Promise<ForgeResolution> {
   const { flavor, minecraft, http, store } = input;
   const endpoints = input.endpoints ?? defaultForgeEndpoints(flavor);
-  const consent = input.allowProcessor ?? denyAllProcessors;
 
   const version = await selectForgeVersion(flavor, minecraft, input.loaderVersion, endpoints, http);
 
