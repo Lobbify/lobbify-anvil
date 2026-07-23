@@ -8,15 +8,21 @@
 
 export { Anvil, ProgressBus } from "./src/anvil.js";
 export type {
+  AnvilEnv,
   BuildOptions,
   BuildResult,
   CommitRef,
-  DiffResult,
   FsckResult,
   GcResult,
+  ImportSummary,
+  InitSpec,
+  LockDiff,
+  LockDiffEntry,
   LockOptions,
   MergeResult,
   PullResult,
+  StatusResult,
+  VerifyOptions,
   VerifyResult,
 } from "./src/anvil.js";
 
@@ -42,3 +48,6 @@ export * from "./src/lock/index.js";
 
 // Stage 3 — the full game installer (Mojang + Fabric/Quilt).
 export * from "./src/game/index.js";
+
+// Stage 4 — `.mrpack` import (the thin CLI ships as the `lobbify-anvil` bin).
+export * from "./src/import/index.js";

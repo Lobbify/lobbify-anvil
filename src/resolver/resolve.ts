@@ -47,6 +47,22 @@ import type {
   VersionSpec,
 } from "../types/index.js";
 
+/**
+ * One resolved demand edge: some root/dependency (`by`) required a package
+ * (`child`, keyed canonically, `childName` its resolved name). Roots carry
+ * `by: "(manifest)"`. The resolver never persists a dependency graph in the
+ * (deterministic) lock, so `anvil lock` streams these to a `.anvil/graph.json`
+ * sidecar that `anvil why` reads — offline — to trace which root pulled a dep.
+ */
+export interface DependencyEdge {
+  /** The canonical key of the demanded package. */
+  readonly child: string;
+  /** The resolved name of the demanded package. */
+  readonly childName: string;
+  /** Who demanded it — a demander package name, or `"(manifest)"` for a root. */
+  readonly by: string;
+}
+
 export interface ResolveManifestInput {
   readonly manifest: Manifest;
   readonly registry: SourceRegistry;
@@ -65,6 +81,8 @@ export interface ResolveManifestInput {
   /** Keys to re-resolve despite a locked pin (`true` = re-resolve everything). */
   readonly upgrade?: boolean | ReadonlySet<string>;
   readonly emit?: (event: AnvilEvent) => void;
+  /** Streamed one edge per resolved demand — powers the `why` graph sidecar. */
+  readonly onEdge?: (edge: DependencyEdge) => void;
 }
 
 /** The canonical identity key for a resolved package (dedup + pin key). */
@@ -214,6 +232,7 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
       const ex = resolved.get(knownCk);
       if (ex) {
         conflictIf(ref.versionSpec, knownCk, ex);
+        input.onEdge?.({ child: knownCk, childName: ex.name, by });
         continue;
       }
     }
@@ -224,6 +243,7 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
     if (directPin && !isUpgraded(rk) && specSatisfiedBy(ref.versionSpec, directPin)) {
       resolved.set(rk, directPin);
       alias.set(rk, rk);
+      input.onEdge?.({ child: rk, childName: directPin.name, by });
       emit?.({ type: "resolve:item", name: directPin.name, index: index++, total: rootCount });
       continue;
     }
@@ -257,6 +277,7 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
     if (already) {
       // A different alias resolved this project first — dedup, keep the winner.
       conflictIf(ref.versionSpec, ck, already);
+      input.onEdge?.({ child: ck, childName: already.name, by });
       continue;
     }
 
@@ -268,6 +289,7 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
     } else {
       resolved.set(ck, result.pkg);
     }
+    input.onEdge?.({ child: ck, childName: result.pkg.name, by });
     for (const dep of result.dependencies ?? []) {
       queue.push({ ref: localizeRef(dep, baseDir), by: result.pkg.name });
     }

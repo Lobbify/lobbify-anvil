@@ -5,4 +5,4 @@
  */
 
 export { canonicalKeyOf, pinsFromLock, resolveManifest } from "./resolve.js";
-export type { ResolveManifestInput } from "./resolve.js";
+export type { DependencyEdge, ResolveManifestInput } from "./resolve.js";

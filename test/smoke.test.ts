@@ -21,10 +21,10 @@ describe("Anvil scaffold", () => {
   });
 
   it("every not-yet-owned method is stubbed to throw NotImplemented", async () => {
-    // Stage 1 implements build/verify/gc/fsck; Stage 2 adds lock; the rest land later.
+    // Stage 1 implements build/verify/gc/fsck; Stage 2 adds lock; Stage 4 adds
+    // init/add/remove/status/diff/why/import; the VC + remote verbs land later.
     const anvil = new Anvil({ dir: "/tmp/anvil-smoke" });
     const calls: Array<Promise<unknown>> = [
-      anvil.diff(),
       anvil.commit("m"),
       anvil.branch("b"),
       anvil.switch("main"),
@@ -34,7 +34,6 @@ describe("Anvil scaffold", () => {
       anvil.clone("https://example.com/pack"),
       anvil.pull(),
       anvil.push(),
-      anvil.import("pack.mrpack"),
       anvil.export("pack.mrpack"),
     ];
     const results = await Promise.allSettled(calls);

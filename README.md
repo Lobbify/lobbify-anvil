@@ -3,9 +3,11 @@
 > **git + docker + uv for `.minecraft`** — a reproducible, content-addressed build
 > system for Minecraft instances.
 
-**Status: WIP — Stage 0 (scaffold + type spine).** The public API is typed and the
-CI is green, but the subsystems are not implemented yet; every `Anvil` method throws
-`NotImplemented` until its stage lands. See the roadmap below.
+**Status: MVP complete (Stages 0–4).** The content store, atomic build engine, the
+Modrinth/URL/local sources + resolver, the full Mojang + Fabric/Quilt game installer,
+the thin `lobbify-anvil` CLI, and `.mrpack` import all ship. The version-control and
+remote verbs (`commit`/`branch`/`merge`/`clone`/`pull`/`push`/`export`) are the next
+tiers and still throw `NotImplemented`. See the roadmap below.
 
 If you know **git**, **Docker**, and **uv**, you already know anvil: you write a
 **manifest** (like a `pyproject.toml`), `anvil lock` freezes it (like `uv.lock`),
@@ -33,7 +35,7 @@ everything anvil manages internally lives in a hidden `.anvil/` (its brain, like
 Heavy shared content (assets, libraries, runtime) is deduplicated through a shared
 content store — which can simply *be* an existing `.minecraft/assets` you already have.
 
-## Quickstart (placeholder — not yet implemented)
+## Quickstart
 
 ```bash
 # Install the CLI. NOTE: the bin is `lobbify-anvil` (not bare `anvil`, which would
@@ -42,12 +44,53 @@ npm install -g lobbify-anvil
 lobbify-anvil --version
 
 # Author a pack from vanilla and build a launch-ready instance
-lobbify-anvil init night-smp --minecraft 26.2 --loader fabric
-cd night-smp
+mkdir night-smp && cd night-smp
+lobbify-anvil init --name night-smp --minecraft 26.2 --loader "fabric 0.19.3"
 lobbify-anvil add modrinth:fabric-api modrinth:sodium modrinth:jei
 lobbify-anvil lock     # resolve + pin the game and items
 lobbify-anvil build    # install client, assets, java, loader, items — atomically
+lobbify-anvil verify   # re-hash the instance against the lock
+
+# Or adopt a Modrinth modpack you already have:
+lobbify-anvil import cobblemon.mrpack && lobbify-anvil build
 ```
+
+### CLI reference
+
+| Command | What it does |
+|---|---|
+| `init` | Scaffold `anvil.toml` (+ a documented `.anvilignore`). Flags: `--name`, `--minecraft/--mc`, `--loader`, `--summary`, `--force`. |
+| `add <ref>…` | Append item references (`source:id@ver`, a URL, or a `./path`) to the manifest. |
+| `remove <ref>…` | Drop item references from the manifest. |
+| `lock` | Resolve the manifest → a fully-pinned `anvil.lock`. `--upgrade` re-resolves everything; `--upgrade=<item>` just one. |
+| `build` | Install a launch-ready instance from the lock, atomically. `--offline` builds only from the populated store. |
+| `verify` | Re-hash the materialized instance against the lock. `--strict` also fails on drift from the current lock. |
+| `status` | The manifest-vs-lock-vs-built dirty state (what to run next). |
+| `diff` | The package delta the next `build` would apply. |
+| `why <item>` | Which root item pulled a (transitive) dependency in. |
+| `import <pack.mrpack>` | Adopt a Modrinth modpack (writes `anvil.toml` + a pre-resolved `anvil.lock`). |
+| `gc` / `fsck` | Mark-sweep the content store / re-hash every stored object. |
+
+Every command takes `--dir <path>` (defaults to the cwd) and `--json` (emit a single
+machine-readable JSON object on stdout, for CI). `ANVIL_STORE_DIR` overrides the shared
+store location; `CURSEFORGE_API_KEY` supplies the BYO CurseForge key.
+
+### Exit codes (for scripting / CI)
+
+`0` is success; `1` a generic/usage error; `70` an unexpected internal bug. Typed
+failures map to stable, documented codes (append-only — a shipped code is an API):
+
+| Code | Meaning | | Code | Meaning |
+|---|---|---|---|---|
+| `3` | manifest invalid | | `12` | unsafe path (zip-slip) |
+| `4` | lock invalid | | `13` | decompression bomb |
+| `5` | source not allowed | | `14` | HTTP error |
+| `6` | source key missing | | `15` | cross-volume |
+| `7` | SSRF blocked | | `16` | preflight failed |
+| `8` | version conflict | | `17` | swap recovery failed |
+| `9` | unsatisfiable target | | `18` | non-fast-forward |
+| `10` | hash mismatch | | `19` | kind inference failed |
+| `11` | missing object (offline) | | `20` | not implemented |
 
 Embed it as a library (this is how Lobbify uses it):
 
@@ -70,8 +113,8 @@ await anvil.pull();                    // later: fast-forward to the host
 
 | Tier | Scope |
 |---|---|
-| **MVP** (Stages 0–4) | manifest + lock + content store + **full game install** (the folder is the instance) + `build`/`verify`; **vanilla + Modrinth + local files**; CLI core; `.anvilignore`; the library API + path mapping; import `.mrpack`. |
-| **v1** (Stages 5–8) | **CurseForge** (bring-your-own key, replay); **full version control** (commit/branch/switch/merge/rebase/revert/log); `clone`/`pull`/`push`; `diff`; interactive TUI; `export`; Prism import. |
+| **MVP** (Stages 0–4) | manifest + lock + content store + **full game install** (the folder is the instance) + `build`/`verify`; **vanilla + Modrinth + local files**; the CLI (`init`/`add`/`remove`/`lock`/`build`/`verify`/`status`/`diff`/`why`/`import`/`gc`/`fsck`, `--json`, stable exit codes); `.anvilignore`; the library API + path mapping; import `.mrpack`. |
+| **v1** (Stages 5–8) | **CurseForge** (bring-your-own key, replay); **full version control** (commit/branch/switch/merge/rebase/revert/log); `clone`/`pull`/`push`; interactive TUI; `export`; Prism import. |
 | **v1+** (Stage 9) | NeoForge/Forge; chunked deltas for big files; richer remotes/registries; advanced merge strategies; datapack/shader niceties; OSS-release hardening. |
 
 ## CurseForge — bring your own key

@@ -16,17 +16,25 @@ and the interactive TUI are thin skins that carry **no logic**. It is standalone
 source-agnostic (Modrinth / CurseForge / URL / local); a host app (e.g. Lobbify) supplies
 an `allowSource` policy and calls the library directly.
 
-This repo is at **Stage 2** — on top of the Stage-0 scaffold and the Stage-1
-content-addressed store (`src/store/`) + atomic build engine (`src/build/`), Stage 2
-adds the manifest (`src/manifest/`), the `Source` layer (`src/sources/`: Modrinth /
-URL / local + the rate-limited HTTP client, SSRF guard, kind inference), the resolver
-(`src/resolver/`), and the canonical deterministic TOML lock writer (`src/lock/`).
-The remaining subsystems (full game installer, CurseForge, VC, remotes) land in
-Stages 3–9; see `lobbify-anvil-implementation-plan.md`. Public `Anvil` methods are
-stubbed to `throw new NotImplemented()` until their owning stage lands — Stage 1
-implements `build` / `verify` / `gc` / `fsck`, and Stage 2 implements `lock`
-(resolve `anvil.toml` → freeze the fully-pinned `anvil.lock`). The build reads only
-the lock; the network `Source` fetch for game/loader/JRE objects arrives in Stage 3.
+This repo is at **Stage 4 — the MVP tier (Stages 0–4) is complete.** On top of the
+Stage-0 scaffold, the Stage-1 content-addressed store (`src/store/`) + atomic build
+engine (`src/build/`), the Stage-2 manifest/sources/resolver/lock, and the Stage-3
+full game installer (`src/game/`: Mojang walk + Fabric/Quilt), **Stage 4 adds**:
+
+- the thin `clipanion` **CLI** (`src/cli/`) — `init` / `add` / `remove` / `lock` /
+  `build` / `verify` / `status` / `diff` / `why` / `import` / `gc` / `fsck`, with
+  plain + `--json` output and a documented **exit-code table** (`src/cli/errors.ts`);
+- **`.mrpack` import** (`src/import/`) — `modrinth.index.json` → `[game]` + `files[]`
+  as copy entries + `overrides/` as tracked local files, emitting a pre-resolved lock
+  (sha512-verified downloads, `env=server`-only files filtered, mirror selection);
+- the `Anvil` **authoring / introspection** methods (`init`, `addItems`, `removeItems`,
+  `status`, `diff`, `why`, `import`) and the `.anvil/graph.json` dependency sidecar `why` reads.
+
+The CLI is a **thin skin**: it parses args and calls one `Anvil` method — no business
+logic. The library is testable offline via the optional `AnvilEnv` constructor arg (the
+mirror/endpoint + fixture injection seam). The remaining subsystems (version control,
+CurseForge, remotes, TUI) land in Stages 5–9; those `Anvil` methods still throw
+`NotImplemented`. See `lobbify-anvil-implementation-plan.md`.
 
 ## Commands
 
@@ -112,7 +120,9 @@ The "join a room / import a pack" path is fully untrusted (manifest + lock + arc
 index.ts            # public API barrel
 src/types/          # the type spine: core.ts (Hash, LockPackage, Placement, Source, …) + errors.ts
 src/events.ts       # the typed progress-event taxonomy (discriminated unions)
-src/anvil.ts        # the Anvil class + ProgressBus (methods stubbed to NotImplemented)
-src/cli/            # the thin `lobbify-anvil` bin (Stage 4 fills it in)
-test/               # vitest (smoke test today; determinism/crash/e2e later)
+src/anvil.ts        # the Anvil class + ProgressBus + the AnvilEnv injection seam
+src/game/           # the Mojang installer + Fabric/Quilt loaders (Stage 3)
+src/import/         # .mrpack import (Stage 4): mrpack.ts + the hardened zip reader
+src/cli/            # the thin `lobbify-anvil` bin (Stage 4): commands, reporter, errors, run
+test/               # vitest — determinism/crash/game/CLI-e2e/import/error fixtures (offline)
 ```

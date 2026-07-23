@@ -12,21 +12,40 @@
  * replay-never-rehosted) are enforced as these methods gain real bodies.
  */
 
-import type { Acquirer } from "./build/index.js";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { Acquirer, WhyResult } from "./build/index.js";
 import {
   StoreOnlyAcquirer,
   buildInstance,
+  canonicalJson,
   collectRoots,
   currentPlatform,
+  packageAppliesToPlatform,
   readBuiltLock,
+  readGraph,
   recoverSwap,
   resolvePaths,
+  whyChains,
+  writeGraph,
 } from "./build/index.js";
 import type { AnvilEvent, ProgressListener } from "./events.js";
+import type { MojangApiOptions } from "./game/index.js";
 import { GameAcquirer, isGamePackage, resolveGame } from "./game/index.js";
+import { importMrpack } from "./import/index.js";
+import { ensureDir, pathExists } from "./internal/fs.js";
 import { comparePackages, readInputLock, readLockIfPresent, writeLock } from "./lock/index.js";
-import { readManifest } from "./manifest/index.js";
+import {
+  MANIFEST_FILENAME,
+  parseRef,
+  readManifest,
+  refForItem,
+  refKey,
+  writeManifest,
+} from "./manifest/index.js";
+import type { DependencyEdge } from "./resolver/index.js";
 import { pinsFromLock, resolveManifest } from "./resolver/index.js";
+import type { SourceRegistry } from "./sources/index.js";
 import {
   NetworkAcquirer,
   RateLimitedHttp,
@@ -34,8 +53,8 @@ import {
   buildRegistry,
   defaultAllowSource,
 } from "./sources/index.js";
-import { ContentStore, hashFile } from "./store/index.js";
-import { AnvilError, NotImplemented, UnsatisfiableTarget } from "./types/errors.js";
+import { ContentStore, hashBuffer, hashFile } from "./store/index.js";
+import { AnvilError, ManifestError, NotImplemented, UnsatisfiableTarget } from "./types/errors.js";
 import type {
   AnvilOptions,
   Hash,
@@ -45,6 +64,27 @@ import type {
   Manifest,
   ManifestItem,
 } from "./types/index.js";
+
+/**
+ * The runtime environment an {@link Anvil} resolves/fetches through. Every field
+ * is optional and defaults to the production wiring (the standard source
+ * registry + a rate-limited HTTP client hitting the real Mojang/Modrinth
+ * endpoints). It doubles as the **mirror / proxy** seam — point `mojangOptions`
+ * / `loaderMetaBase` / `resourcesBase` at an internal mirror — and as the seam
+ * tests inject offline fixtures through. The CLI passes the default (production).
+ */
+export interface AnvilEnv {
+  /** Build the source registry (Modrinth / URL / local / CurseForge). */
+  readonly registry?: () => SourceRegistry;
+  /** Construct the HTTP client for Mojang / loader / game-CDN fetches. */
+  readonly gameHttp?: () => Http;
+  /** Mojang endpoint overrides (mirrors or offline fixtures). */
+  readonly mojangOptions?: MojangApiOptions;
+  /** Fabric/Quilt loader-meta base override. */
+  readonly loaderMetaBase?: string;
+  /** Mojang asset-object CDN base override. */
+  readonly resourcesBase?: string;
+}
 
 /**
  * A typed progress bus: a fan-out event emitter that is also an
@@ -176,17 +216,84 @@ export interface BuildResult {
   readonly objects: number;
 }
 
+/** Options for {@link Anvil.verify}. */
+export interface VerifyOptions {
+  /** Also fail if the instance is not built from the current lock (drift). */
+  readonly strict?: boolean;
+}
+
 /** Result of a {@link Anvil.verify} / `fsck`-style reconciliation. */
 export interface VerifyResult {
   readonly ok: boolean;
   readonly mismatches: readonly string[];
 }
 
-/** A structural diff between two manifests/locks/instances. */
-export interface DiffResult {
-  readonly added: readonly ManifestItem[];
-  readonly removed: readonly ManifestItem[];
-  readonly changed: readonly ManifestItem[];
+/** One changed package in a {@link LockDiff} — same name, different pinned hash. */
+export interface LockDiffEntry {
+  readonly name: string;
+  /** The previously-built pin (`algo:value`), when present. */
+  readonly from?: string;
+  /** The pin the next build would install (`algo:value`). */
+  readonly to?: string;
+}
+
+/**
+ * A package-level diff of what the next `build` would change: the current lock's
+ * platform-applicable package set vs the lock the instance was last built from.
+ */
+export interface LockDiff {
+  readonly added: readonly LockPackage[];
+  readonly removed: readonly LockPackage[];
+  readonly changed: readonly LockDiffEntry[];
+}
+
+/** The summary an {@link Anvil.import} returns. */
+export interface ImportSummary {
+  /** File entries imported (server-only ones excluded). */
+  readonly files: number;
+  /** Override files tracked under `.anvil/overrides/`. */
+  readonly overrides: number;
+  /** Non-fatal skips (server-only files, protected-path targets, …). */
+  readonly warnings: readonly string[];
+}
+
+/** The scaffold spec for {@link Anvil.init}. */
+export interface InitSpec {
+  readonly name: string;
+  readonly minecraft: string;
+  /** `"fabric <v>"` | `"quilt <v>"` | `"vanilla"` (default `"vanilla"`). */
+  readonly loader?: string;
+  readonly version?: string;
+  readonly summary?: string;
+  /** Overwrite an existing `anvil.toml` instead of refusing. */
+  readonly force?: boolean;
+}
+
+/**
+ * The `.anvilignore` a fresh `anvil init` scaffolds. `saves/`, `.anvil/`, and
+ * `.anvilignore` itself are ALWAYS protected (whether listed or not); a user
+ * lists additional hand-edited files here to make **their** config win over a
+ * pack-provided one (the pack-config-vs-user-config precedence rule).
+ */
+const DEFAULT_ANVILIGNORE = `# .anvilignore — top-level entries a build must never create, move, or delete.
+# saves/, .anvil/, and .anvilignore itself are ALWAYS protected.
+# List any file or directory you hand-edit and want preserved across builds
+# (your config then wins over a pack-provided one), for example:
+# options.txt
+# config/
+`;
+
+/** The manifest-vs-lock-vs-built dirty state reported by {@link Anvil.status}. */
+export interface StatusResult {
+  readonly hasManifest: boolean;
+  readonly hasLock: boolean;
+  readonly hasBuilt: boolean;
+  /** The manifest changed since the lock was written — a re-`lock` is due. */
+  readonly manifestDirty: boolean;
+  /** The lock differs from what the instance was built from — a `build` is due. */
+  readonly buildDirty: boolean;
+  /** A one-line, human-readable summary of the state. */
+  readonly summary: string;
 }
 
 /** A commit reference. Generation numbers order history — wall-clock never is. */
@@ -225,12 +332,24 @@ export interface FsckResult {
  */
 export class Anvil {
   readonly #options: AnvilOptions;
+  readonly #env: AnvilEnv;
 
   /** The typed progress bus. Prefer {@link on} or `for await` over reaching in. */
   readonly progress = new ProgressBus();
 
-  constructor(options: AnvilOptions) {
+  /**
+   * @param options Per-instance configuration (dir, store, key, policy).
+   * @param env Optional runtime/mirror overrides. Defaults to production wiring;
+   *   the CLI passes nothing, tests inject offline fixtures here.
+   */
+  constructor(options: AnvilOptions, env: AnvilEnv = {}) {
     this.#options = options;
+    this.#env = env;
+  }
+
+  /** The source registry (Modrinth / URL / local / CF), env-overridable. */
+  #registry(): SourceRegistry {
+    return this.#env.registry?.() ?? buildRegistry();
   }
 
   /** The instance root — this directory *is* the `.minecraft`. */
@@ -251,6 +370,70 @@ export class Anvil {
   /** Iterate progress events: `for await (const e of anvil) { … }`. */
   [Symbol.asyncIterator](): AsyncIterator<AnvilEvent> {
     return this.progress[Symbol.asyncIterator]();
+  }
+
+  // --- authoring (init / add / remove — manifest edits) -------------------
+
+  /**
+   * `anvil init` — scaffold `anvil.toml` (+ a documented `.anvilignore`) for a
+   * fresh instance. Refuses to clobber an existing manifest unless `force`.
+   */
+  async init(spec: InitSpec): Promise<Manifest> {
+    if (!spec.force && (await pathExists(join(this.dir, MANIFEST_FILENAME)))) {
+      throw new ManifestError(
+        `an ${MANIFEST_FILENAME} already exists in "${this.dir}" — pass force to overwrite`,
+      );
+    }
+    const manifest: Manifest = {
+      project: {
+        name: spec.name,
+        version: spec.version ?? "0.1.0",
+        ...(spec.summary ? { summary: spec.summary } : {}),
+      },
+      game: { minecraft: spec.minecraft, loader: spec.loader ?? "vanilla" },
+      items: [],
+    };
+    await ensureDir(this.dir);
+    await writeManifest(this.dir, manifest);
+    if (!(await pathExists(join(this.dir, ".anvilignore")))) {
+      await writeFile(join(this.dir, ".anvilignore"), DEFAULT_ANVILIGNORE);
+    }
+    return manifest;
+  }
+
+  /**
+   * `anvil add` — append item references (`source:id@ver`, a URL, or a `./path`)
+   * to the manifest, deduped by identity. Editing the manifest never touches the
+   * lock; a following `anvil lock` re-resolves.
+   */
+  async addItems(specs: readonly string[]): Promise<Manifest> {
+    const manifest = await readManifest(this.dir);
+    const have = new Set(manifest.items.map((it) => refKey(refForItem(it))));
+    const items: ManifestItem[] = [...manifest.items];
+    for (const spec of specs) {
+      const item: ManifestItem = { ref: parseRef(spec) };
+      const key = refKey(refForItem(item));
+      if (!have.has(key)) {
+        have.add(key);
+        items.push(item);
+      }
+    }
+    const next: Manifest = { ...manifest, items };
+    await writeManifest(this.dir, next);
+    return next;
+  }
+
+  /**
+   * `anvil remove` — drop item references matching the given specs (by identity).
+   * Unmatched specs are ignored. A following `anvil lock` re-resolves.
+   */
+  async removeItems(specs: readonly string[]): Promise<Manifest> {
+    const manifest = await readManifest(this.dir);
+    const drop = new Set(specs.map((s) => refKey(parseRef(s))));
+    const items = manifest.items.filter((it) => !drop.has(refKey(refForItem(it))));
+    const next: Manifest = { ...manifest, items };
+    await writeManifest(this.dir, next);
+    return next;
   }
 
   // --- resolve + build (uv lock / docker build) ---------------------------
@@ -276,10 +459,11 @@ export class Anvil {
       const manifest = await readManifest(this.dir);
       const paths = await resolvePaths(this.dir, this.#options);
       const store = new ContentStore({ root: paths.store });
-      const registry = buildRegistry();
+      const registry = this.#registry();
       const prior = await readLockIfPresent(this.dir);
       const upgrade = normalizeUpgrade(options?.upgrade);
       const offline = this.#options.offline ?? false;
+      const edges: DependencyEdge[] = [];
       const itemLock = await resolveManifest({
         manifest,
         registry,
@@ -292,6 +476,7 @@ export class Anvil {
         ...(prior ? { lockedPins: pinsFromLock(prior) } : {}),
         ...(upgrade !== undefined ? { upgrade } : {}),
         emit,
+        onEdge: (edge) => edges.push(edge),
       });
 
       // The full game install (client + libraries + natives + assets + pinned JRE
@@ -302,6 +487,8 @@ export class Anvil {
         resolved: [...itemLock.resolved, ...game.packages].sort(comparePackages),
       };
       await writeLock(this.dir, lock);
+      // The dependency-edge sidecar for `anvil why` (never part of the lock).
+      await writeGraph(this.dir, edges);
       return lock;
     } catch (err) {
       if (err instanceof AnvilError) {
@@ -313,7 +500,7 @@ export class Anvil {
 
   /** A per-endpoint-group rate-limited HTTP client for the game installer. */
   #gameHttp(): Http {
-    return new RateLimitedHttp({ userAgent: USER_AGENT });
+    return this.#env.gameHttp?.() ?? new RateLimitedHttp({ userAgent: USER_AGENT });
   }
 
   /**
@@ -352,6 +539,8 @@ export class Anvil {
       mojangHttp: this.#gameHttp(),
       loaderHttp: this.#gameHttp(),
       store,
+      ...(this.#env.mojangOptions ? { mojangOptions: this.#env.mojangOptions } : {}),
+      ...(this.#env.loaderMetaBase ? { loaderMetaBase: this.#env.loaderMetaBase } : {}),
     });
     return { packages: game.packages, java: game.java, loader: game.loader };
   }
@@ -371,12 +560,17 @@ export class Anvil {
     }
     const network = new NetworkAcquirer({
       store,
-      registry: buildRegistry(),
+      registry: this.#registry(),
       allowSource: this.#options.allowSource ?? defaultAllowSource,
       ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
       emit,
     });
-    const game = new GameAcquirer({ store, http: this.#gameHttp(), emit });
+    const game = new GameAcquirer({
+      store,
+      http: this.#gameHttp(),
+      ...(this.#env.resourcesBase ? { resourcesBase: this.#env.resourcesBase } : {}),
+      emit,
+    });
     return {
       ensure: (pkg: LockPackage) => (isGamePackage(pkg) ? game.ensure(pkg) : network.ensure(pkg)),
     };
@@ -422,10 +616,13 @@ export class Anvil {
 
   /**
    * `anvil verify` — check the materialized instance matches the lock it was
-   * built from (re-hashing every single-file target against its pin).
+   * built from (re-hashing every single-file target against its pin). With
+   * `strict`, additionally fails if the instance has drifted from the current
+   * input lock (i.e. a `build` is due).
    */
-  async verify(): Promise<VerifyResult> {
-    const lock = (await readBuiltLock(this.dir)) ?? (await readInputLock(this.dir));
+  async verify(options?: VerifyOptions): Promise<VerifyResult> {
+    const built = await readBuiltLock(this.dir);
+    const lock = built ?? (await readInputLock(this.dir));
     const targets = lock.resolved.filter(
       (p: LockPackage) => p.placement.method === "link" || p.placement.method === "asset-tree",
     );
@@ -450,6 +647,12 @@ export class Anvil {
       }
       this.progress.emit({ type: "verify:item", name: pkg.name, ok });
     }
+    if (options?.strict) {
+      const input = await readLockIfPresent(this.dir);
+      if (input && this.#buildDirty(input, built)) {
+        mismatches.push("<instance is out of date — run `anvil build`>");
+      }
+    }
     this.progress.emit({
       type: "verify:done",
       ok: mismatches.length === 0,
@@ -458,9 +661,126 @@ export class Anvil {
     return { ok: mismatches.length === 0, mismatches };
   }
 
-  /** `anvil diff` — compare manifests / locks / instances. */
-  async diff(_from?: string, _to?: string): Promise<DiffResult> {
-    throw new NotImplemented("Anvil.diff");
+  /** The platform-applicable package set of a lock, keyed by name. */
+  #applicable(lock: Lockfile): Map<string, LockPackage> {
+    const platform = currentPlatform();
+    const map = new Map<string, LockPackage>();
+    for (const pkg of lock.resolved) {
+      if (packageAppliesToPlatform(pkg, platform)) {
+        map.set(pkg.name, pkg);
+      }
+    }
+    return map;
+  }
+
+  /** Whether the current input lock differs from what was last built. */
+  #buildDirty(input: Lockfile, built: Lockfile | undefined): boolean {
+    if (!built) {
+      return true;
+    }
+    const cur = this.#applicable(input);
+    const prev = this.#applicable(built);
+    if (cur.size !== prev.size) {
+      return true;
+    }
+    for (const [name, pkg] of cur) {
+      const was = prev.get(name);
+      if (!was || was.hash.value !== pkg.hash.value) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * `anvil diff` — the package-level delta the next `build` would apply: the
+   * current lock's platform-applicable set vs the lock last built from.
+   */
+  async diff(): Promise<LockDiff> {
+    const input = await readInputLock(this.dir);
+    const built = await readBuiltLock(this.dir);
+    const cur = this.#applicable(input);
+    const prev = built ? this.#applicable(built) : new Map<string, LockPackage>();
+    const added: LockPackage[] = [];
+    const removed: LockPackage[] = [];
+    const changed: LockDiffEntry[] = [];
+    for (const [name, pkg] of cur) {
+      const was = prev.get(name);
+      if (!was) {
+        added.push(pkg);
+      } else if (was.hash.value !== pkg.hash.value) {
+        changed.push({
+          name,
+          from: `${was.hash.algo}:${was.hash.value}`,
+          to: `${pkg.hash.algo}:${pkg.hash.value}`,
+        });
+      }
+    }
+    for (const [name, pkg] of prev) {
+      if (!cur.has(name)) {
+        removed.push(pkg);
+      }
+    }
+    const byName = (a: LockPackage, b: LockPackage) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    return {
+      added: added.sort(byName),
+      removed: removed.sort(byName),
+      changed: changed.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+    };
+  }
+
+  /**
+   * `anvil status` — the manifest-vs-lock-vs-built dirty state: whether the
+   * manifest has changed since the lock (a re-`lock` is due), and whether the
+   * lock has changed since the last build (a `build` is due). Offline.
+   */
+  async status(): Promise<StatusResult> {
+    const manifest = await readManifest(this.dir).catch(() => undefined);
+    const input = await readLockIfPresent(this.dir);
+    const built = await readBuiltLock(this.dir);
+    let manifestDirty = false;
+    if (manifest && input) {
+      const mh = hashBuffer(new TextEncoder().encode(canonicalJson(manifest)), "sha256");
+      manifestDirty = mh.value !== input.meta.manifestHash.value;
+    }
+    const buildDirty = input ? this.#buildDirty(input, built) : false;
+    let summary: string;
+    if (!manifest) {
+      summary = "no anvil.toml — run `anvil init`";
+    } else if (!input) {
+      summary = "not locked — run `anvil lock`";
+    } else if (manifestDirty) {
+      summary = "manifest changed since lock — run `anvil lock`";
+    } else if (!built) {
+      summary = "locked but never built — run `anvil build`";
+    } else if (buildDirty) {
+      summary = "lock changed since build — run `anvil build`";
+    } else {
+      summary = "clean — manifest, lock, and instance are in sync";
+    }
+    return {
+      hasManifest: manifest !== undefined,
+      hasLock: input !== undefined,
+      hasBuilt: built !== undefined,
+      manifestDirty,
+      buildDirty,
+      summary,
+    };
+  }
+
+  /**
+   * `anvil why <item>` — which root item pulled a (transitive) dependency in.
+   * Reads the `.anvil/graph.json` sidecar written at `lock` time, so it is fully
+   * offline; returns `present: false` when the item is unknown or the instance
+   * has not been locked.
+   */
+  async why(item: string): Promise<WhyResult> {
+    const graph = await readGraph(this.dir);
+    if (!graph) {
+      return { item, present: false, roots: [], chains: [] };
+    }
+    return whyChains(graph, item);
   }
 
   // --- version control (git) ----------------------------------------------
@@ -514,9 +834,49 @@ export class Anvil {
 
   // --- import / export (docker load/save) ---------------------------------
 
-  /** `anvil import` — adopt an `.mrpack` / CurseForge zip / Prism instance. */
-  async import(_archive: string): Promise<void> {
-    throw new NotImplemented("Anvil.import");
+  /**
+   * `anvil import` — adopt an `.mrpack` (Modrinth modpack) into this instance,
+   * writing `anvil.toml` + a pre-resolved `anvil.lock`. The archive is untrusted:
+   * files are integrity-checked, server-only files filtered, `overrides/` unpacked
+   * through the hardened extractor, and nothing is placed into a protected path.
+   * (CurseForge-zip / Prism import land in Stages 6–7.)
+   */
+  async import(archive: string): Promise<ImportSummary> {
+    const emit = (event: AnvilEvent): void => {
+      this.progress.emit(event);
+    };
+    try {
+      const paths = await resolvePaths(this.dir, this.#options);
+      const store = new ContentStore({ root: paths.store });
+      const registry = this.#registry();
+      const fileHttp = registry.get("url")?.http ?? this.#gameHttp();
+      const result = await importMrpack({
+        archivePath: archive,
+        instanceDir: this.dir,
+        store,
+        fileHttp,
+        resolveGame: async ({ minecraft, loader }) => {
+          const game = await resolveGame({
+            minecraft,
+            ...(loader && loader !== "vanilla" ? { loader } : {}),
+            mojangHttp: this.#gameHttp(),
+            loaderHttp: this.#gameHttp(),
+            store,
+            ...(this.#env.mojangOptions ? { mojangOptions: this.#env.mojangOptions } : {}),
+            ...(this.#env.loaderMetaBase ? { loaderMetaBase: this.#env.loaderMetaBase } : {}),
+          });
+          return { packages: game.packages, java: game.java, loader: game.loader };
+        },
+        allowSource: this.#options.allowSource ?? defaultAllowSource,
+        emit,
+      });
+      return { files: result.files, overrides: result.overrides, warnings: result.warnings };
+    } catch (err) {
+      if (err instanceof AnvilError) {
+        emit({ type: "error", code: err.code, message: err.message });
+      }
+      throw err;
+    }
   }
 
   /** `anvil export` — write an `.mrpack` (CF replay items omitted, with a warning). */

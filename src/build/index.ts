@@ -8,6 +8,8 @@
 export type { Acquirer } from "./acquire.js";
 export { FixtureAcquirer, StoreOnlyAcquirer } from "./acquire.js";
 export { IgnoreSet, loadIgnoreSet, parseAnvilignore } from "./anvilignore.js";
+export type { DependencyGraph, WhyResult } from "./graph.js";
+export { readGraph, whyChains, writeGraph } from "./graph.js";
 export type { BuildDelta } from "./incremental.js";
 export { diffLocks } from "./incremental.js";
 export type { ResolvedPaths } from "./paths.js";
