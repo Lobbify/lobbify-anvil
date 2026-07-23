@@ -96,8 +96,22 @@ function pinnedDispatcher(address: string): Agent {
   const family = isIP(address) === 6 ? 6 : 4;
   // Pin every hostname lookup to the already-vetted address, so undici connects
   // to exactly the IP the SSRF guard approved (closing DNS rebinding).
-  const lookup: LookupFunction = (_hostname, _options, callback) => {
-    callback(null, address, family);
+  //
+  // undici's connector hands this to `net.connect`, whose invocation of `lookup`
+  // depends on `autoSelectFamily` — which defaults to TRUE on Node ≥18/20. That
+  // path passes `{ all: true }` and expects the *all-addresses array* callback
+  // form `cb(null, [{ address, family }])`; the legacy single-address path
+  // expects `cb(null, address, family)`. We MUST honor `options.all`: returning a
+  // bare string when the array form is expected makes Node treat the string as an
+  // array of characters, none of which is a valid IP, and it fails the connect
+  // with `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined` — which broke
+  // every real fetch (lock/build/clone/pull).
+  const lookup: LookupFunction = (_hostname, options, callback) => {
+    if (options.all) {
+      callback(null, [{ address, family }]);
+    } else {
+      callback(null, address, family);
+    }
   };
   return new Agent({ connect: { lookup } });
 }
