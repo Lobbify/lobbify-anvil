@@ -37,7 +37,7 @@ export {
   ServedTreeTransport,
   vcObjectPath,
 } from "./transport.js";
-export type { RemotePullAcquirerOptions } from "./transfer.js";
+export type { HostAddressResolver, RemotePullAcquirerOptions } from "./transfer.js";
 export { RemotePullAcquirer, validateRemoteLock } from "./transfer.js";
 export type { TransportDeps } from "./factory.js";
 export { makeTransport } from "./factory.js";

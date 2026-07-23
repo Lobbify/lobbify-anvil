@@ -11,7 +11,10 @@
  *     (contact)`), as public APIs ask for;
  *   - **manual redirect handling**, so the SSRF `guard` runs on the initial
  *     request and every redirect hop, and — on the real (non-injected) path — the
- *     connection is **pinned to the vetted IP** to close DNS rebinding.
+ *     connection is **pinned to the vetted IP** to close DNS rebinding. The guard
+ *     is **on by default** ({@link guardHop}): every request is vetted whether or
+ *     not the caller passes one, so SSRF protection is a property of the transport
+ *     — a source cannot fetch item bytes past it by omitting the option.
  *
  * The `fetch`, DNS `lookup`, `sleep`, and clock are all injectable, so the whole
  * client — rate limiting, backoff, redirect+guard loop — is unit-tested offline.
@@ -22,7 +25,7 @@ import type { LookupFunction } from "node:net";
 import { Agent, fetch as undiciFetch } from "undici";
 import { HttpError } from "../types/errors.js";
 import type { Http, HttpGetOptions, HttpHop, HttpResult } from "../types/index.js";
-import { assertHttpScheme } from "./ssrf.js";
+import { assertHttpScheme, guardHop } from "./ssrf.js";
 
 /** A minimal fetch response shape (undici's satisfies it; fakes implement it). */
 export interface FetchResponseLike {
@@ -185,20 +188,27 @@ export class RateLimitedHttp implements Http {
     }
   }
 
-  /** Resolve the host, run the SSRF guard, and pick a vetted IP to pin. */
+  /**
+   * Resolve the host, run the SSRF guard, and pick a vetted IP to pin.
+   *
+   * The guard runs on **every** request — the default is {@link guardHop} (block
+   * loopback / RFC1918 / link-local / cloud-metadata). A caller may pass its own
+   * `guard` to *widen or narrow* the policy (e.g. an allow-loopback test seam, or
+   * a host-app policy), but there is no code path that fetches **without** one.
+   * This makes SSRF protection a property of the HTTP path itself, so no source —
+   * nor a future one — can silently skip it by omitting the option.
+   */
   async #resolveAndGuard(
     url: string,
     options: HttpGetOptions,
   ): Promise<{ addresses: string[]; pin?: string }> {
-    if (!options.guard) {
-      return { addresses: [] };
-    }
+    const guard = options.guard ?? guardHop;
     // Reject a bad scheme BEFORE any DNS resolution.
     assertHttpScheme(url);
     const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
     const addresses = isIP(host) ? [host] : await this.#lookup(host);
     const hop: HttpHop = { url, host, addresses };
-    await options.guard(hop);
+    await guard(hop);
     return { addresses, pin: addresses[0] };
   }
 

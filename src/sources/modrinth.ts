@@ -33,6 +33,7 @@ import type {
 } from "../types/index.js";
 import { inferKind } from "./kind.js";
 import { safeBasename, singleFilePlacement } from "./place.js";
+import { guardHop } from "./ssrf.js";
 
 const DEFAULT_BASE_URL = "https://api.modrinth.com/v2";
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -294,7 +295,11 @@ export class ModrinthSource implements Source {
     const file = primaryFile(version, subject);
 
     // Download the bytes: pin sha256 (store key) + cross-check Modrinth's sha1.
-    const res = await ctx.http.get(file.url, { maxBytes: MAX_FILE_BYTES });
+    // The SSRF guard applies here as it does for url/curseforge — a base-URL
+    // override to a hostile mirror (or a mirror-supplied `file.url`) cannot pivot
+    // to an internal host. (The client also guards by default; passing it makes
+    // the intent explicit and covers a non-default `Http`.)
+    const res = await ctx.http.get(file.url, { guard: guardHop, maxBytes: MAX_FILE_BYTES });
     const bytes = res.body;
     if (file.hashes.sha1) {
       const actual = hashBuffer(bytes, "sha1");

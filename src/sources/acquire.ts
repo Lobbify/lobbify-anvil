@@ -82,9 +82,14 @@ export class NetworkAcquirer implements Acquirer {
       if (!entry.http) {
         throw new MissingObject(pkg.hash, pkg.name);
       }
-      const guard = pkg.source === "url" ? { guard: guardHop } : {};
+      // The SSRF guard applies to EVERY http(s) byte download, regardless of
+      // source — guarding is a property of the acquire path, not something a
+      // source opts into (the previous `pkg.source === "url"` gate let modrinth /
+      // any-new-source bytes be fetched unguarded). The RateLimitedHttp client
+      // also guards by default; passing it here documents the invariant and
+      // covers any non-default `Http`.
       const res = await entry.http.get(plan.url, {
-        ...guard,
+        guard: guardHop,
         ...(plan.headers ? { headers: plan.headers } : {}),
       });
       await this.#store.putBuffer(res.body, plan.expected.algo, plan.expected);

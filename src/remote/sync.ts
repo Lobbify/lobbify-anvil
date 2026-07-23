@@ -37,7 +37,7 @@ import { buildSnapshot, materializeSnapshot } from "../vc/snapshot.js";
 import { addRemote } from "./config.js";
 import type { RemoteDescriptor } from "./descriptor.js";
 import { remoteBranch } from "./descriptor.js";
-import { validateRemoteLock } from "./transfer.js";
+import { type HostAddressResolver, validateRemoteLock } from "./transfer.js";
 import type { RemoteTransport } from "./transport.js";
 
 /** How the sync layer materializes an instance from a lock (wired by `Anvil`). */
@@ -55,6 +55,8 @@ export interface SyncDeps {
   readonly refs: Refs;
   readonly sharedStore: ContentStore;
   readonly allowSource: AllowSource;
+  /** Hostname resolver for the untrusted-lock DNS pre-vet (real DNS by default). */
+  readonly resolveHost?: HostAddressResolver;
   readonly author: string;
   readonly now: () => number;
   readonly runBuild: RunBuild;
@@ -254,7 +256,7 @@ export async function cloneInstance(deps: SyncDeps): Promise<CloneOutcome> {
   const head = await deps.transport.fetchHead(deps.ref);
   const remoteLock = parseLock(head.lock);
   // The remote lock is untrusted — veto hostile/vetoed sources before any I/O.
-  validateRemoteLock(remoteLock, deps.allowSource);
+  await validateRemoteLock(remoteLock, deps.allowSource, deps.resolveHost);
 
   let commitId: Hash;
   if (head.commit) {
@@ -315,7 +317,7 @@ export async function cloneInstance(deps: SyncDeps): Promise<CloneOutcome> {
 export async function pullInstance(deps: SyncDeps): Promise<PullOutcome> {
   const head = await deps.transport.fetchHead(deps.ref);
   const remoteLock = parseLock(head.lock);
-  validateRemoteLock(remoteLock, deps.allowSource);
+  await validateRemoteLock(remoteLock, deps.allowSource, deps.resolveHost);
 
   const localHead = await deps.refs.resolveHead();
   const currentBranch = await deps.refs.currentBranch();

@@ -135,6 +135,11 @@ export interface AnvilEnv {
   readonly now?: () => number;
   /** The author label recorded on commits + reflog entries. Defaults to `"anvil"`. */
   readonly author?: string;
+  /**
+   * Hostname resolver for the untrusted-remote-lock DNS pre-vet (clone/pull).
+   * Defaults to real DNS; tests inject a hermetic resolver here.
+   */
+  readonly resolveHost?: (host: string) => Promise<readonly string[]>;
 }
 
 /**
@@ -1227,6 +1232,7 @@ export class Anvil {
           refs: ctx.refs,
           sharedStore: ctx.store,
           ...principals,
+          ...(this.#env.resolveHost ? { resolveHost: this.#env.resolveHost } : {}),
           runBuild: this.#syncRunBuild(ctx.store, ctx.replayCache, ctx.transport),
           ...(options?.ref ? { ref: options.ref } : {}),
           emit,
@@ -1265,6 +1271,7 @@ export class Anvil {
           refs: ctx.refs,
           sharedStore: ctx.store,
           ...principals,
+          ...(this.#env.resolveHost ? { resolveHost: this.#env.resolveHost } : {}),
           runBuild: this.#syncRunBuild(ctx.store, ctx.replayCache, ctx.transport),
           emit,
         });

@@ -61,7 +61,14 @@ export async function makeInstance(fake: FakeModrinth, label: string): Promise<I
   const storeDir = await mkTmp(`${label}-store`);
   const store = new ContentStore({ root: storeDir });
   const registry = (): SourceRegistry => registryWith({ modrinth: fake });
-  const env: AnvilEnv = { registry, now: () => NOW, author: "tester" };
+  // Hermetic DNS for the untrusted-lock pre-vet: every host resolves to a benign
+  // public address, so clone/pull validation never touches the real network.
+  const env: AnvilEnv = {
+    registry,
+    now: () => NOW,
+    author: "tester",
+    resolveHost: async () => ["93.184.216.34"],
+  };
   return {
     dir,
     storeDir,
