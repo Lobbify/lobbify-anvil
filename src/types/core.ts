@@ -41,6 +41,20 @@ export type ItemKind =
 /** Where an item is fetched from. `mojang` is the implicit source for the game. */
 export type SourceKind = "mojang" | "modrinth" | "curseforge" | "url" | "local";
 
+/** Mojang's `os.name` vocabulary — the three build-target operating systems. */
+export type OsName = "linux" | "osx" | "windows";
+
+/**
+ * A platform a package applies to. `os` is required; `arch` (a Node `process.arch`
+ * value — `"x64"` | `"arm64"` | `"ia32"`) is optional and, when absent, matches any
+ * arch on that OS. Per-OS natives and the per-platform JRE carry these so the build
+ * installs exactly the artifact for the machine it runs on and never a wrong-arch one.
+ */
+export interface TargetTuple {
+  readonly os: OsName;
+  readonly arch?: string;
+}
+
 /**
  * How an object is materialized.
  *
@@ -101,6 +115,10 @@ export type AllowSource = (ref: ResolvedRef) => boolean;
  * - `link` — link a single object to a target path (mod jar, resourcepack zip).
  * - `extract` — safe-extract an archive under a target dir (natives, overrides).
  * - `asset-tree` — materialize a Mojang asset index into the sha1 asset domain.
+ * - `runtime-tree` — materialize a pinned Mojang java-runtime **per-platform
+ *   manifest** (the store object under `hash`) into a JRE tree: files (preserving
+ *   the executable bit), directories, and the mac-bundle symlinks it declares.
+ *   Landed in Stage 3 for the pinned JRE.
  * - `store-only` — keep the object in the shared store but place nothing into the
  *   instance tree (e.g. a classpath library or client jar referenced by store
  *   path). Additive member landed in Stage 1 to complete the placement table.
@@ -109,6 +127,7 @@ export type Placement =
   | { readonly method: "link"; readonly target: string }
   | { readonly method: "extract"; readonly targetDir: string }
   | { readonly method: "asset-tree"; readonly indexTarget: string }
+  | { readonly method: "runtime-tree"; readonly targetDir: string }
   | { readonly method: "store-only" };
 
 /**
@@ -126,6 +145,14 @@ export interface LockPackage {
   readonly provenance: Provenance;
   /** How this object is placed into the instance tree. */
   readonly placement: Placement;
+  /**
+   * Platform tuples this package applies to (absent = universal). The build's
+   * preflight installs a package only when the host matches one of these. Per-OS
+   * natives and the per-platform JRE carry a target so a single cross-platform
+   * lock stays byte-identical everywhere while each machine gets only its own
+   * natives/JRE — the one deliberately platform-varying part of an instance.
+   */
+  readonly targets?: readonly TargetTuple[];
   /** CurseForge project id (replay items only). */
   readonly project?: number;
   /** CurseForge file id (replay items only). */

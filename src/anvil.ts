@@ -12,6 +12,7 @@
  * replay-never-rehosted) are enforced as these methods gain real bodies.
  */
 
+import type { Acquirer } from "./build/index.js";
 import {
   StoreOnlyAcquirer,
   buildInstance,
@@ -22,13 +23,28 @@ import {
   resolvePaths,
 } from "./build/index.js";
 import type { AnvilEvent, ProgressListener } from "./events.js";
-import { readInputLock, readLockIfPresent, writeLock } from "./lock/index.js";
+import { GameAcquirer, isGamePackage, resolveGame } from "./game/index.js";
+import { comparePackages, readInputLock, readLockIfPresent, writeLock } from "./lock/index.js";
 import { readManifest } from "./manifest/index.js";
 import { pinsFromLock, resolveManifest } from "./resolver/index.js";
-import { buildRegistry, defaultAllowSource } from "./sources/index.js";
+import {
+  NetworkAcquirer,
+  RateLimitedHttp,
+  USER_AGENT,
+  buildRegistry,
+  defaultAllowSource,
+} from "./sources/index.js";
 import { ContentStore, hashFile } from "./store/index.js";
-import { AnvilError, NotImplemented } from "./types/errors.js";
-import type { AnvilOptions, Hash, LockPackage, Lockfile, ManifestItem } from "./types/index.js";
+import { AnvilError, NotImplemented, UnsatisfiableTarget } from "./types/errors.js";
+import type {
+  AnvilOptions,
+  Hash,
+  Http,
+  LockPackage,
+  Lockfile,
+  Manifest,
+  ManifestItem,
+} from "./types/index.js";
 
 /**
  * A typed progress bus: a fan-out event emitter that is also an
@@ -118,6 +134,34 @@ function normalizeUpgrade(
     return true;
   }
   return new Set(upgrade);
+}
+
+/**
+ * The prior lock's concrete loader version to reuse — but only when the manifest
+ * loader is **unpinned** (a bare `"fabric"`, no version) and its name matches the
+ * prior `meta.loader`. An explicit manifest pin, a loader switch, or a first lock
+ * returns `undefined` (resolve fresh). This is what keeps a plain `anvil lock`
+ * from silently bumping an unpinned loader on every run.
+ */
+function priorLoaderVersion(
+  prior: Lockfile | undefined,
+  manifestLoader: string | undefined,
+): string | undefined {
+  if (!prior) {
+    return undefined;
+  }
+  const wanted = (manifestLoader ?? "vanilla").trim().split(/\s+/);
+  if (wanted.length > 1) {
+    return undefined; // the manifest pins an explicit loader version — that wins
+  }
+  const wantedName = (wanted[0] ?? "vanilla").toLowerCase();
+  const priorParts = prior.meta.loader.trim().split(/\s+/);
+  const priorName = (priorParts[0] ?? "").toLowerCase();
+  const priorVersion = priorParts[1];
+  if (priorName !== wantedName || !priorVersion) {
+    return undefined;
+  }
+  return priorVersion;
 }
 
 /** Options for {@link Anvil.build}. */
@@ -235,19 +279,28 @@ export class Anvil {
       const registry = buildRegistry();
       const prior = await readLockIfPresent(this.dir);
       const upgrade = normalizeUpgrade(options?.upgrade);
-      const lock = await resolveManifest({
+      const offline = this.#options.offline ?? false;
+      const itemLock = await resolveManifest({
         manifest,
         registry,
         allowSource: this.#options.allowSource ?? defaultAllowSource,
         now: Date.now(),
         baseDir: this.dir,
-        offline: this.#options.offline ?? false,
+        offline,
         store,
         ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
         ...(prior ? { lockedPins: pinsFromLock(prior) } : {}),
         ...(upgrade !== undefined ? { upgrade } : {}),
         emit,
       });
+
+      // The full game install (client + libraries + natives + assets + pinned JRE
+      // + optional loader) — resolved here so the lock carries the whole instance.
+      const game = await this.#resolveGamePackages(manifest, store, offline, prior, upgrade);
+      const lock: Lockfile = {
+        meta: { ...itemLock.meta, java: game.java, loader: game.loader },
+        resolved: [...itemLock.resolved, ...game.packages].sort(comparePackages),
+      };
       await writeLock(this.dir, lock);
       return lock;
     } catch (err) {
@@ -256,6 +309,77 @@ export class Anvil {
       }
       throw err;
     }
+  }
+
+  /** A per-endpoint-group rate-limited HTTP client for the game installer. */
+  #gameHttp(): Http {
+    return new RateLimitedHttp({ userAgent: USER_AGENT });
+  }
+
+  /**
+   * Resolve the game install (client + libraries + natives + assets + pinned JRE
+   * + optional loader) at lock time, or — offline — carry the prior lock's game
+   * pins forward verbatim (a full game re-resolve needs the network).
+   */
+  async #resolveGamePackages(
+    manifest: Manifest,
+    store: ContentStore,
+    offline: boolean,
+    prior: Lockfile | undefined,
+    upgrade: boolean | ReadonlySet<string> | undefined,
+  ): Promise<{ packages: readonly LockPackage[]; java: string; loader: string }> {
+    if (offline) {
+      if (!prior) {
+        throw new UnsatisfiableTarget(
+          "game install",
+          "offline: cannot resolve the game without network — run `lock` online first",
+        );
+      }
+      return {
+        packages: prior.resolved.filter(isGamePackage),
+        java: prior.meta.java,
+        loader: prior.meta.loader,
+      };
+    }
+    // Pin stability: when the manifest loader is unpinned and this isn't an
+    // upgrade, reuse the prior lock's concrete loader version so a plain re-lock
+    // never silently bumps the loader (its libs + the generated version.json).
+    const reuse = upgrade !== true ? priorLoaderVersion(prior, manifest.game.loader) : undefined;
+    const game = await resolveGame({
+      minecraft: manifest.game.minecraft,
+      ...(manifest.game.loader ? { loader: manifest.game.loader } : {}),
+      ...(reuse ? { reuseLoaderVersion: reuse } : {}),
+      mojangHttp: this.#gameHttp(),
+      loaderHttp: this.#gameHttp(),
+      store,
+    });
+    return { packages: game.packages, java: game.java, loader: game.loader };
+  }
+
+  /**
+   * The build acquirer: offline → store-only; else a router that fetches game
+   * bytes from the Mojang/loader CDNs (via {@link GameAcquirer}) and manifest
+   * items from their sources (via {@link NetworkAcquirer}).
+   */
+  #buildAcquirer(
+    store: ContentStore,
+    offline: boolean,
+    emit: (event: AnvilEvent) => void,
+  ): Acquirer {
+    if (offline) {
+      return new StoreOnlyAcquirer(store, emit);
+    }
+    const network = new NetworkAcquirer({
+      store,
+      registry: buildRegistry(),
+      allowSource: this.#options.allowSource ?? defaultAllowSource,
+      ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
+      emit,
+    });
+    const game = new GameAcquirer({ store, http: this.#gameHttp(), emit });
+    return {
+      ensure: (pkg: LockPackage) => (isGamePackage(pkg) ? game.ensure(pkg) : network.ensure(pkg)),
+    };
   }
 
   /**
@@ -276,8 +400,8 @@ export class Anvil {
       const store = new ContentStore({ root: paths.store });
       const lock = await readInputLock(this.dir);
       const previousLock = await readBuiltLock(this.dir);
-      const acquire = new StoreOnlyAcquirer(store, emit);
-      void options; // offline is the only Stage-1 mode
+      const offline = options?.offline ?? this.#options.offline ?? false;
+      const acquire = this.#buildAcquirer(store, offline, emit);
       const result = await buildInstance({
         instanceDir: this.dir,
         lock,

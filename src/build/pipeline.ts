@@ -20,7 +20,12 @@ import type { IgnoreSet } from "./anvilignore.js";
 import { loadIgnoreSet } from "./anvilignore.js";
 import { diffLocks } from "./incremental.js";
 import type { Platform, Rule } from "./preflight.js";
-import { checkDiskSpace, filterByRules } from "./preflight.js";
+import {
+  assertNativesSatisfiable,
+  checkDiskSpace,
+  filterByRules,
+  filterByTargets,
+} from "./preflight.js";
 import { writeBuiltLock } from "./refs.js";
 import { journaledSwap, recoverSwap, stageRootOf } from "./swap.js";
 
@@ -94,9 +99,13 @@ export async function buildInstance(input: BuildEngineInput): Promise<BuildEngin
   const stageId = randomUUID();
   emit({ type: "build:start", stageId });
 
-  // 1. Preflight: platform-rule filter + disk space.
+  // 1. Preflight: fail loud on any native the host needs but lacks for its arch,
+  //    then filter to the host's applicable set (external rules map + each
+  //    package's intrinsic per-platform `targets`), then check disk space.
   emit({ type: "build:stage", phase: "preflight" });
-  const effective = filterByRules(input.lock.resolved, platform, input.rules);
+  assertNativesSatisfiable(input.lock.resolved, platform);
+  const ruled = filterByRules(input.lock.resolved, platform, input.rules);
+  const effective = filterByTargets(ruled, platform);
   const effectiveLock: Lockfile = { meta: input.lock.meta, resolved: effective };
   await checkDiskSpace(instanceDir, effective, input.diskHeadroomBytes);
 

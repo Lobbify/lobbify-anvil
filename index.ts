@@ -39,3 +39,6 @@ export * from "./src/manifest/index.js";
 export * from "./src/sources/index.js";
 export * from "./src/resolver/index.js";
 export * from "./src/lock/index.js";
+
+// Stage 3 — the full game installer (Mojang + Fabric/Quilt).
+export * from "./src/game/index.js";

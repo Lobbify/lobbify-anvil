@@ -11,12 +11,12 @@
  */
 
 import { statfs } from "node:fs/promises";
-import { PreflightFailed } from "../types/errors.js";
-import type { LockPackage } from "../types/index.js";
+import { PreflightFailed, UnsatisfiableTarget } from "../types/errors.js";
+import type { LockPackage, OsName, TargetTuple } from "../types/index.js";
 
 /** The build target platform. */
 export interface Platform {
-  readonly os: "linux" | "osx" | "windows";
+  readonly os: OsName;
   readonly arch: string;
 }
 
@@ -76,6 +76,86 @@ export function filterByRules(
     return [...packages];
   }
   return packages.filter((pkg) => evaluateRules(rules.get(pkg.name), platform));
+}
+
+/** True when a single target tuple matches the host platform. */
+function targetMatches(t: TargetTuple, platform: Platform): boolean {
+  return t.os === platform.os && (t.arch === undefined || t.arch === platform.arch);
+}
+
+/**
+ * Whether a package's intrinsic `targets` admit this platform. A package with no
+ * `targets` is universal (applies everywhere); otherwise the host must match one
+ * tuple. This is how the per-OS natives and the per-platform JRE in a single
+ * cross-platform lock resolve down to just the host's artifacts at build time.
+ */
+export function packageAppliesToPlatform(pkg: LockPackage, platform: Platform): boolean {
+  if (!pkg.targets || pkg.targets.length === 0) {
+    return true;
+  }
+  return pkg.targets.some((t) => targetMatches(t, platform));
+}
+
+/** Filter packages by their intrinsic per-platform `targets`. */
+export function filterByTargets(
+  packages: readonly LockPackage[],
+  platform: Platform,
+): LockPackage[] {
+  return packages.filter((pkg) => packageAppliesToPlatform(pkg, platform));
+}
+
+/** A natives package is a per-platform `library` extracted into the instance. */
+function isNativesPackage(pkg: LockPackage): boolean {
+  return (
+    pkg.kind === "library" &&
+    pkg.placement.method === "extract" &&
+    pkg.targets !== undefined &&
+    pkg.targets.length > 0 &&
+    /:natives-[a-z0-9-]+$/.test(pkg.name)
+  );
+}
+
+/** The base maven coordinate of a natives package (its name minus the classifier). */
+function nativesBase(name: string): string {
+  return name.replace(/:natives-[a-z0-9-]+$/, "");
+}
+
+/**
+ * Assert every native the host **needs** is actually present for its exact arch.
+ *
+ * Natives ship per (os, arch) as separate packages. If a library provides a
+ * native for the host OS but none for the host **arch** (the macOS-arm64 /
+ * windows-arm64 gap on versions that never shipped an arm64 classifier), we fail
+ * loudly with {@link UnsatisfiableTarget} rather than silently omitting it or —
+ * far worse — installing a wrong-arch binary that crashes the JVM at launch.
+ */
+export function assertNativesSatisfiable(
+  packages: readonly LockPackage[],
+  platform: Platform,
+): void {
+  const byBase = new Map<string, LockPackage[]>();
+  for (const pkg of packages) {
+    if (!isNativesPackage(pkg)) {
+      continue;
+    }
+    const base = nativesBase(pkg.name);
+    const list = byBase.get(base) ?? [];
+    list.push(pkg);
+    byBase.set(base, list);
+  }
+  for (const [base, group] of byBase) {
+    const targetsThisOs = group.some((p) => (p.targets ?? []).some((t) => t.os === platform.os));
+    if (!targetsThisOs) {
+      continue; // this library ships no native for the host OS → not needed here
+    }
+    const coversHost = group.some((p) => packageAppliesToPlatform(p, platform));
+    if (!coversHost) {
+      throw new UnsatisfiableTarget(
+        `${base} on ${platform.os}-${platform.arch}`,
+        `no native binary is published for ${platform.os}-${platform.arch} (this library provides natives for the OS but not this CPU architecture)`,
+      );
+    }
+  }
 }
 
 /**

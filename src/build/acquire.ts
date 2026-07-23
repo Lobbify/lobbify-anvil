@@ -14,7 +14,7 @@
 import { join } from "node:path";
 import type { AnvilEvent } from "../events.js";
 import type { ContentStore } from "../store/index.js";
-import { assetHashes, readAssetIndex } from "../store/index.js";
+import { treeLeaves } from "../store/index.js";
 import { MissingObject } from "../types/errors.js";
 import type { Hash, LockPackage } from "../types/index.js";
 
@@ -25,17 +25,18 @@ export interface Acquirer {
 
 type Emit = (event: AnvilEvent) => void;
 
-async function ensureAssetTreeAssets(
+/**
+ * Bring the leaf objects a manifest-driven placement fans out: an `asset-tree`'s
+ * assets and a `runtime-tree`'s JRE files. The manifest object (`pkg.hash`) must
+ * already be in the store — the caller brings it first.
+ */
+async function ensureTreeLeaves(
   store: ContentStore,
   pkg: LockPackage,
   bring: (hash: Hash, subject: string) => Promise<void>,
 ): Promise<void> {
-  if (pkg.placement.method !== "asset-tree") {
-    return;
-  }
-  const index = await readAssetIndex(store, pkg.hash);
-  for (const hash of assetHashes(index)) {
-    await bring(hash, `asset of ${pkg.name}`);
+  for (const hash of await treeLeaves(store, pkg)) {
+    await bring(hash, `leaf of ${pkg.name}`);
   }
 }
 
@@ -74,7 +75,7 @@ export class FixtureAcquirer implements Acquirer {
 
   async ensure(pkg: LockPackage): Promise<void> {
     await this.#bring(pkg.hash, pkg.name);
-    await ensureAssetTreeAssets(this.#store, pkg, (h, s) => this.#bring(h, s));
+    await ensureTreeLeaves(this.#store, pkg, (h, s) => this.#bring(h, s));
   }
 }
 
@@ -97,6 +98,6 @@ export class StoreOnlyAcquirer implements Acquirer {
 
   async ensure(pkg: LockPackage): Promise<void> {
     await this.#require(pkg.hash, pkg.name);
-    await ensureAssetTreeAssets(this.#store, pkg, (h, s) => this.#require(h, s));
+    await ensureTreeLeaves(this.#store, pkg, (h, s) => this.#require(h, s));
   }
 }

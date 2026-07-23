@@ -20,12 +20,17 @@ export type {
   AssetIndex,
   PlacementContext,
   PlacementOutcome,
+  RuntimeFile,
+  RuntimeManifest,
 } from "./placement.js";
 export {
   assetHashes,
   executePlacement,
   readAssetIndex,
+  readRuntimeManifest,
+  runtimeLeafHashes,
   targetsOf,
+  treeLeaves,
 } from "./placement.js";
 export type { SafeExtractOptions } from "./safe-extract.js";
 export { excludeMetaInf, safeExtract } from "./safe-extract.js";

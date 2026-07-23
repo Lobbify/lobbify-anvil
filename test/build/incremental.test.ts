@@ -64,3 +64,47 @@ describe("incremental diff", () => {
     expect(delta.removeTargets).toEqual([]);
   });
 });
+
+describe("incremental diff — co-located extract dirs (natives)", () => {
+  function extractPkg(name: string, value: string, targetDir: string): LockPackage {
+    return {
+      name,
+      kind: "library",
+      source: "mojang",
+      hash: { algo: "sha1", value },
+      provenance: "copy",
+      placement: { method: "extract", targetDir },
+      size: 1,
+    };
+  }
+  const natA = extractPkg("lib-a:natives-linux", "a".repeat(40), "natives");
+  const natB = extractPkg("lib-b:natives-linux", "b".repeat(40), "natives");
+
+  it("re-stages the WHOLE shared dir when a sibling is dropped (no orphaned natives)", () => {
+    // prev {A,B}→natives/, next {A}: A unchanged, B dropped. The swap replaces the
+    // whole natives/ dir, so A must be re-staged to purge B's extracted files.
+    const delta = diffLocks(lockOf(natA, natB), lockOf(natA));
+    expect(delta.install.map((p) => p.name)).toEqual(["lib-a:natives-linux"]);
+    expect(delta.installTargets).toEqual(["natives"]);
+  });
+
+  it("re-stages every co-located package when one changes", () => {
+    const natBChanged = extractPkg("lib-b:natives-linux", "c".repeat(40), "natives");
+    const delta = diffLocks(lockOf(natA, natB), lockOf(natA, natBChanged));
+    expect(delta.install.map((p) => p.name).sort()).toEqual([
+      "lib-a:natives-linux",
+      "lib-b:natives-linux",
+    ]);
+  });
+
+  it("stays a no-op when the dir membership is unchanged", () => {
+    const delta = diffLocks(lockOf(natA, natB), lockOf(natA, natB));
+    expect(delta.install).toEqual([]);
+  });
+
+  it("removes the dir entirely when every co-located package is dropped", () => {
+    const delta = diffLocks(lockOf(natA, natB), lockOf());
+    expect(delta.install).toEqual([]);
+    expect(delta.removeTargets).toEqual(["natives"]);
+  });
+});

@@ -10,7 +10,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ensureDir } from "../internal/fs.js";
 import type { ContentStore } from "../store/index.js";
-import { assetHashes, readAssetIndex } from "../store/index.js";
+import { treeLeaves } from "../store/index.js";
 import type { Hash, Lockfile } from "../types/index.js";
 import { parseRefJson, serializeRefJson } from "./serialize.js";
 
@@ -39,16 +39,17 @@ export async function writeBuiltLock(instanceDir: string, lock: Lockfile): Promi
 
 /**
  * Expand a built lock into the full set of objects reachable from it — the GC
- * root set. Package hashes are always roots; an `asset-tree` package additionally
- * roots every asset object its index names.
+ * root set. Package hashes are always roots; a manifest-driven placement
+ * (`asset-tree` / `runtime-tree`) additionally roots every leaf object its
+ * manifest names (assets, JRE files), so GC never reclaims a live leaf.
  */
 export async function collectRoots(lock: Lockfile, store: ContentStore): Promise<Hash[]> {
   const roots: Hash[] = [];
   for (const pkg of lock.resolved) {
     roots.push(pkg.hash);
-    if (pkg.placement.method === "asset-tree" && (await store.has(pkg.hash))) {
-      const index = await readAssetIndex(store, pkg.hash);
-      roots.push(...assetHashes(index));
+    const method = pkg.placement.method;
+    if ((method === "asset-tree" || method === "runtime-tree") && (await store.has(pkg.hash))) {
+      roots.push(...(await treeLeaves(store, pkg)));
     }
   }
   return roots;

@@ -13,7 +13,15 @@ export { diffLocks } from "./incremental.js";
 export type { ResolvedPaths } from "./paths.js";
 export { resolvePaths } from "./paths.js";
 export type { Platform, Rule } from "./preflight.js";
-export { checkDiskSpace, currentPlatform, evaluateRules, filterByRules } from "./preflight.js";
+export {
+  assertNativesSatisfiable,
+  checkDiskSpace,
+  currentPlatform,
+  evaluateRules,
+  filterByRules,
+  filterByTargets,
+  packageAppliesToPlatform,
+} from "./preflight.js";
 export type { BuildEngineInput, BuildEngineResult } from "./pipeline.js";
 export { buildInstance } from "./pipeline.js";
 export { collectRoots, readBuiltLock, writeBuiltLock } from "./refs.js";
