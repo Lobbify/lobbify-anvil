@@ -205,8 +205,17 @@ describe("vc merge: item-set 3-way + constrained re-lock", () => {
     const result = await anvil.merge("theirs");
     expect(result.fastForward).toBe(false);
     expect(result.committed).toBeDefined();
-    // The merged working tree carries theirs' V2 (the winning side), on disk.
-    expect(await readFile(join(fx.dir, "mods", "patch.jar"), "utf8")).toBe("V2");
+    // The merged working tree carries theirs' V2 (the winning side), on disk, at
+    // the path the manifest declares — `./patch.jar` is an instance-root file, so
+    // it is tracked where it sits (LB-706). Before that, a local item was placed
+    // at `<kind-dir>/<basename>` and this landed at `mods/patch.jar`.
+    expect(await readFile(join(fx.dir, "patch.jar"), "utf8")).toBe("V2");
+    // …and ONLY there. `./patch.jar` is an instance-root file, so nothing carries
+    // it into a kind directory (LB-706). Asserting the absence matters: the root
+    // copy is also where the test wrote it, so the read above alone would pass
+    // even while the merge materialized the blob somewhere else entirely — which
+    // is exactly what happened before, at `mods/patch.jar`.
+    expect(await pathExists(join(fx.dir, "mods", "patch.jar"))).toBe(false);
 
     await rmTmp(fx.dir);
     await rmTmp(fx.storeDir);

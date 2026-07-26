@@ -28,7 +28,8 @@ export type { KindInferenceInput } from "./kind.js";
 export { LocalSource } from "./local.js";
 export { ModrinthApi, ModrinthSource } from "./modrinth.js";
 export type { ModrinthSourceOptions } from "./modrinth.js";
-export { safeBasename, singleFilePlacement } from "./place.js";
+export { declaredPlacementTarget, safeBasename, singleFilePlacement } from "./place.js";
+export type { LinkPlacement } from "./place.js";
 export {
   allowOnly,
   buildRegistry,

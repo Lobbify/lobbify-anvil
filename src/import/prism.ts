@@ -12,6 +12,14 @@
  *     item (project/file, sha256-pinned, bytes never stored — re-fetched per client);
  *   - else it stays a **local** file under `.anvil/overrides/` (tracked verbatim).
  *
+ * Placement follows what the manifest can reproduce. An unmatched file becomes a
+ * `{ path, kind }` item and keeps its pack-relative path, subdirectories and all,
+ * across every later re-lock. A re-identified one becomes a bare `source:id` ref,
+ * which carries no path, so it is placed by kind — the same thing a re-lock would
+ * derive. Preserving a subdirectory only in the import lock would put the lock and
+ * every later re-lock into silent disagreement, so a jar that does move is
+ * reported in `warnings` instead.
+ *
  * Re-identification runs through the injected {@link IdentityResolver} seam, so the
  * importer is fully offline-testable and the (network) Modrinth/CurseForge lookups
  * are a thin production wiring. The written lock never carries a rehostable URL for
@@ -218,9 +226,26 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
       const kind: ItemKind = kindForPackPath(packRel);
       const filename = safeBasename(rel, dir === "mods" ? ".jar" : ".zip");
 
+      // A re-identified jar is recorded in the manifest as a bare `source:id`
+      // ref, which carries no path — so every later `anvil lock` re-derives its
+      // placement from kind + basename. Placing it that way here keeps the
+      // import lock and every re-lock in agreement, which is the whole point of
+      // LB-706; the cost is that a jar sitting in a subdirectory does move, so
+      // say so instead of relocating it silently. (An UNMATCHED file keeps its
+      // path: it is tracked as a `{ path, kind }` item the manifest reproduces.)
+      const matched = singleFilePlacement(kind, filename);
+      const warnIfMoved = (): void => {
+        if (matched.target !== packRel) {
+          warnings.push(
+            `re-identified "${packRel}" is placed at "${matched.target}" — an item referenced by id carries no path of its own`,
+          );
+        }
+      };
+
       // 1. Modrinth match (by sha1) → a copy item.
       const mr = await input.identify.matchModrinth(sha1);
       if (mr) {
+        warnIfMoved();
         await input.store.putBuffer(bytes, "sha256", sha256);
         const pkg: LockPackage = {
           name: mr.slug,
@@ -229,11 +254,11 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
           version: mr.versionNumber,
           hash: sha256,
           provenance: "copy",
-          placement: singleFilePlacement(kind, filename),
+          placement: matched,
           size: bytes.byteLength,
           url: mr.url,
         };
-        placeable.set(pkg.placement.method === "link" ? pkg.placement.target : pkg.name, pkg);
+        placeable.set(matched.target, pkg);
         manifestItems.push({
           ref: {
             source: "modrinth",
@@ -249,6 +274,7 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
       // 2. CurseForge match (by Murmur2 fingerprint) → a replay item (no bytes stored).
       const cf = await input.identify.matchCurseForge(curseforgeFingerprint(bytes));
       if (cf) {
+        warnIfMoved();
         const pkg: LockPackage = {
           name: cf.slug || String(cf.projectId),
           kind,
@@ -256,13 +282,13 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
           ...(cf.displayName ? { version: cf.displayName } : {}),
           hash: sha256,
           provenance: "replay",
-          placement: singleFilePlacement(kind, filename),
+          placement: matched,
           size: bytes.byteLength,
           project: cf.projectId,
           file: cf.fileId,
           // No `url` — a replay item is never pinned to a rehostable URL.
         };
-        placeable.set(pkg.placement.method === "link" ? pkg.placement.target : pkg.name, pkg);
+        placeable.set(matched.target, pkg);
         manifestItems.push({
           ref: {
             source: "curseforge",

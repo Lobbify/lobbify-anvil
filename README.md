@@ -67,6 +67,13 @@ everything anvil manages internally lives in a hidden `.anvil/` (its brain, like
 Heavy shared content (assets, libraries, runtime) is deduplicated through a shared
 content store — which can simply *be* an existing `.minecraft/assets` you already have.
 
+Because the folder is the instance, **an item you list by path is placed at that path**.
+`"./config/sodium/mixins.json"` is read from there and built back there, nesting intact,
+and `"./options.txt"` stays at the instance root. Only an item that names no path of its
+own — every `modrinth:` / `curseforge:` / URL item, and a local file that lives outside
+the instance — is placed by its kind, into `mods/`, `resourcepacks/`, `shaderpacks/`,
+`datapacks/`, or `config/`. Paths under `saves/`, `.anvil/`, or `.anvilignore` are refused.
+
 ## Quickstart
 
 ```bash

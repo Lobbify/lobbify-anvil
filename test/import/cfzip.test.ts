@@ -184,17 +184,13 @@ describe("importCurseForgeZip", () => {
       method: "link",
       target: "config/mymod.toml",
     });
-    // NOTE (separate, pre-existing quirk — not this ticket's diagnosis, and
-    // shared verbatim by importPrism's identical `{ path, kind }` shape): a
-    // re-resolved local item's placement is recomputed by LocalSource from
-    // kind+basename (`singleFilePlacement`), not carried over from the
-    // original pack path. "options.txt" (root-level, kind "config" by
-    // default) lands back at "config/options.txt", not the instance root, on
-    // any re-lock. That's a placement-drift bug, distinct from LB-704's
-    // drop/delete bug — the file is NOT dropped, just potentially relocated.
+    // LB-706: the root-level override stays at the root across the re-lock. It
+    // used to be recomputed from kind+basename (`singleFilePlacement`), so
+    // "options.txt" (kind "config" by default) came back as
+    // "config/options.txt" — the file was not dropped, just silently moved.
     expect(relockedLocals.map((p) => p.placement)).toContainEqual({
       method: "link",
-      target: "config/options.txt",
+      target: "options.txt",
     });
     // The CurseForge replay item survives the re-lock too (sanity: the fix
     // didn't disturb the already-correct path).

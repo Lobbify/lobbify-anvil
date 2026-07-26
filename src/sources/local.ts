@@ -3,6 +3,13 @@
  * sha256 of its bytes. Portable across the store (the hash is), but the `url`
  * hint it records is a machine-local `file://` path — inherently non-portable,
  * which is the nature of a local item.
+ *
+ * Placement follows the item's own path when it has one. A file authored at
+ * `config/sodium/mixins.json` is read from there and placed back there; only a
+ * file with no in-instance path of its own (one outside the instance root) falls
+ * back to `<kind-dir>/<basename>`. Collapsing every local item to kind+basename
+ * relocated files across a re-lock — a root `options.txt` reappeared under
+ * `config/`, and nested config trees could not round-trip at all.
  */
 
 import { readFile } from "node:fs/promises";
@@ -10,7 +17,14 @@ import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { hashBuffer } from "../store/hash.js";
 import { HttpError } from "../types/errors.js";
-import type { FetchPlan, LockPackage, ResolveResult, ResolvedRef, Source } from "../types/index.js";
+import type {
+  FetchPlan,
+  LockPackage,
+  Placement,
+  ResolveResult,
+  ResolvedRef,
+  Source,
+} from "../types/index.js";
 import type { SourceContext } from "../types/index.js";
 import { inferKind } from "./kind.js";
 import { safeBasename, singleFilePlacement } from "./place.js";
@@ -34,13 +48,19 @@ export class LocalSource implements Source {
     if (ctx.store) {
       await ctx.store.putBuffer(bytes, "sha256", hash);
     }
+    // The declared path wins when the item has one; kind+basename is the fallback
+    // for a file that lives outside the instance and names no placement itself.
+    const placement: Placement =
+      ref.target !== undefined
+        ? { method: "link", target: ref.target }
+        : singleFilePlacement(itemKind, filename);
     const pkg: LockPackage = {
       name: filename,
       kind: itemKind,
       source: "local",
       hash,
       provenance: "copy",
-      placement: singleFilePlacement(itemKind, filename),
+      placement,
       size: bytes.byteLength,
       url: pathToFileURL(path).toString(),
     };

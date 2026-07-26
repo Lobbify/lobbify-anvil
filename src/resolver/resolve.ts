@@ -28,6 +28,7 @@ import { canonicalJson } from "../build/serialize.js";
 import type { AnvilEvent } from "../events.js";
 import { comparePackages } from "../lock/serialize.js";
 import { formatVersionSpec, parseRef, refForItem, refKey } from "../manifest/ref.js";
+import { declaredPlacementTarget } from "../sources/place.js";
 import type { SourceRegistry } from "../sources/registry.js";
 import { hashBuffer } from "../store/hash.js";
 import type { ConflictDemand } from "../types/errors.js";
@@ -122,12 +123,27 @@ export function pinsFromLock(lock: Lockfile): Map<string, LockPackage> {
   return map;
 }
 
-/** Absolutize a local ref's path against the base dir (other sources unchanged). */
+/**
+ * Absolutize a local ref's path against the base dir (other sources unchanged),
+ * and — from the path **as authored**, before it is absolutized — derive the
+ * placement target it declares.
+ *
+ * The manifest is instance-relative by construction (`baseDir` is the instance
+ * dir), so an authored `"config/a/b.toml"` is both the read location and the
+ * placement. Deriving it here, rather than in `parseRef`, keeps the parsed refs
+ * that a manifest stores byte-identical — so this change does not perturb any
+ * existing `meta.manifestHash`.
+ */
 function localizeRef(ref: ResolvedRef, baseDir: string): ResolvedRef {
   if (ref.source !== "local") {
     return ref;
   }
-  return { ...ref, id: isAbsolute(ref.id) ? ref.id : resolvePath(baseDir, ref.id) };
+  const target = declaredPlacementTarget(ref.id);
+  return {
+    ...ref,
+    id: isAbsolute(ref.id) ? ref.id : resolvePath(baseDir, ref.id),
+    ...(target !== undefined ? { target } : {}),
+  };
 }
 
 /** Whether an already-pinned package satisfies a demanded version spec. */

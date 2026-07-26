@@ -48,6 +48,41 @@ describe("LocalSource", () => {
     expect(pkg.hash.algo).toBe("sha256");
     expect(await store.has(pkg.hash)).toBe(true);
   });
+
+  it("LB-706: honors the placement target the ref declares, nesting and all", async () => {
+    const work = await mkTmp("local");
+    const store = new ContentStore({ root: await mkTmp("store") });
+    dirs.push(work, store.root);
+    const cfgPath = join(work, "mixins.json");
+    await writeFile(cfgPath, '{"nested":true}');
+
+    const { pkg } = await new LocalSource().resolve(
+      {
+        source: "local",
+        id: cfgPath,
+        versionSpec: { kind: "latest" },
+        kind: "config",
+        target: "config/sodium/mixins.json",
+      },
+      ctx(undefined, store),
+    );
+    // Not `config/mixins.json` — the declared path is the placement, verbatim.
+    expect(pkg.placement).toEqual({ method: "link", target: "config/sodium/mixins.json" });
+  });
+
+  it("LB-706: still places by KIND when the ref declares no target", async () => {
+    const work = await mkTmp("local");
+    const store = new ContentStore({ root: await mkTmp("store") });
+    dirs.push(work, store.root);
+    const jarPath = join(work, "outside.jar");
+    await writeFile(jarPath, Buffer.from(fabricJar("outside")));
+
+    const { pkg } = await new LocalSource().resolve(
+      { source: "local", id: jarPath, versionSpec: { kind: "latest" } },
+      ctx(undefined, store),
+    );
+    expect(pkg.placement).toEqual({ method: "link", target: "mods/outside.jar" });
+  });
 });
 
 describe("UrlSource", () => {

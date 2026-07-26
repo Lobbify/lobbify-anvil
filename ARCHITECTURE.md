@@ -70,7 +70,17 @@ see [Replay-never-rehosted](#replay-never-rehosted-curseforge), below.
   list. There is deliberately no separate "mods" vs. "resourcepacks" list —
   every item (mod, resourcepack, shader, datapack, local file, whatever) is
   the same `ManifestItem`, either a `source:id@version` ref or a local path;
-  its `ItemKind` is inferred, not hand-categorized.
+  its `ItemKind` is inferred, not hand-categorized. **Where an item lands** has
+  two rules, in precedence order: an item listed by an in-instance path is
+  placed at that path verbatim (`"./config/sodium/mixins.json"` nests,
+  `"./options.txt"` stays at the root), and everything else — every remote
+  source, plus a local file outside the instance — is placed by its kind, into
+  `mods/`, `resourcepacks/`, `shaderpacks/`, `datapacks/`, or `config/`. The
+  path→placement derivation is `declaredPlacementTarget` in
+  `src/sources/place.ts`; it folds every `.`/`..`, declines to place anything
+  that resolves outside the root (kind-directory fallback), and refuses a
+  protected top (`saves/`, `.anvil/`, `.anvilignore`) outright rather than
+  quietly re-homing it into a kind directory.
 - **Resolver** (`src/resolver/resolve.ts`) — a single-pass BFS worklist over
   the manifest's roots and their transitive dependencies. For every ref
   reached, `allowSource(ref)` is evaluated **before any network I/O** (the
