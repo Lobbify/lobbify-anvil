@@ -7,7 +7,11 @@
  * {@link safeExtract} (zip-slip / symlink / decompression-bomb guarded) into a
  * throwaway stage dir, and any file whose destination is a protected/unsafe path
  * is refused, never placed. Each surviving file becomes a tracked **local**
- * (copy) entry under `.anvil/overrides/`.
+ * (copy) entry under `.anvil/overrides/` — placed into the pre-resolved import
+ * lock **and** appended to the manifest's `items` (a `{ path, kind }` entry, the
+ * same shape {@link importPrism} uses for its unmatched-jar case), so a later
+ * `anvil lock` (regenerating the lock FROM the manifest, e.g. after a merge or
+ * rebase) reproduces the override instead of silently dropping it.
  */
 
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -16,7 +20,7 @@ import { pathToFileURL } from "node:url";
 import { ensureDir, isProtectedTop } from "../internal/fs.js";
 import { safeBasename } from "../sources/index.js";
 import { hashBuffer, safeExtract } from "../store/index.js";
-import type { ItemKind, LockPackage, ObjectSink } from "../types/index.js";
+import type { ItemKind, LockPackage, ManifestItem, ObjectSink } from "../types/index.js";
 
 /** Reject an obviously-unsafe pack path (traversal / absolute / drive letter). */
 export function isUnsafePackPath(path: string): boolean {
@@ -77,6 +81,13 @@ export interface ImportOverrideTreeInput {
   readonly prefixes: readonly string[];
   /** The placeable map to add tracked-local entries to (keyed by dest path). */
   readonly placeable: Map<string, LockPackage>;
+  /**
+   * The manifest's root item list — each surviving override gets a `{ path,
+   * kind }` entry appended here too, or it exists only in the lock this import
+   * writes and vanishes the moment anything re-resolves the manifest (`anvil
+   * lock`, a merge/rebase re-lock).
+   */
+  readonly manifestItems: ManifestItem[];
   readonly warnings: string[];
   readonly onStored: (hash: LockPackage["hash"]) => void;
 }
@@ -84,8 +95,10 @@ export interface ImportOverrideTreeInput {
 /**
  * Extract the pack's override prefixes through the hardened extractor, track them
  * under `.anvil/overrides/`, admit their bytes, and register a `local` copy entry
- * per file. A later prefix wins a path collision (e.g. `client-overrides/`); a
- * file whose top segment is protected/unsafe is refused.
+ * per file — both in `placeable` (the lock this import writes) and in
+ * `manifestItems` (so the entry survives a later re-resolve of the manifest). A
+ * later prefix wins a path collision (e.g. `client-overrides/`); a file whose
+ * top segment is protected/unsafe is refused.
  */
 export async function importOverrideTree(input: ImportOverrideTreeInput): Promise<number> {
   const stageDir = join(input.instanceDir, ".anvil", `import-stage-${process.pid}`);
@@ -125,9 +138,10 @@ export async function importOverrideTree(input: ImportOverrideTreeInput): Promis
       await mkdir(join(trackedPath, ".."), { recursive: true });
       // Write the already-read+hashed bytes (no re-read → no TOCTOU on absSrc).
       await writeFile(trackedPath, bytes);
+      const kind = kindForPackPath(destRel);
       input.placeable.set(destRel, {
         name: safeBasename(destRel, ".txt"),
-        kind: kindForPackPath(destRel),
+        kind,
         source: "local",
         hash,
         provenance: "copy",
@@ -135,6 +149,9 @@ export async function importOverrideTree(input: ImportOverrideTreeInput): Promis
         size: bytes.byteLength,
         url: pathToFileURL(trackedPath).toString(),
       });
+      // Same shape importPrism uses for its unmatched-jar local entries — see
+      // module doc.
+      input.manifestItems.push({ path: destRel, kind });
       input.onStored(hash);
       count += 1;
     }

@@ -345,6 +345,7 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
     store: input.store,
     prefixes: ["overrides", "client-overrides"],
     placeable,
+    manifestItems,
     warnings,
     onStored: (h) => emit({ type: "object:store", hash: h, deduped: false }),
   });

@@ -42,6 +42,7 @@ export function registryWith(entries: {
   modrinth?: Http;
   url?: Http;
   modrinthBaseUrl?: string;
+  curseforge?: Http;
 }): SourceRegistry {
   const map = new Map<SourceKind, SourceEntry>();
   if (entries.modrinth) {
@@ -56,7 +57,10 @@ export function registryWith(entries: {
     map.set("url", { source: new UrlSource(), http: entries.url });
   }
   map.set("local", { source: new LocalSource() });
-  map.set("curseforge", { source: new CurseForgeSource() });
+  map.set("curseforge", {
+    source: new CurseForgeSource(),
+    ...(entries.curseforge ? { http: entries.curseforge } : {}),
+  });
   return map;
 }
 

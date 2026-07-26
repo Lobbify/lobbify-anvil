@@ -128,6 +128,41 @@ describe("mrpack import (untrusted input) → build", () => {
     expect(res.stderr.toLowerCase()).toContain("sha512");
   });
 
+  it("LB-704 GATE: an override survives import → build → re-lock → build (not dropped/deleted)", async () => {
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      overrides: [{ path: "config/sodium.json", data: '{"quality":"high"}' }],
+    });
+
+    const imported = await cli.run(["import", pack]);
+    expect(imported.code).toBe(0);
+
+    // The manifest itself must carry the override — it is the sole input to a
+    // later `lock`. If it's absent here, a re-lock has nothing to reproduce it
+    // from, no matter what the just-imported anvil.lock says.
+    const manifestToml = await readFile(join(cwd, "anvil.toml"), "utf8");
+    expect(manifestToml).toContain("config/sodium.json");
+
+    const built1 = await cli.run(["build"]);
+    expect(built1.code).toBe(0);
+    expect(await readFile(join(cwd, "config", "sodium.json"), "utf8")).toBe('{"quality":"high"}');
+
+    // Re-lock: regenerates anvil.lock FROM anvil.toml.
+    const relocked = await cli.run(["lock"]);
+    expect(relocked.code).toBe(0);
+    const lockAfterRelock = await readFile(join(cwd, "anvil.lock"), "utf8");
+    expect(lockAfterRelock).toContain("config/sodium.json");
+
+    // A second build reconciles disk against the (re-)lock. If the override
+    // fell out of the lock, this is where it gets deleted from the instance.
+    const built2 = await cli.run(["build"]);
+    expect(built2.code).toBe(0);
+    const files = await listFiles(cwd);
+    expect(files).toContain("config/sodium.json");
+    expect(await readFile(join(cwd, "config", "sodium.json"), "utf8")).toBe('{"quality":"high"}');
+  });
+
   it("skips an override targeting a protected path (saves/) rather than clobbering it", async () => {
     // A pre-existing world the user cares about.
     await writeFile(join(cwd, "options.txt"), "unused");

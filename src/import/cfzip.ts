@@ -355,6 +355,7 @@ export async function importCurseForgeZip(input: ImportCfZipInput): Promise<Impo
     store: input.store,
     prefixes: [cf.overrides],
     placeable,
+    manifestItems,
     warnings,
     onStored: (h) => emit({ type: "object:store", hash: h, deduped: false }),
   });
