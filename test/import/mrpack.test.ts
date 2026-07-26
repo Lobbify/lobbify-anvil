@@ -163,6 +163,56 @@ describe("mrpack import (untrusted input) → build", () => {
     expect(await readFile(join(cwd, "config", "sodium.json"), "utf8")).toBe('{"quality":"high"}');
   });
 
+  it("LB-706 GATE: a root-level override survives import → build → re-lock → build AT THE ROOT", async () => {
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      clientOverrides: [{ path: "options.txt", data: "fov:70" }],
+    });
+
+    expect((await cli.run(["import", pack])).code).toBe(0);
+    expect((await cli.run(["build"])).code).toBe(0);
+    expect(await listFiles(cwd)).toContain("options.txt");
+
+    // Re-lock regenerates anvil.lock FROM anvil.toml. The local source used to
+    // recompute the placement from kind + basename, so an override whose path is
+    // not already `<kind-dir>/<basename>` came back somewhere else — "options.txt"
+    // (kind "config") reappeared as "config/options.txt".
+    expect((await cli.run(["lock"])).code).toBe(0);
+    const relocked = await readFile(join(cwd, "anvil.lock"), "utf8");
+    expect(relocked).not.toContain("config/options.txt");
+
+    // The second build reconciles disk against the re-lock — where the file
+    // physically moves if the lock says it belongs elsewhere.
+    expect((await cli.run(["build"])).code).toBe(0);
+    const files = await listFiles(cwd);
+    expect(files).toContain("options.txt");
+    expect(files).not.toContain("config/options.txt");
+    expect(await readFile(join(cwd, "options.txt"), "utf8")).toBe("fov:70");
+  });
+
+  it("LB-706 GATE: a NESTED config path round-trips import → build → re-lock → build intact", async () => {
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      overrides: [{ path: "config/a/b/c.toml", data: "nested = true\n" }],
+    });
+
+    expect((await cli.run(["import", pack])).code).toBe(0);
+    expect((await cli.run(["build"])).code).toBe(0);
+    expect(await listFiles(cwd)).toContain("config/a/b/c.toml");
+
+    // The whole point: nesting is preserved, not collapsed to "config/c.toml".
+    expect((await cli.run(["lock"])).code).toBe(0);
+    expect(await readFile(join(cwd, "anvil.lock"), "utf8")).toContain("config/a/b/c.toml");
+
+    expect((await cli.run(["build"])).code).toBe(0);
+    const files = await listFiles(cwd);
+    expect(files).toContain("config/a/b/c.toml");
+    expect(files).not.toContain("config/c.toml");
+    expect(await readFile(join(cwd, "config", "a", "b", "c.toml"), "utf8")).toBe("nested = true\n");
+  });
+
   it("skips an override targeting a protected path (saves/) rather than clobbering it", async () => {
     // A pre-existing world the user cares about.
     await writeFile(join(cwd, "options.txt"), "unused");

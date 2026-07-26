@@ -21,7 +21,7 @@
  *   "modrinth:fabric-api",
  *   "modrinth:sodium@^0.5",
  *   "https://example.com/mod.jar",
- *   "./overrides/config.toml",
+ *   "./config/sodium/mixins.json",
  *   { path = "./options.txt", kind = "config" },
  * ]
  *
@@ -31,6 +31,14 @@
  *
  * `items` may sit at the document top level (before the first table) or nested
  * as `project.items`; both are accepted.
+ *
+ * A path item's path is **instance-relative and is also where the file is
+ * placed** — `"./config/sodium/mixins.json"` is read from there and built back
+ * there, and `"./options.txt"` stays at the instance root. Only a path that
+ * resolves outside the instance (`"../shared/mods/foo.jar"`, an absolute path)
+ * names no placement of its own; such an item is placed by its kind, like any
+ * Modrinth/CurseForge/URL item. `saves/`, `.anvil/`, and `.anvilignore` are
+ * refused outright.
  */
 
 import { readFile } from "node:fs/promises";

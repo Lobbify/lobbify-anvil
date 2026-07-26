@@ -89,6 +89,22 @@ export interface ResolvedRef {
   readonly versionSpec: VersionSpec;
   /** An explicit kind override when the source cannot be trusted to infer it. */
   readonly kind?: ItemKind;
+  /**
+   * The instance-relative placement target this ref declares (a POSIX path, the
+   * same currency as {@link Placement}'s `target` — not to be confused with
+   * {@link LockPackage.targets}, which are platforms).
+   *
+   * A path-authored item names both where its bytes come from and where they
+   * belong: `"config/sodium/mixins.json"` is read from there and placed back
+   * there. The resolver derives this from the manifest path (via
+   * `declaredPlacementTarget`) and the local source honors it, so nested paths
+   * round-trip and a root-level override is not swept into a kind directory.
+   *
+   * Absent when the item declares no placement of its own — every non-local
+   * source, and a local path that resolves outside the instance. Those fall back
+   * to `<kind-dir>/<basename>`.
+   */
+  readonly target?: string;
 }
 
 /** A raw manifest item, before resolution: either a source ref or a local path. */
