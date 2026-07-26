@@ -21,3 +21,6 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Claude Code agent worktrees (local tooling, never committed)
+.claude/
