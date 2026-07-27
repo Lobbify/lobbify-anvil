@@ -25,6 +25,7 @@ import {
   DecompressionBomb,
   type Manifest,
   ManifestError,
+  PathEscape,
   SourceKeyMissing,
   SourceNotAllowed,
   resolveManifest,
@@ -150,16 +151,43 @@ describe("a hostile CurseForge base pack", () => {
     }
   });
 
-  it("never admits a member through the shared store — the source proves it", async () => {
-    // A code-path trace in the spirit of the ToS audit: the CurseForge base
-    // resolver must not reach the ambient store for a member. Its ONLY store use
-    // is the override tree, which goes through the shared importer.
-    const text = await readFile(join(REPO_ROOT, "src", "base", "cf-base.ts"), "utf8");
-    expect(text).not.toMatch(/ctx\.store\?\.putBuffer\(/);
-    expect(text).not.toMatch(/\bstore\.putFile\(/);
-    // No member download exists to admit: the only byte fetch in the whole file
-    // is the pack archive itself.
-    expect(text.match(/http\.get\(/g) ?? []).toHaveLength(1);
+  it("admits EXACTLY the override objects and nothing else", async () => {
+    // Behavioral, not a source grep. An earlier version of this test asserted
+    // the absence of two spellings (`ctx.store?.putBuffer`, `store.putFile`)
+    // that this file's architecture never uses anyway — it would have passed a
+    // member admitted through the `sinkFor(ctx)` helper the file DOES use, which
+    // is the realistic regression. Counting objects catches any spelling.
+    const store = new ContentStore({ root: await tmp("store") });
+    const instanceDir = await tmp("inst");
+    const world = cfPackWorld({
+      members: [
+        { projectID: 238222, fileID: 5000, slug: "jei" },
+        { projectID: 306612, fileID: 6100, slug: "fabric-api" },
+      ],
+      overrides: [
+        { path: "config/a.toml", data: "a\n" },
+        { path: "config/b.toml", data: "b\n" },
+      ],
+    });
+    const pack = await cfBaseResolverFor(world, instanceDir, { now: NOW, store })({
+      source: "curseforge",
+      id: "715572",
+      versionSpec: { kind: "pin", version: String(world.packFileId) },
+    });
+    expect(pack.members.filter((p) => p.source === "curseforge")).toHaveLength(2);
+
+    // 2 members + 2 overrides resolved, but the store holds exactly the 2
+    // override objects. Not "does not contain the member hash" — exactly two.
+    const overrideHashes = pack.members
+      .filter((p) => p.source === "local")
+      .map((p) => p.hash.value)
+      .sort();
+    expect(overrideHashes).toHaveLength(2);
+    const stored = (await allFileNames(store.root)).filter((n) => /^[0-9a-f]{40,64}$/.test(n));
+    expect(stored.sort()).toEqual(overrideHashes);
+
+    // And exactly one CDN fetch: the pack archive. No member bytes moved.
+    expect(world.http.calls.filter((u) => u.includes("edge.forgecdn.net"))).toHaveLength(1);
   });
 
   // --- what the pack cannot lie about ---------------------------------------
@@ -179,7 +207,9 @@ describe("a hostile CurseForge base pack", () => {
       lockIt({
         members: [{ projectID: 238222, fileID: 5000, slug: "jei", identitySwap: { id: 9999 } }],
       }),
-    ).rejects.toThrow();
+      // Assert WHICH failure: a bare toThrow() is green for any unrelated
+      // breakage in this fixture path.
+    ).rejects.toThrow(/answered for 238222\/9999 when asked for member 238222\/5000/);
   });
 
   it("skips a member the catalogue does not publish, loudly", async () => {
@@ -250,7 +280,7 @@ describe("a hostile CurseForge base pack", () => {
         members: HONEST,
         malicious: [{ name: "overrides/../../escape.txt", data: "pwned" }],
       }),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(PathEscape);
   });
 
   it("cannot plant a symlink through overrides/", async () => {
@@ -259,7 +289,7 @@ describe("a hostile CurseForge base pack", () => {
         members: HONEST,
         malicious: [{ name: "overrides/link", type: "symlink", linkTarget: "/etc/passwd" }],
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/symlink|link/i);
   });
 
   it("cannot write into saves/ — the override is skipped, the world is untouched", async () => {

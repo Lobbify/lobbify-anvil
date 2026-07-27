@@ -55,7 +55,7 @@
 
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { MAX_CF_PACK_FILES, parseCfManifest } from "../import/cf-manifest.js";
+import { parseCfManifest } from "../import/cf-manifest.js";
 import type { CfManifestFile } from "../import/cf-manifest.js";
 import { importOverrideTree } from "../import/pack-common.js";
 import { readZipEntry } from "../import/zip-read.js";
@@ -76,10 +76,10 @@ import {
   UnsatisfiableTarget,
 } from "../types/errors.js";
 import type { ItemKind, LockPackage, ResolvedRef } from "../types/index.js";
+// One constant, shared with the Modrinth base: both drive `rm -rf .anvil/base`,
+// so two copies that must stay equal is a bug waiting to happen.
+import { BASE_TRACKED_SUBDIR } from "./mrpack-base.js";
 import type { BasePackSource, BaseResolveContext, ResolvedBasePack } from "./types.js";
-
-/** Where a base's loose override files are tracked, under `.anvil/`. */
-export const BASE_TRACKED_SUBDIR = "base";
 
 /** Cap on the pack archive itself. A modpack zip is configs, not content. */
 const MAX_CF_PACK_BYTES = 128 * 1024 * 1024;
@@ -143,13 +143,9 @@ export class CurseForgeBaseSource implements BasePackSource {
         `base pack "curseforge:${projectId}@${packFile.id}" is not a CurseForge modpack (no manifest.json)`,
       );
     }
+    // `parseCfManifest` already bounds `files[]` (and does it before building the
+    // list, not after) — re-checking here would be dead code.
     const cf = parseCfManifest(manifestBytes);
-    if (cf.files.length > MAX_CF_PACK_FILES) {
-      throw new DecompressionBomb(
-        `base pack "curseforge:${projectId}" lists ${cf.files.length} files, ` +
-          `over the ${MAX_CF_PACK_FILES} limit`,
-      );
-    }
 
     const warnings: string[] = [];
     const members: LockPackage[] = [];
@@ -169,6 +165,17 @@ export class CurseForgeBaseSource implements BasePackSource {
           total: cf.files.length,
         });
       }
+    }
+
+    // A pack that named members but produced none is a failure, not a base with
+    // nothing in it. Individually each drop is a warning; all of them together
+    // means the catalogue told us nothing usable, and quietly returning an empty
+    // set would build an instance missing every mod the pack asked for.
+    if (cf.files.length > 0 && members.length === 0) {
+      throw new UnsatisfiableTarget(
+        subject,
+        `the pack lists ${cf.files.length} member(s) but none could be pinned: ${warnings.slice(0, 3).join("; ")}`,
+      );
     }
 
     // 4. `overrides/` → tracked local rows under `.anvil/base/`.
@@ -269,6 +276,17 @@ function memberKey(entry: CfManifestFile): string {
 }
 
 /**
+ * CurseForge's attested sha1 for a file, lowercased, or `undefined`.
+ *
+ * The shape is checked, not just the presence: `hashes[].value` is remote input,
+ * and a non-string there would throw an untyped `TypeError` on `.toLowerCase()`.
+ */
+function attestedSha1Of(file: CfFileMetadata): string | undefined {
+  const raw = file.hashes?.find((h) => h.algo === CF_HASH_SHA1)?.value;
+  return typeof raw === "string" && /^[0-9a-fA-F]{40}$/.test(raw) ? raw.toLowerCase() : undefined;
+}
+
+/**
  * Select the pack's own file (its published version) under the ref's spec and
  * the frozen clock. A pinned spec names a `fileID` directly, which is the form
  * a reproducible `game.from` should use.
@@ -309,19 +327,22 @@ async function selectPackFile(
     }
     return chosen;
   }
+  // An unparseable `fileDate` is DROPPED, not kept as eligible. Keeping it makes
+  // every later comparison NaN, so neither branch of the "is this newer" test
+  // fires and `best` can never be replaced — one junk date on the first listed
+  // file would silently pin an old pack version, reproducibly and forever.
+  // Dates are the selection key; a file without a usable one is not selectable.
   const eligible = files.filter((f) => {
     const t = Date.parse(f.fileDate);
-    return Number.isNaN(t) || t <= now;
+    return !Number.isNaN(t) && t <= now;
   });
   let best: CfFileMetadata | undefined;
+  let bestAt = Number.NEGATIVE_INFINITY;
   for (const f of eligible) {
-    if (!best) {
+    const at = Date.parse(f.fileDate);
+    if (!best || at > bestAt || (at === bestAt && f.id > best.id)) {
       best = f;
-      continue;
-    }
-    const cmp = Date.parse(f.fileDate) - Date.parse(best.fileDate);
-    if (cmp > 0 || (cmp === 0 && f.id > best.id)) {
-      best = f;
+      bestAt = at;
     }
   }
   if (!best) {
@@ -365,11 +386,13 @@ async function downloadPackArchive(
         `over the ${MAX_CF_PACK_BYTES} limit`,
     );
   }
-  const sha1 = packFile.hashes?.find((h) => h.algo === CF_HASH_SHA1)?.value;
+  // Same validation the member path applies: a hash field is remote input, so
+  // it is checked for shape before it is used, not just for presence.
+  const sha1 = attestedSha1Of(packFile);
   if (sha1) {
     const actual = hashBuffer(bytes, "sha1");
-    if (actual.value !== sha1.toLowerCase()) {
-      throw new ShaMismatch(subject, { algo: "sha1", value: sha1.toLowerCase() }, actual);
+    if (actual.value !== sha1) {
+      throw new ShaMismatch(subject, { algo: "sha1", value: sha1 }, actual);
     }
   }
   return bytes;
@@ -419,16 +442,27 @@ async function gatherMemberFacts(
     // answered about the pair the pack actually named. A mismatch means the pack
     // (or the response) is pointing somewhere else.
     if (file.id !== entry.fileID || file.modId !== entry.projectID) {
-      throw new ShaMismatch(
-        `${subject}: member ${entry.projectID}/${entry.fileID}`,
-        { algo: "sha1", value: `${entry.projectID}/${entry.fileID}` },
-        { algo: "sha1", value: `${file.modId}/${file.id}` },
+      // Not a ShaMismatch: nothing here is a digest, and forging two `Hash`
+      // objects whose values are `"715572/8323938"` would put a non-hex string
+      // in a Hash and show the user a "sha mismatch" naming a garbage digest.
+      throw new UnsatisfiableTarget(
+        subject,
+        `CurseForge answered for ${file.modId}/${file.id} when asked for member ` +
+          `${entry.projectID}/${entry.fileID}`,
       );
     }
+    // The mod record is REQUIRED, and a failure here is fatal rather than a
+    // silent degradation. Unlike the `.mrpack` path — where a missing identity
+    // only costs override precision — this record carries the two facts a
+    // CurseForge member cannot be resolved without: `classId` (the only way to
+    // know a member's kind, since no bytes are fetched to introspect) and `slug`
+    // (the row's `name`, which the overlay matches on and `baseSetDigest` folds
+    // in). Swallowing a transient 500 here would drop every non-`.jar` member of
+    // that project and rename the survivors, so the same immutable pin would
+    // resolve to a different member set and a different base digest on a retry.
+    // Determinism is not something to lose to a retryable error.
     if (!mods.has(entry.projectID)) {
-      // Identity is an optimization, not a requirement: losing it costs override
-      // precision by name, it does not make the pack unusable.
-      mods.set(entry.projectID, await api.getMod(entry.projectID).catch(() => undefined));
+      mods.set(entry.projectID, await api.getMod(entry.projectID));
     }
     const mod = mods.get(entry.projectID);
     out.set(memberKey(entry), { file, ...(mod ? { mod } : {}) });
@@ -460,8 +494,8 @@ async function memberRowFor(
     return undefined;
   }
   const { file, mod } = facts;
-  const sha1 = file.hashes?.find((h) => h.algo === CF_HASH_SHA1)?.value;
-  if (!sha1 || !/^[0-9a-fA-F]{40}$/.test(sha1)) {
+  const sha1 = attestedSha1Of(file);
+  if (!sha1) {
     warnings.push(
       `base pack: skipped member ${entry.projectID}/${entry.fileID} ` +
         `("${file.fileName}") — CurseForge attests no sha1, so it cannot be pinned`,
@@ -498,7 +532,7 @@ async function memberRowFor(
     // The pin CurseForge actually attests. sha1 is the strongest hash the API
     // offers (algo 1 = sha1, 2 = md5); the immutable (projectID, fileID) pair is
     // the primary identity pin and this is the tamper-evidence over it.
-    hash: { algo: "sha1", value: sha1.toLowerCase() },
+    hash: { algo: "sha1", value: sha1 },
     provenance: "replay",
     placement: singleFilePlacement(kind, filename),
     ...(size !== undefined ? { size } : {}),

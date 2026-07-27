@@ -35,6 +35,27 @@ carry a breaking change, and each one is called out below.
   CurseForge is **bring-your-own-key**: anvil ships none. A base resolve without
   one fails with a typed `SourceKeyMissing`, never a silent skip or an empty pack.
 
+  **Known limitations**, none of them silent:
+  - A pack's `overrides/` are tracked as `local` rows keyed by an absolute path
+    under this instance's `.anvil/base/`, so the base-set digest and a member
+    diff vary by instance directory for a pack that ships them. Catalogue members
+    are unaffected. Pre-existing and identical for a Modrinth base.
+  - `getModFiles` requests one page of 50 and does not paginate, so a `game.from`
+    resolved as `latest` against a project with more than 50 published files
+    selects the newest of one page. Pin `game.from` by file id
+    (`curseforge:<project>@<fileId>`) for a reproducible base — which is what the
+    determinism story wants anyway. Pre-existing; it affects a direct
+    `curseforge:` item reference the same way.
+  - A CurseForge member's bytes can still reach a remote through an unrelated
+    interaction between `.anvilignore` and the atomic swap: `.anvilignore`
+    matching is top-level-segment-wide, so a line naming any file under `mods/`
+    makes the swap skip *removing* a superseded replay jar, which then becomes an
+    untracked worktree file that the VC layer tracks and `push` ships. Not
+    introduced here — it applies to any replay item whose version moves — but a
+    base version bump moves many at once, so it is much more reachable. Fixing it
+    means exempting replay targets from the ignore filter in `journaledSwap`, in
+    its own change.
+
 - **`game.from` works: an instance can start from a published modpack.** The field
   existed in the manifest schema and the resolver refused it; it now resolves the
   pack into a base layer and lays the manifest's own `items` over it.
@@ -103,6 +124,31 @@ carry a breaking change, and each one is called out below.
   and is used only where CurseForge offers nothing stronger. A directly-referenced
   `curseforge:` item is unaffected and still pins sha256, because that path
   downloads the bytes anyway.
+
+- **The CurseForge API client validates its responses instead of casting them.**
+  `JSON.parse(...) as T` type-checks at compile time and guarantees nothing at run
+  time, so a mirror, a proxy, an error page served with a 200, or a delisted id
+  could produce an untyped `TypeError` deep in the resolver. `getMod`,
+  `getModFile`, `getModFiles` and `getDownloadUrl` now normalize what they return:
+  a malformed record raises a typed `UnsatisfiableTarget`, a malformed entry in a
+  listing is dropped rather than failing the listing, and a non-string
+  `download-url` reads as "no download" (the existing typed `ReplayUnavailable`).
+  A `slug` is accepted only in the shape a CurseForge slug takes, since it becomes
+  a lock row's `name`.
+
+- **`anvil import` of a CurseForge zip: three parser changes** from sharing
+  `import/cf-manifest.ts` with the base path.
+  - A `files[]` over the 10 000 cap now raises `ManifestError` rather than
+    `DecompressionBomb`, and is rejected *before* the list is built rather than
+    after.
+  - A `files[]` that is present but not an array is now an error. It previously
+    read as zero files, which imported a pack that installs nothing without
+    reporting anything.
+  - A repeated `(projectID, fileID)` is now imported once. A pair is an identity,
+    so repeating it named the same artifact twice — and cost one API call per
+    repeat against the user's own key.
+  - A traversing or malformed `overrides` prefix falls back to `"overrides"`
+    instead of being used verbatim.
 
 - **BREAKING: a `game.remove` entry that matches nothing now fails the lock.** It
   was previously a silent no-op. The failure mode that justifies the break: a typo

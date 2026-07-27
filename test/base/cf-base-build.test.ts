@@ -27,6 +27,7 @@ import {
 import type { Lockfile } from "../../index.js";
 import { cfBaseResolverFor, cfPackWorld } from "../helpers/cf-pack.js";
 import { hashOf, mkTmp, rmTmp } from "../helpers/fixtures.js";
+import { fabricJar } from "../helpers/net.js";
 
 const NOW = Date.parse("2026-07-01T00:00:00Z");
 const MEMBERS = [{ projectID: 238222, fileID: 5000, slug: "jei" }];
@@ -130,7 +131,13 @@ describe("a sha1-pinned CurseForge base member, end to end", () => {
     const { pack } = await resolvePack(instanceDir, store);
     const member = pack.members.find((p) => p.source === "curseforge");
 
-    // A world whose CDN serves different bytes than the metadata attests.
+    // The tampered world must be identical to the honest one EXCEPT for the
+    // substituted CDN bytes. An earlier version of this test also changed the
+    // indexed bytes, so the pin disagreed with the metadata too and it passed
+    // with `cdnBytes` deleted — i.e. it passed in both conditions and proved
+    // nothing about CDN tampering.
+    const honestBytes = fabricJar("238222-5000");
+    const substituted = new TextEncoder().encode("SUBSTITUTED PAYLOAD");
     const tampered = cfPackWorld({ members: MEMBERS });
     tampered.http.add({
       modId: 238222,
@@ -140,19 +147,30 @@ describe("a sha1-pinned CurseForge base member, end to end", () => {
         {
           id: 5000,
           fileName: "jei-5000.jar",
+          displayName: "jei-5000.jar",
           gameVersions: ["26.2"],
-          bytes: new TextEncoder().encode("the honest bytes"),
-          cdnBytes: new TextEncoder().encode("SUBSTITUTED PAYLOAD"),
+          bytes: honestBytes, // metadata still attests the honest sha1…
+          cdnBytes: substituted, // …but the CDN hands back something else.
         },
       ],
     });
+    // Precondition: the lock's pin IS the honest sha1, so the only thing wrong
+    // at fetch time is the bytes.
+    expect(member?.hash).toEqual(hashOf(honestBytes, "sha1"));
+
     const replayCache = new ReplayCache({ instanceDir });
     const replay = new ReplayAcquirer({
       replayCache,
       http: tampered.http,
       curseforgeKey: "TEST-CF-KEY",
     });
-    await expect(replay.ensure(member as never)).rejects.toBeInstanceOf(ShaMismatch);
+    const err = await replay.ensure(member as never).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ShaMismatch);
+    // It rejected because the SUBSTITUTED bytes hash differently — assert both
+    // sides, or the test cannot tell this failure from any other ShaMismatch.
+    const mismatch = err as ShaMismatch & { expected: unknown; actual: unknown };
+    expect(mismatch.expected).toEqual(hashOf(honestBytes, "sha1"));
+    expect(mismatch.actual).toEqual(hashOf(substituted, "sha1"));
     expect(await replayCache.has(member?.hash as never)).toBe(false);
   });
 });

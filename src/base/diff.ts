@@ -38,6 +38,23 @@
  * one, and falls back to the pinned hash. Comparing `file` rather than `hash`
  * matters: it is what makes the diff meaningful for rows pinned by identity, and
  * it stays correct when two different pins happen to hash the same.
+ *
+ * ## Known limitation: a base's `overrides/` are machine-local
+ *
+ * Catalogue members diff cleanly across machines, because a `(projectID,
+ * fileID)` pair means the same thing everywhere. A pack's `overrides/` do not:
+ * they are tracked as `local` rows whose `url` is an absolute path under this
+ * instance's `.anvil/base/`, so `canonicalKeyOf` — and therefore this diff and
+ * {@link baseSetDigest} — vary by instance directory for any pack that ships
+ * them. Two users resolving the same manifest and the same pack get matching
+ * member rows and different override keys.
+ *
+ * Diffing two versions of a pack *on one machine* (the case this exists for) is
+ * unaffected. Comparing digests *between* machines is not reliable for a pack
+ * with overrides. This is pre-existing and identical for a Modrinth base; the
+ * fix is to key a tracked override on its pack-relative path rather than its
+ * absolute one, which changes the lock for every base instance and belongs in
+ * its own change.
  */
 
 import { hashToString } from "../lock/serialize.js";

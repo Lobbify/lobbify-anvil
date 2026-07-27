@@ -76,6 +76,18 @@ function fileJson(modId: number, f: FakeCfFileSpec): unknown {
   };
 }
 
+/**
+ * Rewrite an API response body before it is returned. The argument is the parsed
+ * `{ data: … }` envelope; whatever comes back is re-encoded verbatim.
+ *
+ * This exists to model a hostile or broken *upstream* rather than a hostile
+ * pack: a mirror, a proxy, an error page served with a 200, or a delisted id can
+ * all hand back JSON that type-checks at compile time and is junk at run time.
+ * anvil's typed decoders cast rather than validate, so this is the only way to
+ * reach the code that dereferences those fields.
+ */
+export type CfMangle = (path: string, body: unknown) => unknown;
+
 /** An in-memory CurseForge Core v1 API + CDN, implementing the `Http` interface. */
 export class FakeCurseForge implements Http {
   readonly calls: string[] = [];
@@ -83,6 +95,7 @@ export class FakeCurseForge implements Http {
   readonly #mods = new Map<number, FakeCfModSpec>();
   readonly #files = new Map<string, { modId: number; file: FakeCfFileSpec }>();
   readonly #cdn = new Map<string, FakeCfFileSpec>();
+  #mangle?: CfMangle;
 
   add(mod: FakeCfModSpec): this {
     this.#mods.set(mod.modId, mod);
@@ -90,6 +103,12 @@ export class FakeCurseForge implements Http {
       this.#files.set(`${mod.modId}:${file.id}`, { modId: mod.modId, file });
       this.#cdn.set(cdnUrl(mod.modId, file), file);
     }
+    return this;
+  }
+
+  /** Install a response mangler (see {@link CfMangle}). */
+  mangle(fn: CfMangle): this {
+    this.#mangle = fn;
     return this;
   }
 
@@ -115,6 +134,14 @@ export class FakeCurseForge implements Http {
     const u = new URL(url);
     const path = u.pathname;
 
+    // Every JSON route below goes through the mangler when one is installed.
+    const reply = (body: unknown): HttpResult => ({
+      status: 200,
+      headers: {},
+      url,
+      body: encode(this.#mangle ? this.#mangle(path, body) : body),
+    });
+
     const dl = path.match(/^\/v1\/mods\/(\d+)\/files\/(\d+)\/download-url$/);
     if (dl) {
       const entry = this.#files.get(`${dl[1]}:${dl[2]}`);
@@ -122,7 +149,7 @@ export class FakeCurseForge implements Http {
         return { status: 200, headers: {}, url, body: encode({ data: null }) };
       }
       const data = entry.file.downloadDisabled ? null : cdnUrl(entry.modId, entry.file);
-      return { status: 200, headers: {}, url, body: encode({ data }) };
+      return reply({ data });
     }
 
     const oneFile = path.match(/^\/v1\/mods\/(\d+)\/files\/(\d+)$/);
@@ -131,12 +158,7 @@ export class FakeCurseForge implements Http {
       if (!entry) {
         return { status: 404, headers: {}, url, body: encode({ error: "not found" }) };
       }
-      return {
-        status: 200,
-        headers: {},
-        url,
-        body: encode({ data: fileJson(entry.modId, entry.file) }),
-      };
+      return reply({ data: fileJson(entry.modId, entry.file) });
     }
 
     const filesList = path.match(/^\/v1\/mods\/(\d+)\/files$/);
@@ -149,7 +171,7 @@ export class FakeCurseForge implements Http {
       const list = mod.files
         .filter((f) => gameVersion === null || (f.gameVersions ?? []).includes(gameVersion))
         .map((f) => fileJson(mod.modId, f));
-      return { status: 200, headers: {}, url, body: encode({ data: list }) };
+      return reply({ data: list });
     }
 
     const modMatch = path.match(/^\/v1\/mods\/(\d+)$/);
@@ -158,19 +180,14 @@ export class FakeCurseForge implements Http {
       if (!mod) {
         return { status: 404, headers: {}, url, body: encode({ error: "not found" }) };
       }
-      return {
-        status: 200,
-        headers: {},
-        url,
-        body: encode({
-          data: {
-            id: mod.modId,
-            name: mod.name ?? mod.slug,
-            slug: mod.slug,
-            ...(mod.classId !== undefined ? { classId: mod.classId } : {}),
-          },
-        }),
-      };
+      return reply({
+        data: {
+          id: mod.modId,
+          name: mod.name ?? mod.slug,
+          slug: mod.slug,
+          ...(mod.classId !== undefined ? { classId: mod.classId } : {}),
+        },
+      });
     }
 
     return { status: 404, headers: {}, url, body: encode({ error: `unrouted ${path}` }) };

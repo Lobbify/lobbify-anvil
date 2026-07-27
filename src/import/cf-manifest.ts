@@ -132,6 +132,12 @@ export function parseCfManifest(bytes: Uint8Array): CfManifest {
   if (!isRecord(doc.minecraft) || typeof doc.minecraft.version !== "string") {
     throw new ManifestError("manifest.json is missing minecraft.version");
   }
+  // A present-but-wrong `files` is an error, never an empty pack. Silently
+  // reading `"files": "nope"` as zero members installs nothing and reports
+  // nothing — the one failure mode worse than refusing the pack.
+  if (doc.files !== undefined && !Array.isArray(doc.files)) {
+    throw new ManifestError("manifest.json files must be an array");
+  }
   const rawFiles = Array.isArray(doc.files) ? doc.files : [];
   if (rawFiles.length > MAX_CF_PACK_FILES) {
     throw new ManifestError(
@@ -139,6 +145,11 @@ export function parseCfManifest(bytes: Uint8Array): CfManifest {
     );
   }
   const files: CfManifestFile[] = [];
+  // A pair is an identity, so listing it twice names the same artifact twice.
+  // Without this, a manifest repeating one pair N times costs N API calls
+  // against the user's own key and puts N identical rows in the lock — a pack
+  // can inflate both by three orders of magnitude for free.
+  const seen = new Set<string>();
   for (const [i, f] of rawFiles.entries()) {
     if (
       !isRecord(f) ||
@@ -151,6 +162,11 @@ export function parseCfManifest(bytes: Uint8Array): CfManifest {
     ) {
       throw new ManifestError(`manifest.json files[${i}] is missing numeric projectID/fileID`);
     }
+    const key = `${f.projectID}:${f.fileID}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
     files.push({
       projectID: f.projectID,
       fileID: f.fileID,
