@@ -8,7 +8,7 @@
  * dropping a jar into `mods/` produced a `commit` that reported success and
  * recorded nothing. Tracked files close that hole.
  *
- * Four rules make the walk safe and cheap:
+ * Five rules make the walk safe and cheap:
  *
  *   - **`.anvilignore` entries are TRACKED, not excluded.** `.anvilignore` means
  *     "the build must never create, move, or delete this" — i.e. *this file is
@@ -18,11 +18,32 @@
  *     The separate `.anvilexclude` is the "version control must not record this"
  *     file. One sentence: **`.anvilignore` protects a path from the build,
  *     `.anvilexclude` hides a path from version control.**
- *   - **The game install is excluded by hardcoded top-level segment**, not by
- *     asking the lock what it owns. A *stale* subtree left by an earlier lock (an
- *     old `versions/…`, a replaced `runtime/` JRE) is still build product;
- *     lock-derived ownership alone would sweep it into version control the moment
- *     the lock stopped naming it.
+ *   - **Lock-derived ownership only ever ADDS exclusions; nothing may depend on
+ *     it alone.** `buildOwnedPaths` answers "does some lock name this path right
+ *     now", and a path stops being named the moment an item's version bumps its
+ *     filename. That is fine for build product, which is why the game install is
+ *     additionally excluded by hardcoded top-level segment: a stale subtree left
+ *     by an earlier lock (an old `versions/…`, a replaced `runtime/` JRE) is
+ *     still build product, and lock-derived ownership alone would sweep it into
+ *     version control as soon as the lock stopped naming it. It is **not** fine
+ *     for anything that must never be recorded, because "the lock no longer
+ *     names it" is precisely the state such a file ends up in.
+ *   - **Replay (CurseForge) bytes are refused by their BYTES, not by their path.**
+ *     A file whose bytes are in this instance's replay cache is never trackable,
+ *     whatever it is called and whether or not any lock still names its path.
+ *     Refusal happens at admission, in `trackOne`, ahead of any `putBlob`: this
+ *     walk is the single place `snapshot.tracked` is produced, and every way
+ *     those bytes could leave the machine (push, a served tree, a git remote)
+ *     flows through that one set. Filtering at each egress point instead would
+ *     still leave CurseForge bytes sitting in `.anvil/objects/`.
+ *
+ *     The recorded replay-path ledger is a **fallback for one state only** — the
+ *     replay cache deleted, so the byte question cannot be asked — and it warns
+ *     when it fires. It is not a path-based exclusion running in parallel: making
+ *     it one meant a path that once held a CurseForge jar was silently
+ *     un-committable forever, including for the user's own hand-placed
+ *     replacement. `ReplayVeto` in `store/replay-provenance.ts` owns that whole
+ *     decision; this file only supplies the bytes and reports the warning.
  *   - **Exclusion is applied to DIRECTORIES during the walk**, so an excluded
  *     subtree is never descended into. A real instance holds tens of thousands of
  *     asset objects; walking them and filtering afterwards is not an option.
@@ -39,10 +60,13 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { readBuiltLock } from "../build/refs.js";
 import { NATIVES_DIR } from "../game/mojang.js";
-import { foldName, isProtectedTop } from "../internal/fs.js";
-import type { LockPackage, Lockfile } from "../types/index.js";
+import { foldName, foldPath, isProtectedTop, normalizeRelPath } from "../internal/fs.js";
+import { hashBuffer } from "../store/hash.js";
+import type { ReplayVeto } from "../store/replay-provenance.js";
+import { unverifiedReplayWarning } from "../store/replay-provenance.js";
+import type { Hash, HashAlgo, LockPackage, Lockfile } from "../types/index.js";
 import type { TrackedFile, VcObjectStore } from "./objects.js";
-import { blobIdOfStream, encodeObject, idOfEncoding } from "./objects.js";
+import { blobAndContentDigests, encodeObject, idOfEncoding } from "./objects.js";
 
 /** The optional root file listing paths version control must not record. */
 export const EXCLUDE_FILE = ".anvilexclude";
@@ -124,11 +148,6 @@ export type ExcludePattern =
   | { readonly kind: "path"; readonly segments: readonly (readonly string[])[] }
   | { readonly kind: "prefix"; readonly path: string };
 
-/** Normalize a candidate or pattern path: `\` → `/`, no leading `./`, no trailing `/`. */
-function normalizePath(raw: string): string {
-  return raw.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
-}
-
 /** Split one pattern segment on its wildcards into the literal parts between them. */
 function globParts(segment: string): string[] {
   return segment.split("*");
@@ -153,7 +172,7 @@ export function parseAnvilexclude(text: string): ExcludePattern[] {
     if (line.length === 0 || line.startsWith("#")) {
       continue;
     }
-    const normalized = foldName(normalizePath(line));
+    const normalized = foldPath(line);
     if (normalized.length === 0) {
       continue;
     }
@@ -185,7 +204,7 @@ const DEFAULT_BASENAME_PATTERNS: readonly ExcludePattern[] = DEFAULT_EXCLUDE_BAS
  * the filesystem handed back.
  */
 export function isExcludeFilePath(relPath: string): boolean {
-  return foldName(normalizePath(relPath)) === foldName(EXCLUDE_FILE);
+  return foldPath(relPath) === foldName(EXCLUDE_FILE);
 }
 
 /** Match one name against a `*`-only glob already split on its wildcards. */
@@ -266,17 +285,17 @@ export interface BuildOwnedPaths {
 
 /** The top-level segment of an instance-relative path. */
 function topSegment(path: string): string {
-  return normalizePath(path).split("/")[0] ?? "";
+  return normalizeRelPath(path).split("/")[0] ?? "";
 }
 
 function ownedByPackage(pkg: LockPackage, files: Set<string>, trees: Set<string>): void {
   const p = pkg.placement;
   switch (p.method) {
     case "link":
-      files.add(foldName(normalizePath(p.target)));
+      files.add(foldPath(p.target));
       return;
     case "extract":
-      trees.add(foldName(normalizePath(p.targetDir)));
+      trees.add(foldPath(p.targetDir));
       return;
     case "asset-tree":
       // The index lands at `assets/indexes/<id>.json`, but the objects it names
@@ -285,11 +304,11 @@ function ownedByPackage(pkg: LockPackage, files: Set<string>, trees: Set<string>
       trees.add(foldName(topSegment(p.indexTarget)));
       return;
     case "runtime-tree":
-      trees.add(foldName(normalizePath(p.targetDir)));
+      trees.add(foldPath(p.targetDir));
       return;
     case "forge-build":
       for (const out of p.outputs) {
-        files.add(foldName(normalizePath(out)));
+        files.add(foldPath(out));
       }
       return;
     case "store-only":
@@ -343,9 +362,7 @@ export class WorktreeExclusion {
 
   /** True when version control must not record (or materialize) this path. */
   excludes(relPath: string): boolean {
-    // Folding the whole path is folding each segment: `foldName` only lowercases
-    // and NFC-normalizes, and `/` is fixed under both.
-    const folded = foldName(normalizePath(relPath));
+    const folded = foldPath(relPath);
     const segments = folded.split("/").filter((s) => s.length > 0 && s !== ".");
     const top = segments[0];
     if (top === undefined) {
@@ -393,6 +410,11 @@ export interface LoadExclusionInput {
 
 /**
  * Read `.anvilexclude` (absent is fine) and combine it with the build-owned paths.
+ *
+ * Replay paths are deliberately NOT an input here. This predicate is path-only,
+ * and a path-only replay rule excludes whatever file later occupies a path a
+ * CurseForge item once used. The replay decision needs the candidate's bytes, so
+ * it lives in `trackOne` and in `materializeSnapshot` instead, where they exist.
  *
  * Only `ENOENT` means "there is no exclude file". Every other error is rethrown,
  * for the same reason the walk rethrows one: an `EACCES` degrading to "no rules"
@@ -495,6 +517,22 @@ export interface TrackWorktreeInput {
    * write history.
    */
   readonly store?: boolean;
+  /**
+   * The replay admission rule. **Required**, with `ReplayVeto.none()` as the
+   * explicit opt-out a caller with no instance uses, because an optional one is
+   * a guard a caller can drop by forgetting a field — and the failure is silent
+   * and only observable as CurseForge bytes on a remote.
+   *
+   * `store: false` does not make it optional either. `status` must reach the same
+   * verdict as `commit`, or a tree it calls dirty is one no commit can clean.
+   */
+  readonly replayVeto: ReplayVeto;
+  /**
+   * Where a refusal that the user needs to know about is reported. Only a
+   * `veto-unverified` uses it: a cached-bytes veto is the mechanism working as
+   * intended and would be noise on every commit.
+   */
+  readonly onWarn?: (message: string) => void;
 }
 
 /**
@@ -518,6 +556,11 @@ function toTrackedPath(rel: string): string {
   return rel.normalize("NFC");
 }
 
+/** The content digests of an in-memory candidate, under the pin algorithms given. */
+function digestsOf(bytes: Uint8Array, algos: readonly HashAlgo[]): ReadonlyMap<HashAlgo, Hash> {
+  return new Map(algos.map((algo) => [algo, hashBuffer(bytes, algo)]));
+}
+
 /**
  * Hash one candidate, admitting its bytes when asked to.
  *
@@ -527,6 +570,14 @@ function toTrackedPath(rel: string): string {
  * nothing anyway, since `put` already stats before writing. The only thing worth
  * avoiding is loading a large unchanged file into memory, which the streaming
  * branch handles with a real `has()`.
+ *
+ * The replay veto runs **before any `putBlob`** in both branches, and it costs one
+ * read: the streaming branch folds the extra digests into the same chunk loop, and
+ * the in-memory branch runs them over the buffer it already holds. Vetoing after
+ * admission would leave the CurseForge bytes in `.anvil/objects/` and merely hide
+ * them from the tracked list, which is not the property this protects. The
+ * streaming branch matters more than its size suggests: real CurseForge jars land
+ * on both sides of the 8 MiB threshold.
  */
 async function trackOne(rel: string, input: TrackWorktreeInput): Promise<TrackedFile | undefined> {
   const abs = join(input.instanceDir, rel);
@@ -544,8 +595,25 @@ async function trackOne(rel: string, input: TrackWorktreeInput): Promise<Tracked
     return undefined; // deleted since the walk
   }
 
+  // `algos` is empty when the instance has no replay cache to compare against, so
+  // an instance that never had a replay item computes no extra digest at all. One
+  // spelling of that condition, asked once, and both branches below use it.
+  const veto = input.replayVeto;
+  const algos = veto.algos;
+
+  const refuse = async (digests: ReadonlyMap<HashAlgo, Hash>): Promise<boolean> => {
+    const verdict = await veto.verdict(rel, digests);
+    if (verdict === "veto-unverified") {
+      input.onWarn?.(unverifiedReplayWarning(rel));
+    }
+    return verdict !== "track";
+  };
+
   if (size >= STREAM_THRESHOLD_BYTES) {
-    const blob = await blobIdOfStream(createReadStream(abs));
+    const { blob, content } = await blobAndContentDigests(createReadStream(abs), algos);
+    if (await refuse(content)) {
+      return undefined; // replay bytes — never a VC blob, never in a tracked set
+    }
     // The full read happens ONLY when the store does not already hold the bytes,
     // so a big unchanged file is never loaded just to discover it is unchanged.
     if (input.store && !(await input.vcStore.has(blob))) {
@@ -561,6 +629,9 @@ async function trackOne(rel: string, input: TrackWorktreeInput): Promise<Tracked
     if (!isRacedAway(err)) {
       throw err; // ditto: EACCES is a failure, not an absence
     }
+    return undefined;
+  }
+  if (await refuse(digestsOf(bytes, algos))) {
     return undefined;
   }
   const blob = idOfEncoding(encodeObject({ type: "blob", bytes }));

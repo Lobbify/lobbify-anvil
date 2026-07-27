@@ -62,6 +62,14 @@ strongest form — resolving one downloads no member bytes at all, so there is n
 to leak — and its members are pinned from `(projectID, fileID)` plus CurseForge's
 attested sha1 without a download.
 
+A replay item is nonetheless *placed* into the instance as an ordinary jar, so the
+boundary also has to hold for the file on disk. Version control refuses those bytes
+at admission rather than at each egress point: a union-only ledger of every replay
+placement target a build has claimed (`.anvil/refs/replay-paths`) and a content check
+against the replay cache both veto a candidate, either one alone sufficing. That is
+what keeps a jar left behind by a version bump — one no lock names any more — out of
+a commit, out of `push`, and out of a joiner's instance on `pull`.
+
 **Where the boundary ends, stated plainly:** a pack's `overrides/` tree — the loose
 configs the *pack author* ships, not project files — is extracted into `.anvil/base/`
 and registered as ordinary `local` / `copy` items. Those bytes **do** enter the shared

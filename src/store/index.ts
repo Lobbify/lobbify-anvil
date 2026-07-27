@@ -43,6 +43,17 @@ export {
 } from "./registry.js";
 export type { ReplayCacheOptions } from "./replay-cache.js";
 export { REPLAY_CACHE_DIRNAME, ReplayCache } from "./replay-cache.js";
+export type { ReplayVerdict } from "./replay-provenance.js";
+export {
+  REPLAY_PIN_ALGOS,
+  ReplayVeto,
+  matchesReplayPin,
+  readReplayPaths,
+  recordReplayPaths,
+  replayDigestsOf,
+  replayPinsOf,
+  replayTargetsOf,
+} from "./replay-provenance.js";
 export type { SafeExtractOptions } from "./safe-extract.js";
 export { excludeMetaInf, safeExtract } from "./safe-extract.js";
 export type {

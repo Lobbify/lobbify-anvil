@@ -37,7 +37,7 @@ import { deflateSync, inflateSync } from "node:zlib";
 import { foldName } from "../internal/fs.js";
 import { hashBuffer, shardOf } from "../store/hash.js";
 import { DecompressionBomb, LockParseError } from "../types/errors.js";
-import type { Hash } from "../types/index.js";
+import type { Hash, HashAlgo } from "../types/index.js";
 
 /** The three VC object kinds. */
 export type VcObjectType = "blob" | "snapshot" | "commit";
@@ -277,18 +277,46 @@ export function idOf(obj: VcObject): Hash {
 }
 
 /**
+ * The blob object id of a byte stream **and** raw content digests of the same
+ * bytes, in ONE traversal.
+ *
+ * The two are different digests over different byte sequences: a blob id is the
+ * sha256 of the header line followed by the bytes, a content digest is over the
+ * bytes alone. The working-tree walk needs both — the blob id to address the
+ * object, the content digests to ask whether these bytes are a replay object —
+ * and a candidate file is read once, not once per digest. `algos` is empty
+ * whenever the caller has no reason to want the content digests, which reduces
+ * this to exactly the single-hash loop it replaced.
+ */
+export async function blobAndContentDigests(
+  source: AsyncIterable<Uint8Array>,
+  algos: readonly HashAlgo[],
+): Promise<{ readonly blob: Hash; readonly content: ReadonlyMap<HashAlgo, Hash> }> {
+  const blob = createHash("sha256");
+  blob.update(new TextEncoder().encode(`${HEADER_PREFIX}blob\n`));
+  const content = algos.map((algo) => ({ algo, hasher: createHash(algo) }));
+  for await (const chunk of source) {
+    blob.update(chunk);
+    for (const { hasher } of content) {
+      hasher.update(chunk);
+    }
+  }
+  return {
+    blob: { algo: "sha256", value: blob.digest("hex") },
+    content: new Map(
+      content.map(({ algo, hasher }) => [algo, { algo, value: hasher.digest("hex") }]),
+    ),
+  };
+}
+
+/**
  * The blob object id of a byte stream, in constant memory — the same id
  * `idOf({type: "blob", bytes})` produces, without holding the bytes. The working-
  * tree walk hashes large files this way so discovering that a big undeclared file
  * is unchanged never costs a full read into memory.
  */
 export async function blobIdOfStream(source: AsyncIterable<Uint8Array>): Promise<Hash> {
-  const h = createHash("sha256");
-  h.update(new TextEncoder().encode(`${HEADER_PREFIX}blob\n`));
-  for await (const chunk of source) {
-    h.update(chunk);
-  }
-  return { algo: "sha256", value: h.digest("hex") };
+  return (await blobAndContentDigests(source, [])).blob;
 }
 
 function decodeObject(encoded: Uint8Array): VcObject {
@@ -515,6 +543,39 @@ export class VcObjectStore {
       throw err;
     }
     await chmod(dest, 0o444).catch(() => undefined);
+  }
+
+  /**
+   * Decode raw on-disk (zlib-compressed) bytes received from a remote **without
+   * admitting them**, verifying the content address exactly as `importRaw` does.
+   *
+   * This is what lets the receive side inspect an incoming blob before deciding
+   * whether it may be stored at all. Importing first and deleting after would
+   * mean the bytes touched `.anvil/objects/`, which for CurseForge content is
+   * the thing being prevented. Returns `undefined` for an object that is not a
+   * blob; a bad address or bad zlib throws, same as on import.
+   */
+  decodeRaw(id: Hash, compressed: Uint8Array): Uint8Array | undefined {
+    let encoded: Uint8Array;
+    try {
+      encoded = inflateBounded(compressed, `remote VC object ${hashToString(id)}`);
+    } catch (err) {
+      if (err instanceof DecompressionBomb) {
+        throw err;
+      }
+      throw new LockParseError(
+        `remote VC object ${hashToString(id)} is not valid zlib (${(err as Error).message})`,
+      );
+    }
+    const actual = idOfEncoding(encoded);
+    if (actual.value !== id.value) {
+      throw new LockParseError(
+        `remote VC object ${hashToString(id)} failed content-address verification ` +
+          `(bytes hash to ${actual.value})`,
+      );
+    }
+    const obj = decodeObject(encoded);
+    return obj.type === "blob" ? obj.bytes : undefined;
   }
 
   /** Read + inflate + decode the object at `hash`, re-verifying its content address. */

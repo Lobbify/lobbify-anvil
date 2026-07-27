@@ -404,3 +404,15 @@ enumerate. The lock row for a replay item carries the CurseForge
 `{project, file}` identity and a hash to verify against, but no rehostable
 download URL; the real URL is re-resolved under the user's own key at fetch
 time.
+
+The storage layer is half of it. A replay item is also **placed** as a regular
+file in the instance tree, and the version-control walk (`src/vc/worktree.ts`)
+records undeclared files without consulting the lock — so once no lock names a
+superseded jar's path, nothing about the file itself said where its bytes came
+from. Provenance is therefore also enforced at **admission**, in the single
+place a snapshot's tracked set is produced: `src/store/replay-provenance.ts`
+supplies a union-only ledger of every replay placement target a build has
+claimed (`.anvil/refs/replay-paths`) and a content check against the replay
+cache by membership query. Either vetoes on its own — the ledger survives
+deletion of the cache, the content check survives a rename — and `push` refuses
+outright if history recorded before this existed still tracks a claimed path.

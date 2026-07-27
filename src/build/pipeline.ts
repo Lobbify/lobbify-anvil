@@ -15,6 +15,7 @@ import type { ContentStore } from "../store/index.js";
 import { executePlacement } from "../store/index.js";
 import { hashFile } from "../store/index.js";
 import type { ReplayCache } from "../store/replay-cache.js";
+import { ReplayVeto, recordReplayPaths } from "../store/replay-provenance.js";
 import { ShaMismatch } from "../types/errors.js";
 import type { AllowProcessor, LockPackage, Lockfile } from "../types/index.js";
 import type { Acquirer } from "./acquire.js";
@@ -142,6 +143,33 @@ export async function buildInstance(input: BuildEngineInput): Promise<BuildEngin
   const delta = diffLocks(input.previousLock, effectiveLock);
   const bytes = delta.install.reduce((s, p) => s + (p.size ?? 0), 0);
   emit({ type: "transfer:plan", objects: delta.install.length, bytes });
+
+  // 2b. Claim every replay (CurseForge) placement target in the ledger, BEFORE
+  //     anything moves on disk. A build that dies mid-swap has still claimed the
+  //     paths, and a build that supersedes an item has claimed the old path as
+  //     well as the new one — which is what keeps a stranded jar out of version
+  //     control once no lock names it any more (see `replay-provenance.ts`).
+  //
+  //     `input.lock` rather than the platform-filtered `effectiveLock`: an item
+  //     this platform skips still names a path that some other platform's build
+  //     will place bytes at. The previous built lock joins it so the first build
+  //     after an upgrade claims what is already installed. Over-recording costs
+  //     one untrackable path; under-recording is the leak.
+  await recordReplayPaths(instanceDir, [input.lock, effectiveLock, input.previousLock]);
+
+  //     The one state neither the ledger nor the content check covers is a
+  //     deleted replay cache plus a renamed jar: the bytes cannot be identified
+  //     and the new path was never claimed. Nothing can detect that after the
+  //     fact, so say it here, where the missing cache IS detectable.
+  if ((await ReplayVeto.load(instanceDir)).degraded) {
+    emit({
+      type: "warning",
+      message:
+        "this instance has recorded CurseForge (replay) paths but no replay cache — a superseded " +
+        "replay jar that has since been renamed can no longer be identified as CurseForge " +
+        "content, and would be recorded by `anvil commit`. This build restores the cache.",
+    });
+  }
 
   // 3. Acquire the delta objects into the store (offline/fixture fetch).
   emit({ type: "build:stage", phase: "acquire" });

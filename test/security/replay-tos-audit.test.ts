@@ -7,7 +7,7 @@
  * If a future change opens such a path, one of these assertions fails.
  */
 
-import { readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,10 +18,16 @@ import {
   ReplayAcquirer,
   ReplayCache,
   UnsatisfiableTarget,
+  VcObjectStore,
+  WorktreeExclusion,
   buildInstance,
   collectRoots,
   currentPlatform,
+  encodeObject,
+  idOfEncoding,
+  ReplayVeto,
   serializeLock,
+  trackWorktree,
 } from "../../index.js";
 import type { Http, LockPackage, Lockfile, SourceContext } from "../../index.js";
 import { FakeCurseForge } from "../helpers/curseforge.js";
@@ -221,6 +227,14 @@ describe("ToS/replay audit — CF bytes never reach a shared/pushable/exported l
     // only the shared store and skips `provenance: "replay"` rows. Assert none of
     // the new surfaces references the replay cache at all, and that each explicitly
     // excludes replay rows.
+    //
+    // ⚠️ This is a SOURCE GREP, and it is necessary but not sufficient. It passed
+    // for the entire time LB-722 was live, because the leak did not go through the
+    // replay cache or through a lock row at all: a superseded CurseForge jar was
+    // tracked as an ordinary undeclared working-tree file, and `push` shipped it as
+    // a VC blob that carries no provenance. A grep proves this file cannot NAME the
+    // cache; only the behavioral test below proves the bytes cannot travel. Add a
+    // behavioral assertion whenever a new surface is added here.
     const exportSrc = await src("export/mrpack-export.ts");
     const syncSrc = await src("remote/sync.ts");
     const transferSrc = await src("remote/transfer.ts");
@@ -233,6 +247,42 @@ describe("ToS/replay audit — CF bytes never reach a shared/pushable/exported l
     expect(exportSrc).toMatch(/provenance === "replay"/);
     expect(syncSrc).toMatch(/provenance === "replay"/);
     expect(transferSrc).toMatch(/provenance !== "copy"/);
+  });
+
+  it("BEHAVIORAL: a replay jar at a path no lock owns is never admitted as a VC blob", async () => {
+    // The counterpart to the grep above, and the assertion LB-722 needed. It does
+    // not build: it puts CurseForge bytes in the replay cache the way a build
+    // would, then leaves a copy of those exact bytes at a path the lock does not
+    // name — which is what a version bump, a lost built-lock ref, or an
+    // `.anvilignore` line over `mods/` each leave behind. The bytes must not reach
+    // the VC object store, and therefore cannot reach a push.
+    const instanceDir = await mkTmp("audit-strand");
+    const storeDir = await mkTmp("audit-strand-store");
+    dirs.push(instanceDir, storeDir);
+
+    const cfBytes = fabricJar("jei");
+    const pin = { algo: "sha256" as const, value: sha256hex(cfBytes) };
+    await new ReplayCache({ instanceDir }).putBuffer(cfBytes, pin);
+
+    // Superseded: the jar is on disk under its old name, owned by nothing.
+    await mkdir(join(instanceDir, "mods"), { recursive: true });
+    await writeFile(join(instanceDir, "mods", "jei-OLD.jar"), Buffer.from(cfBytes));
+    // …and one genuinely user-authored file, so an empty tracked set cannot pass.
+    await writeFile(join(instanceDir, "options.txt"), "fov:70");
+
+    const vcStore = new VcObjectStore({ anvilDir: join(instanceDir, ".anvil") });
+    const tracked = await trackWorktree({
+      instanceDir,
+      vcStore,
+      exclude: new WorktreeExclusion(),
+      replayVeto: await ReplayVeto.load(instanceDir),
+    });
+
+    expect(tracked.map((t) => t.path)).toEqual(["options.txt"]);
+    const blobId = idOfEncoding(encodeObject({ type: "blob", bytes: cfBytes }));
+    expect(await vcStore.has(blobId)).toBe(false);
+    // Nothing under `.anvil/objects/` is named after the CF content address either.
+    expect(await allFileNames(join(instanceDir, ".anvil", "objects"))).not.toContain(pin.value);
   });
 
   // --- (4) source code-path trace: the store layer cannot see the cache -------

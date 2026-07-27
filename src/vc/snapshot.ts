@@ -29,10 +29,18 @@ import { fileURLToPath } from "node:url";
 import { canonicalJson } from "../build/serialize.js";
 import { safeJoin } from "../internal/fs.js";
 import { ensureDir, pathExists } from "../internal/fs.js";
-import { readLock } from "../lock/index.js";
+import { parseLock, readLock } from "../lock/index.js";
 import { readManifest } from "../manifest/index.js";
 import { hashBuffer } from "../store/hash.js";
 import type { ContentStore } from "../store/index.js";
+import {
+  ReplayVeto,
+  matchesReplayPin,
+  refusedReplayWarning,
+  replayDigestsOf,
+  replayPinsOf,
+  unverifiedReplayWarning,
+} from "../store/replay-provenance.js";
 import { LockStale, VcStateError } from "../types/errors.js";
 import type { Hash, LockPackage, Lockfile, Manifest } from "../types/index.js";
 import type { CarriedBlob, SnapshotObject, VcObjectStore } from "./objects.js";
@@ -113,6 +121,8 @@ export interface BuildSnapshotInput {
    * tree yields the same snapshot id either way, and only the store writes differ.
    */
   readonly storeTracked?: boolean;
+  /** Where the walk reports a refusal the user needs to know about. */
+  readonly onWarn?: (message: string) => void;
 }
 
 export interface BuiltSnapshot {
@@ -190,6 +200,8 @@ export async function buildSnapshot(input: BuildSnapshotInput): Promise<BuiltSna
     vcStore,
     exclude: await snapshotExclusion(instanceDir, lock),
     store: input.storeTracked !== false,
+    replayVeto: await ReplayVeto.load(instanceDir),
+    ...(input.onWarn ? { onWarn: input.onWarn } : {}),
   });
   // Refuse a tree whose tracked paths collide under case folding before it can
   // become a commit — see `trackedPathCollision`. Checked here as well as on
@@ -219,6 +231,25 @@ export interface MaterializeInput {
   readonly sharedStore: ContentStore;
   /** The snapshot currently materialized, so removed carried/tracked files are cleaned up. */
   readonly previous?: SnapshotObject;
+  /**
+   * Replay content pins (`"algo:value"`) gathered from the INCOMING history's own
+   * locks. A tracked blob whose bytes match one is CurseForge content and is
+   * never written.
+   *
+   * The caller passes the union across the whole transferred closure rather than
+   * this snapshot's lock alone, and that breadth is the point: the commit that
+   * strands a jar is precisely the one whose lock stopped naming it, so the pin
+   * lives in an ANCESTOR's lock. This snapshot's own lock is always unioned in on
+   * top, so a caller that passes nothing still gets a self-contained check.
+   */
+  readonly replayPins?: ReadonlySet<string>;
+  /**
+   * Blob ids the transfer refused to admit (`Hash.value`). Those objects are
+   * deliberately absent from the local store, so they are skipped without being
+   * read — `getBlobBytes` on one would throw, and throwing is not the intent.
+   */
+  readonly refusedBlobs?: ReadonlySet<string>;
+  readonly onWarn?: (message: string) => void;
 }
 
 /** Rewrite a file from a VC blob only when its content differs (hash-diff). */
@@ -256,6 +287,7 @@ async function pruneEmptyParents(instanceDir: string, absPath: string): Promise<
  * The exclusion the **target commit** carries: `.anvilexclude` is itself a tracked
  * file, so a commit ships the rules it was made under. A commit without one gets
  * the built-in defaults alone, which `WorktreeExclusion` always applies.
+ *
  */
 async function targetExclusion(
   snapshot: SnapshotObject,
@@ -267,6 +299,29 @@ async function targetExclusion(
   }
   const text = new TextDecoder().decode(await vcStore.getBlobBytes(entry.blob));
   return new WorktreeExclusion({ patterns: parseAnvilexclude(text) });
+}
+
+/**
+ * The replay pins a snapshot's OWN lock blob names.
+ *
+ * This is the receive side's self-contained statement of provenance: a pulled
+ * snapshot carries its lock, and the lock's `provenance: "replay"` rows say which
+ * bytes are CurseForge content. It needs no local ledger and no local cache,
+ * which matters because on a fresh `clone` the joiner has neither.
+ */
+export async function replayPinsOfSnapshot(
+  snapshot: SnapshotObject,
+  vcStore: VcObjectStore,
+): Promise<Set<string>> {
+  try {
+    const text = new TextDecoder().decode(await vcStore.getBlobBytes(snapshot.lock));
+    return text.length === 0 ? new Set() : replayPinsOf([parseLock(text)]);
+  } catch {
+    // A lock that will not parse states nothing about provenance. The caller's
+    // pin union and the local veto still apply, so this loosens nothing that a
+    // snapshot carrying no lock at all would not already have loosened.
+    return new Set();
+  }
 }
 
 /**
@@ -306,6 +361,16 @@ export async function materializeSnapshot(input: MaterializeInput): Promise<void
   // which is what keeps `logs/` and the game install safe in either direction.
   const onDisk = await loadWorktreeExclusion({ instanceDir });
   const exclude = await targetExclusion(snapshot, vcStore);
+  // Neither exclusion set says anything about replay provenance: that is a
+  // question about BYTES, and it is asked below, per tracked file, against the
+  // incoming history's own locks (which a fresh clone has) and this instance's
+  // replay veto (which it does not).
+  const pins = new Set([
+    ...(input.replayPins ?? []),
+    ...(await replayPinsOfSnapshot(snapshot, vcStore)),
+  ]);
+  const veto = await ReplayVeto.load(instanceDir);
+  const refused = input.refusedBlobs ?? new Set<string>();
   const undeletable = (path: string): boolean => exclude.excludes(path) || onDisk.excludes(path);
 
   await writeIfDiffer(
@@ -367,8 +432,27 @@ export async function materializeSnapshot(input: MaterializeInput): Promise<void
     if (exclude.excludes(t.path)) {
       continue;
     }
+    if (refused.has(t.blob.value)) {
+      input.onWarn?.(refusedReplayWarning(t.path));
+      continue; // the transfer declined to admit these bytes — nothing to write
+    }
     // Tracked bytes stay VC-only: they are not build inputs, so unlike carried
     // bytes they are never re-admitted to the shared store.
-    await writeIfDiffer(abs, await vcStore.getBlobBytes(t.blob));
+    const bytes = await vcStore.getBlobBytes(t.blob);
+    const digests = replayDigestsOf(bytes);
+    if (matchesReplayPin(digests, pins)) {
+      input.onWarn?.(refusedReplayWarning(t.path));
+      continue; // a replay pin in the incoming history names these exact bytes
+    }
+    const verdict = await veto.verdict(t.path, veto.algos.length > 0 ? digests : new Map());
+    if (verdict !== "track") {
+      input.onWarn?.(
+        verdict === "veto-unverified"
+          ? unverifiedReplayWarning(t.path)
+          : refusedReplayWarning(t.path),
+      );
+      continue;
+    }
+    await writeIfDiffer(abs, bytes);
   }
 }

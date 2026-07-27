@@ -45,7 +45,8 @@ wrapper):
   inputs;
 - the **working-tree walk** (`worktree.ts`) — the undeclared files a snapshot
   records, the exclusion model (`.anvilexclude`, the game install, runtime churn,
-  lock-owned paths), and the path-level 3-way that merges two tracked sets.
+  lock-owned paths, recorded replay paths), the replay content veto applied at
+  admission, and the path-level 3-way that merges two tracked sets.
 
 **Stage 6 adds the CurseForge source (`src/sources/curseforge.ts`)** — BYO-key
 (`x-api-key`), `classId`→kind + `relationType`→dep maps, sha256 pinned on the first
@@ -73,6 +74,9 @@ jars re-identified via the Modrinth/CurseForge fingerprint APIs through the `Ide
 seam: matched → copy/replay items, unmatched → local). **The replay boundary holds under transport:
 push/pull/export skip `provenance:"replay"` rows and never read `.anvil/replay-cache/`** (a standing
 hard review rule; see `test/security/replay-tos-audit.test.ts` + `test/remote/replay-export.test.ts`).
+Skipping replay *rows* covers only what the lock names; the VC tracked set does not go through
+the lock, so it is guarded separately at admission — see invariant 3 and
+`test/security/replay-provenance-tracking.test.ts`.
 
 **Stage 8 adds `src/tui/`** — the colorful interactive TUI, a **thin skin** over the same
 `Anvil` library + progress event bus (it carries **no** build/merge logic, only rendering +
@@ -149,10 +153,17 @@ Every stage is gated on these. A PR that could violate one must prove it cannot.
 
 3. **Replay-never-rehosted.** CurseForge bytes are `provenance: "replay"`: fetched
    per-client under the user's **own** key and **never** re-hosted, transferred, pushed,
-   or exported (CF ToS). This is enforced at the **storage layer** — CF bytes materialize
-   into a per-instance `replay-cache/` that the store-serve, GC, transfer, and export code
-   physically cannot enumerate. Keys are never serialized into lock/config/events/logs;
-   only an env-var *reference* is stored. `.mrpack` export omits replay items with a clear warning.
+   or exported (CF ToS). Enforced in two places, because a replay item both lives in a
+   cache and is *placed* as a file. At the **storage layer** — CF bytes materialize into
+   a per-instance `replay-cache/` that the store-serve, GC, transfer, and export code
+   physically cannot enumerate. And at **version-control admission** — the working-tree
+   walk refuses a candidate whose bytes are replay bytes, via the union-only path ledger
+   `.anvil/refs/replay-paths` plus a content check against the replay cache
+   (`src/store/replay-provenance.ts`), so a jar left behind by a version bump cannot be
+   committed or pushed once no lock names it. **Provenance is a property of the bytes,
+   never of whether the current lock names the path** — a review rule in its own right.
+   Keys are never serialized into lock/config/events/logs; only an env-var *reference* is
+   stored. `.mrpack` export omits replay items with a clear warning.
 
 ## Security must-dos (later stages — do not regress)
 
