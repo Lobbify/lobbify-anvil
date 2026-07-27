@@ -106,4 +106,34 @@ describe("canonical lock serializer", () => {
     const text = serializeLock(lockOf([weird]));
     expect(serializeLock(parseLock(text))).toBe(text);
   });
+
+  it("round-trips a [base] block and the from_base marker", () => {
+    const base = {
+      ref: "modrinth:testpack@4.6",
+      source: "modrinth" as const,
+      id: "testpack",
+      version: "4.6",
+      archive: { algo: "sha256" as const, value: "ab".repeat(32) },
+      set: { algo: "sha256" as const, value: "cd".repeat(32) },
+      members: 482,
+    };
+    const lock: Lockfile = { ...lockOf([{ ...modB, fromBase: true }]), base };
+    const text = serializeLock(lock);
+    expect(text).toContain("[base]");
+    expect(text).toContain("members = 482");
+    expect(text).toContain("from_base = true");
+    const back = parseLock(text);
+    expect(back.base).toEqual(base);
+    expect(back.resolved[0]?.fromBase).toBe(true);
+    expect(serializeLock(back)).toBe(text);
+  });
+
+  it("omits [base] and from_base entirely for an instance with no base pack", () => {
+    // The compatibility claim in one assertion: an instance that uses no base
+    // serializes exactly as it did before base packs existed, so its lock bytes —
+    // and therefore its commit ids — do not move.
+    const text = serializeLock(lockOf([modB]));
+    expect(text).not.toContain("[base]");
+    expect(text).not.toContain("from_base");
+  });
 });

@@ -101,8 +101,17 @@ export interface FakeModrinthProject {
   readonly versions: readonly FakeModrinthVersion[];
 }
 
-function fileUrlOf(v: FakeModrinthVersion): string {
+/**
+ * The Modrinth CDN's canonical file URL. Exported because a `.mrpack` fixture has
+ * to name its members by exactly this URL for base resolution to recover their
+ * catalogue identity from it — the same recovery real packs rely on.
+ */
+export function modrinthFileUrl(v: FakeModrinthVersion): string {
   return `https://cdn.modrinth.com/data/${v.projectId}/versions/${v.id}/${encodeURIComponent(v.filename)}`;
+}
+
+function fileUrlOf(v: FakeModrinthVersion): string {
+  return modrinthFileUrl(v);
 }
 
 function versionJson(v: FakeModrinthVersion): unknown {
@@ -184,6 +193,14 @@ export class FakeModrinth implements Http {
         .map((id) => this.#versions.get(id))
         .filter((v): v is FakeModrinthVersion => !!v);
       return { status: 200, headers: {}, url, body: encode(out.map(versionJson)) };
+    }
+    if (path === "/projects") {
+      const ids = parseArrayParam(u.searchParams.get("ids")) ?? [];
+      const out = ids
+        .map((id) => this.#projects.get(id))
+        .filter((p): p is FakeModrinthProject => !!p)
+        .map((p) => ({ id: p.id, slug: p.slug, title: p.title, project_type: p.projectType }));
+      return { status: 200, headers: {}, url, body: encode(out) };
     }
     return { status: 404, headers: {}, url, body: encode({ error: `unrouted ${path}` }) };
   }

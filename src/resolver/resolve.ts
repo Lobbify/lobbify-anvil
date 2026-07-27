@@ -18,11 +18,20 @@
  * `lockedPins` and not selected for `upgrade` is reused **verbatim**, so untouched
  * items emerge byte-identical across a re-lock. Build `lockedPins` from a prior
  * lock with {@link pinsFromLock}.
+ *
+ * A manifest declaring `game.from` resolves in **two layers**: the base pack's
+ * member set underneath (supplied by the caller's `resolveBase`, since fetching a
+ * pack is I/O this module does not own), then this manifest's `items` on top. The
+ * precedence rules live in `base/overlay.ts` and are documented there and in
+ * `ARCHITECTURE.md`; what happens here is the plumbing — base members seed
+ * dependency resolution so a base's mods are not silently re-resolved out from
+ * under it, and the overlay runs once the instance layer is fully pinned.
  */
 
 import { isAbsolute, resolve as resolvePath } from "node:path";
-import { fileURLToPath } from "node:url";
 import * as semver from "semver";
+import { baseSetDigest, overlayBase } from "../base/overlay.js";
+import type { ResolvedBasePack } from "../base/types.js";
 import { assertNoPlacementCollisions } from "../build/collision.js";
 import { canonicalJson } from "../build/serialize.js";
 import type { AnvilEvent } from "../events.js";
@@ -40,6 +49,7 @@ import {
 } from "../types/errors.js";
 import type {
   AllowSource,
+  LockBase,
   LockPackage,
   Lockfile,
   Manifest,
@@ -48,6 +58,9 @@ import type {
   SourceContext,
   VersionSpec,
 } from "../types/index.js";
+import { canonicalKeyOf, pinsFromLock } from "./identity.js";
+
+export { canonicalKeyOf, pinsFromLock };
 
 /**
  * One resolved demand edge: some root/dependency (`by`) required a package
@@ -85,42 +98,14 @@ export interface ResolveManifestInput {
   readonly emit?: (event: AnvilEvent) => void;
   /** Streamed one edge per resolved demand — powers the `why` graph sidecar. */
   readonly onEdge?: (edge: DependencyEdge) => void;
-}
-
-/** The canonical identity key for a resolved package (dedup + pin key). */
-export function canonicalKeyOf(pkg: LockPackage): string {
-  switch (pkg.source) {
-    case "modrinth":
-      return `modrinth:${pkg.name}`; // name is the (unique) Modrinth slug
-    case "curseforge":
-      return pkg.project !== undefined ? `curseforge:${pkg.project}` : `curseforge:${pkg.name}`;
-    case "url":
-      return `url:${pkg.url ?? pkg.name}`;
-    case "local":
-      return `local:${localPathOf(pkg)}`;
-    default:
-      return `${pkg.source}:${pkg.name}`;
-  }
-}
-
-function localPathOf(pkg: LockPackage): string {
-  if (!pkg.url) {
-    return pkg.name;
-  }
-  try {
-    return fileURLToPath(pkg.url);
-  } catch {
-    return pkg.url;
-  }
-}
-
-/** Build a `lockedPins` map from a prior lock, keyed canonically. */
-export function pinsFromLock(lock: Lockfile): Map<string, LockPackage> {
-  const map = new Map<string, LockPackage>();
-  for (const pkg of lock.resolved) {
-    map.set(canonicalKeyOf(pkg), pkg);
-  }
-  return map;
+  /**
+   * Resolve the manifest's `game.from` base pack. Required when the manifest
+   * declares one, absent otherwise. It is a callback rather than a registry
+   * because fetching and expanding a pack is I/O — the caller (`Anvil.lock`) owns
+   * the instance dir, the store, and the HTTP clients; this module owns only the
+   * layering.
+   */
+  readonly resolveBase?: (ref: ResolvedRef) => Promise<ResolvedBasePack>;
 }
 
 /**
@@ -165,24 +150,83 @@ function specSatisfiedBy(spec: VersionSpec, pkg: LockPackage): boolean {
   }
 }
 
+/**
+ * Resolve the manifest's `game.from`, and check the pack's game target against
+ * the manifest's. A pack's mods are built for one Minecraft version; starting
+ * from a 26.1 pack while declaring 26.2 is a mistake that would otherwise surface
+ * as a pile of unrelated launch failures, so it fails here, naming both sides.
+ * The loader *version* may differ (the instance's wins); the loader *name* may
+ * not — a Fabric pack under a Forge instance shares no mods at all.
+ */
+async function resolveBaseLayer(
+  input: ResolveManifestInput,
+  baseDir: string,
+): Promise<{ ref: ResolvedRef; raw: string; pack: ResolvedBasePack } | undefined> {
+  const raw = input.manifest.game.from;
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!input.resolveBase) {
+    throw new ManifestError(
+      `game.from "${raw}" needs a base-pack resolver — resolveManifest was called without one. Resolve through \`Anvil.lock\`, or pass \`resolveBase\`.`,
+    );
+  }
+  const ref = localizeRef(parseRef(raw), baseDir);
+  // The policy gate runs on the base ref BEFORE any pack byte is fetched, exactly
+  // as it does for an item — a manifest cannot make anvil reach a source the
+  // embedder refused by hiding it in `game.from`.
+  if (!input.allowSource(ref)) {
+    throw new SourceNotAllowed(ref.source, ref.id);
+  }
+  const pack = await input.resolveBase(ref);
+  const game = input.manifest.game;
+  if (pack.game.minecraft !== game.minecraft) {
+    throw new ManifestError(
+      `game.from "${raw}" is a Minecraft ${pack.game.minecraft} pack, but this manifest declares ` +
+        `Minecraft ${game.minecraft}. Set game.minecraft = "${pack.game.minecraft}", or pick a pack version for ${game.minecraft}.`,
+    );
+  }
+  const packLoader = loaderNameOf(pack.game.loader);
+  const ownLoader = loaderNameOf(game.loader);
+  if (packLoader !== ownLoader) {
+    throw new ManifestError(
+      `game.from "${raw}" is a ${packLoader} pack, but this manifest declares ${ownLoader}. A pack's mods are loader-specific; pick a pack for your loader.`,
+    );
+  }
+  return { ref, raw, pack };
+}
+
+/** The loader name (`"fabric 0.19.1"` → `"fabric"`), lower-cased. */
+function loaderNameOf(loader: string): string {
+  return (loader.trim().split(/\s+/)[0] ?? "vanilla").toLowerCase();
+}
+
 export async function resolveManifest(input: ResolveManifestInput): Promise<Lockfile> {
   const { manifest, registry, allowSource, now } = input;
   const emit = input.emit;
   const baseDir = input.baseDir ?? process.cwd();
 
-  if (manifest.game.from !== undefined) {
-    throw new ManifestError(
-      "game.from (starting from a base pack) is not supported yet — it lands with the base-merge stage. List items directly for now.",
-    );
-  }
-
   // Fingerprint the authored manifest (pre-localization) for a portable hash.
   const manifestHash = hashBuffer(new TextEncoder().encode(canonicalJson(manifest)), "sha256");
 
-  const removeSet = new Set<string>();
-  for (const r of manifest.game.remove ?? []) {
-    removeSet.add(refKey(localizeRef(parseRef(r), baseDir)));
+  const base = await resolveBaseLayer(input, baseDir);
+  for (const warning of base?.pack.warnings ?? []) {
+    emit?.({ type: "warning", message: warning });
   }
+  // Base members seed dependency resolution: a transitive dep the base already
+  // provides reuses the base's pin verbatim instead of hitting the network and
+  // bumping a mod nobody asked to bump. Roots are deliberately NOT pinned this
+  // way — an item you listed yourself is one you control.
+  const basePins = new Map<string, LockPackage>();
+  for (const member of base?.pack.members ?? []) {
+    basePins.set(canonicalKeyOf(member), member);
+  }
+
+  const removes = (manifest.game.remove ?? []).map((raw) => ({
+    raw,
+    ref: localizeRef(parseRef(raw), baseDir),
+  }));
+  const removeSet = new Set(removes.map((r) => refKey(r.ref)));
 
   const upgrade = input.upgrade;
   const isUpgraded = (key: string): boolean => {
@@ -206,10 +250,20 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
     ...(manifest.game.loader ? { loader: manifest.game.loader } : {}),
   };
 
+  // Remove entries that already matched a manifest item here are matched, full
+  // stop — the item is dropped before it is ever resolved, so the overlay (which
+  // only ever sees what survived) must not later call the entry unmatched.
+  const matchedRemoves = new Set<string>();
   let rootCount = 0;
   for (const item of manifest.items) {
     const ref = localizeRef(refForItem(item), baseDir);
-    if (removeSet.has(refKey(ref))) {
+    const rk = refKey(ref);
+    if (removeSet.has(rk)) {
+      for (const r of removes) {
+        if (refKey(r.ref) === rk) {
+          matchedRemoves.add(r.raw);
+        }
+      }
       continue;
     }
     queue.push({ ref, by: "(manifest)" });
@@ -255,8 +309,11 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
     }
 
     // Constrained re-lock: reuse a locked pin verbatim (no network) when the
-    // ref's own key is already canonical (slug / url / path refs).
-    const directPin = input.lockedPins?.get(rk);
+    // ref's own key is already canonical (slug / url / path refs). A base member
+    // does the same job for a **dependency** — but never for a root, which the
+    // manifest declared and therefore controls.
+    const directPin =
+      input.lockedPins?.get(rk) ?? (by === "(manifest)" ? undefined : basePins.get(rk));
     if (directPin && !isUpgraded(rk) && specSatisfiedBy(ref.versionSpec, directPin)) {
       resolved.set(rk, directPin);
       alias.set(rk, rk);
@@ -299,8 +356,11 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
     }
 
     // Post-resolve pin reuse (for id-referenced deps whose canonical key was
-    // only known after resolving): prefer the byte-identical locked pin.
-    const pin = input.lockedPins?.get(ck);
+    // only known after resolving): prefer the byte-identical locked pin. Modrinth
+    // dependencies name project *ids* while a base member is keyed by slug, so
+    // for a base pin this is the branch that fires — the network round trip has
+    // already happened, but the base's version is what gets kept.
+    const pin = input.lockedPins?.get(ck) ?? (by === "(manifest)" ? undefined : basePins.get(ck));
     if (pin && !isUpgraded(ck) && specSatisfiedBy(ref.versionSpec, pin)) {
       resolved.set(ck, pin);
     } else {
@@ -313,11 +373,53 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
   }
 
   emit?.({ type: "resolve:done", pinned: resolved.size });
-  const resolvedPackages = [...resolved.values()].sort(comparePackages);
+
+  // The instance layer, fully pinned. Now lay it over the base — see
+  // `base/overlay.ts` for the precedence rules this delegates to.
+  const overlay = overlayBase({
+    base: base?.pack.members ?? [],
+    instance: [...resolved.values()],
+    removes,
+  });
+  const unmatched = overlay.unmatched.filter((raw) => !matchedRemoves.has(raw));
+  if (unmatched.length > 0) {
+    throw new ManifestError(
+      `game.remove names ${unmatched.length === 1 ? "an item" : "items"} that nothing provides: ${unmatched.map((r) => `"${r}"`).join(", ")}. A remove that matches nothing is refused, so a typo cannot leave a mod you believed you dropped.`,
+    );
+  }
+  for (const record of overlay.removed) {
+    emit?.({
+      type: "warning",
+      message: `game.remove "${record.entry}" dropped ${record.package.name} (matched on ${record.on})`,
+    });
+  }
+
+  const resolvedPackages = [...overlay.effective].sort(comparePackages);
   // Two distinct items must never claim the same placement target — the resolver
   // dedups by identity, not by where a file lands, so a shared basename would make
   // one silently overwrite the other in the built instance. Fail at lock time.
+  // Base-vs-instance clashes cannot reach here: the overlay resolved them, in the
+  // instance's favour. What is left is two *instance* items colliding.
   assertNoPlacementCollisions(resolvedPackages);
+
+  // Base members are edges too, so `anvil why` can answer "because the base pack
+  // ships it" instead of going blank on two thirds of a base-derived instance.
+  for (const member of base?.pack.members ?? []) {
+    input.onEdge?.({ child: canonicalKeyOf(member), childName: member.name, by: "(base)" });
+  }
+
+  const lockBase: LockBase | undefined = base
+    ? {
+        ref: base.raw,
+        source: base.pack.source,
+        id: base.pack.id,
+        version: base.pack.version,
+        archive: base.pack.archive,
+        set: baseSetDigest(base.pack.members),
+        members: base.pack.members.length,
+      }
+    : undefined;
+
   return {
     meta: {
       version: 1,
@@ -328,6 +430,7 @@ export async function resolveManifest(input: ResolveManifestInput): Promise<Lock
       // pinned JRE (meta.java) are resolved by the game installer in Stage 3.
       java: "pending:game-install",
     },
+    ...(lockBase ? { base: lockBase } : {}),
     resolved: resolvedPackages,
   };
 }

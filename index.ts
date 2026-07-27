@@ -59,6 +59,9 @@ export * from "./src/game/index.js";
 // Stage 4 — `.mrpack` import (the thin CLI ships as the `lobbify-anvil` bin).
 export * from "./src/import/index.js";
 
+// `game.from` — base packs: resolving one, and layering the instance over it.
+export * from "./src/base/index.js";
+
 // Stage 7 — remotes (clone/pull/push), `.mrpack` export, Prism import.
 export * from "./src/remote/index.js";
 export * from "./src/export/index.js";

@@ -26,7 +26,6 @@
  *     and the host `allowSource` policy before any byte is fetched.
  */
 
-import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { posix } from "node:path";
 import { writeGraph } from "../build/graph.js";
@@ -40,13 +39,7 @@ import type { DependencyEdge } from "../resolver/index.js";
 import { canonicalKeyOf } from "../resolver/index.js";
 import { defaultAllowSource, guardHop, safeBasename } from "../sources/index.js";
 import { hashBuffer } from "../store/index.js";
-import {
-  AnvilError,
-  DecompressionBomb,
-  ManifestError,
-  ShaMismatch,
-  SourceNotAllowed,
-} from "../types/errors.js";
+import { DecompressionBomb, ManifestError, SourceNotAllowed } from "../types/errors.js";
 import type {
   AllowSource,
   Http,
@@ -56,17 +49,17 @@ import type {
   ManifestItem,
   ObjectSink,
 } from "../types/index.js";
+import {
+  MAX_FILE_BYTES,
+  MAX_MRPACK_BYTES,
+  MAX_PACK_FILES,
+  loaderFromDeps,
+  parseMrpackIndex,
+  pickMirror,
+  verifyMrpackHashes,
+} from "./mrpack-index.js";
 import { importOverrideTree, isUnsafePackPath, kindForPackPath } from "./pack-common.js";
 import { readZipEntry } from "./zip-read.js";
-
-/** A single byte-download bomb bound during import. */
-const MAX_FILE_BYTES = 512 * 1024 * 1024;
-
-/** Reject a `.mrpack` archive larger than this before reading it into memory. */
-const MAX_MRPACK_BYTES = 128 * 1024 * 1024;
-
-/** Cap the file fan-out so a pack listing millions of entries can't exhaust us. */
-const MAX_PACK_FILES = 10_000;
 
 /** The pre-resolved game install a pack's `[game]` deps expand to. */
 export interface GamePinsForImport {
@@ -105,146 +98,6 @@ export interface ImportMrpackResult {
   readonly warnings: readonly string[];
 }
 
-// --- modrinth.index.json shapes (only the fields we read) ------------------
-
-interface MrFile {
-  readonly path: string;
-  readonly hashes: { readonly sha1?: string; readonly sha512?: string };
-  readonly env?: { readonly client?: string; readonly server?: string };
-  readonly downloads: readonly string[];
-  readonly fileSize?: number;
-}
-
-interface MrIndex {
-  readonly formatVersion?: number;
-  readonly game?: string;
-  readonly versionId?: string;
-  readonly name?: string;
-  readonly dependencies?: Readonly<Record<string, string>>;
-  readonly files?: readonly MrFile[];
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}
-
-function parseIndex(bytes: Uint8Array): MrIndex {
-  let doc: unknown;
-  try {
-    doc = JSON.parse(new TextDecoder().decode(bytes));
-  } catch (err) {
-    throw new ManifestError(`modrinth.index.json is not valid JSON: ${(err as Error).message}`);
-  }
-  if (!isRecord(doc)) {
-    throw new ManifestError("modrinth.index.json must be a JSON object");
-  }
-  if (doc.game !== undefined && doc.game !== "minecraft") {
-    throw new ManifestError(`unsupported mrpack game "${String(doc.game)}" (only "minecraft")`);
-  }
-  const rawFiles = Array.isArray(doc.files) ? doc.files : [];
-  const files: MrFile[] = rawFiles.map((f, i) => parseFile(f, i));
-  return {
-    ...(typeof doc.formatVersion === "number" ? { formatVersion: doc.formatVersion } : {}),
-    ...(typeof doc.versionId === "string" ? { versionId: doc.versionId } : {}),
-    ...(typeof doc.name === "string" ? { name: doc.name } : {}),
-    ...(isRecord(doc.dependencies)
-      ? { dependencies: doc.dependencies as Record<string, string> }
-      : {}),
-    files,
-  };
-}
-
-function parseFile(raw: unknown, i: number): MrFile {
-  if (!isRecord(raw) || typeof raw.path !== "string") {
-    throw new ManifestError(`modrinth.index.json files[${i}] is missing a string "path"`);
-  }
-  const hashes = isRecord(raw.hashes) ? raw.hashes : {};
-  const downloads = Array.isArray(raw.downloads)
-    ? raw.downloads.filter((d): d is string => typeof d === "string")
-    : [];
-  const env = isRecord(raw.env) ? raw.env : undefined;
-  return {
-    path: raw.path,
-    hashes: {
-      ...(typeof hashes.sha1 === "string" ? { sha1: hashes.sha1 } : {}),
-      ...(typeof hashes.sha512 === "string" ? { sha512: hashes.sha512 } : {}),
-    },
-    ...(env
-      ? {
-          env: {
-            ...(typeof env.client === "string" ? { client: env.client } : {}),
-            ...(typeof env.server === "string" ? { server: env.server } : {}),
-          },
-        }
-      : {}),
-    downloads,
-    ...(typeof raw.fileSize === "number" ? { fileSize: raw.fileSize } : {}),
-  };
-}
-
-// --- pack helpers ----------------------------------------------------------
-
-/** Map a `[game]` dependencies table to anvil's raw loader string. */
-function loaderFromDeps(deps: Readonly<Record<string, string>>): string {
-  if (deps["fabric-loader"]) {
-    return `fabric ${deps["fabric-loader"]}`;
-  }
-  if (deps["quilt-loader"]) {
-    return `quilt ${deps["quilt-loader"]}`;
-  }
-  if (deps.neoforge) {
-    return `neoforge ${deps.neoforge}`;
-  }
-  if (deps.forge) {
-    return `forge ${deps.forge}`;
-  }
-  return "vanilla";
-}
-
-/** Pick a canonical download mirror: prefer the Modrinth CDN, else first https. */
-function pickMirror(downloads: readonly string[], subject: string): string {
-  const https = downloads.filter((u) => /^https:\/\//i.test(u));
-  const modrinth = https.find((u) => {
-    try {
-      // Exact-suffix match so `evilmodrinth.com` is NOT treated as the CDN.
-      const h = new URL(u).hostname.toLowerCase();
-      return h === "modrinth.com" || h.endsWith(".modrinth.com");
-    } catch {
-      return false;
-    }
-  });
-  const chosen = modrinth ?? https[0] ?? downloads[0];
-  if (!chosen) {
-    throw new ManifestError(`mrpack file "${subject}" lists no download mirror`);
-  }
-  return chosen;
-}
-
-function sha512hex(bytes: Uint8Array): string {
-  return createHash("sha512").update(bytes).digest("hex");
-}
-
-/** Verify downloaded bytes against the mrpack's declared hashes (sha512 + sha1). */
-function verifyMrpackHashes(bytes: Uint8Array, file: MrFile): void {
-  if (!file.hashes.sha512) {
-    throw new ManifestError(`mrpack file "${file.path}" has no sha512 to verify against`);
-  }
-  const actual512 = sha512hex(bytes);
-  if (actual512 !== file.hashes.sha512) {
-    throw new AnvilError(
-      "SHA_MISMATCH",
-      `mrpack file "${file.path}": content does not match its declared sha512 ` +
-        `(expected ${file.hashes.sha512}, got ${actual512}).`,
-    );
-  }
-  if (file.hashes.sha1) {
-    const actual1 = hashBuffer(bytes, "sha1");
-    if (actual1.value !== file.hashes.sha1) {
-      throw new ShaMismatch(file.path, { algo: "sha1", value: file.hashes.sha1 }, actual1);
-    }
-  }
-}
-
 // --- the importer ----------------------------------------------------------
 
 /** Import a `.mrpack` into `instanceDir`, writing `anvil.toml` + `anvil.lock`. */
@@ -267,7 +120,7 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
       `"${input.archivePath}" is not a valid .mrpack (no modrinth.index.json)`,
     );
   }
-  const index = parseIndex(indexBytes);
+  const index = parseMrpackIndex(indexBytes);
   if ((index.files?.length ?? 0) > MAX_PACK_FILES) {
     throw new DecompressionBomb(
       `.mrpack lists ${index.files?.length} files, over the ${MAX_PACK_FILES} limit`,

@@ -104,6 +104,105 @@ see [Replay-never-rehosted](#replay-never-rehosted-curseforge), below.
   verify, and place the item byte-identically: its `Hash`, `Placement`,
   `provenance` (`copy` vs. `replay`), and optional platform `targets`.
 
+## Base packs (`game.from`, `src/base/`)
+
+An instance may start from an existing modpack instead of listing every item
+itself:
+
+```toml
+[game]
+minecraft = "26.2"
+loader    = "fabric 0.19.3"
+from      = "modrinth:all-the-mods-10@4.6"
+remove    = ["modrinth:unwanted-mod", "./config/pack-defaults.toml"]
+
+items = ["modrinth:sodium@0.6.0"]
+```
+
+That instance is two layers: the pack's members underneath, the manifest's own
+`items` on top. `src/base/` owns both halves — `mrpack-base.ts` turns a pack
+reference into a pinned member set, `overlay.ts` lays the instance over it.
+
+### Precedence
+
+The effective set is computed in three phases:
+
+1. **Remove.** Each `game.remove` entry drops matching packages from *both*
+   layers. An entry matches on either axis: **identity** (`modrinth:sodium`
+   matches the member whose canonical key or slug is `sodium`, same source only)
+   or **placement path** (`"./config/x.toml"` matches whatever `link`s to
+   `config/x.toml`). An entry that matches nothing **fails the lock** — the
+   failure it prevents is shipping the mod you believed you removed.
+2. **Override.** A base member is dropped when any instance package matches it
+   on either axis:
+   - **identity** — same canonical key. Bumping a base mod drops the *whole*
+     base member, its old filename included, so `mods/sodium-0.5.8.jar` does not
+     survive next to `mods/sodium-0.6.0.jar`.
+   - **placement target** — same `link` target. Overriding a pack config works
+     here, where the two sides share no catalogue identity at all: a base config
+     is a `local` blob under `.anvil/base/`, yours is a `local` path in the
+     instance, and all they have in common is where they land.
+
+   Either axis, never both, so the phase is order-independent: a base member is
+   dropped iff some instance package claims its identity or its destination.
+3. **Union**, then the ordinary placement-collision check. After phase 2 that
+   check can only fire for two *instance* items — base-vs-instance clashes were
+   already resolved, by rule, in the instance's favour.
+
+**The instance always wins.** No rule lets a base member displace something the
+manifest asked for, which is also why a hostile pack cannot shadow your files.
+
+Transitive dependencies are the one place the base gets a say: a dependency the
+base already provides reuses the base's pin rather than resolving fresh, so
+adding one mod does not silently bump a mod the pack chose. A **root** you listed
+yourself is never pinned this way — you listed it, you control it.
+
+### What the lock records
+
+```toml
+[base]
+ref     = "modrinth:all-the-mods-10@4.6"
+source  = "modrinth"
+id      = "all-the-mods-10"
+version = "4.6"
+archive = "sha256:…"   # the .mrpack's own pin
+set     = "sha256:…"   # digest over the resolved member set, pre-overlay
+members = 482
+```
+
+plus `from_base = true` on every base-derived `[[package]]`. Both are omitted
+entirely for an instance with no base, so such a lock is byte-identical to what
+it was before base packs existed.
+
+`set` is the property the sync use case rests on. Two instances whose locks carry
+the same `set` started from byte-identical base members, so the entire flagged
+partition — several hundred rows — is known equal without comparing a single
+entry, and only the unflagged overlay has to be reconciled. Where the digests
+differ, the rows themselves are still a usable diff primitive: a Modrinth member
+carries slug + version, a CurseForge member carries `(project, file)`.
+
+### Base resolution happens once, at lock time
+
+The build reads `[[package]]` rows and nothing else; it never fetches a pack.
+A pack edited or withdrawn upstream cannot change an instance that already
+locked, which is what keeps `game.from` inside the determinism invariant.
+
+Two files support that. `.anvil/base/` holds the pack's loose `overrides/` as
+tracked `local` files, so their bytes are addressable offline (and carried into
+commits like any local item). `.anvil/base.lock` caches the base's **full**
+member set — the instance lock holds only the survivors, and re-running the
+overlay against survivors would make a `game.remove` entry match nothing the
+second time and would strand a base member that an override had displaced. Same
+pattern as `.anvil/graph.json`: a fact `lock` produced that the deterministic
+lock must not carry, kept where the next `lock` can read it.
+
+### Adding a source
+
+`BasePackSource` (`src/base/types.ts`) is the seam. An implementation owes the
+resolver fully-pinned members with decided placements, catalogue identity where
+it exists, and its own bounds on untrusted pack data. CurseForge slots in beside
+Modrinth without the resolver changing.
+
 ## Build pipeline (`src/build/`)
 
 ```mermaid
