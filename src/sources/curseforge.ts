@@ -86,7 +86,12 @@ const CF_HASH_SHA1 = 1;
 
 // --- CurseForge Core API v1 shapes (only the fields we read) ---------------
 
-interface CfMod {
+/**
+ * A CurseForge mod (project). Exported as `CfModMetadata` because the base-pack
+ * resolver reads `classId`/`slug` from it to give a pack member the same
+ * identity a direct `curseforge:` item would get.
+ */
+export interface CfModMetadata {
   readonly id: number;
   readonly name: string;
   readonly slug: string;
@@ -103,7 +108,12 @@ interface CfFileDependency {
   readonly relationType: number;
 }
 
-interface CfFile {
+/**
+ * One CurseForge file. Exported as `CfFileMetadata` because a base pack pins its
+ * members from this alone — `hashes` (algo 1 = sha1) and `fileName`/`fileLength`
+ * are everything a lock row needs, with no download.
+ */
+export interface CfFileMetadata {
   readonly id: number;
   readonly modId: number;
   readonly displayName: string;
@@ -116,8 +126,102 @@ interface CfFile {
   readonly dependencies?: readonly CfFileDependency[];
 }
 
+// Short local aliases — the exported names carry the `Metadata` suffix so they
+// read unambiguously at the call sites outside this module.
+type CfMod = CfModMetadata;
+type CfFile = CfFileMetadata;
+
 function decodeJson<T>(bytes: Uint8Array): T {
   return JSON.parse(new TextDecoder().decode(bytes)) as T;
+}
+
+// --- response validation ---------------------------------------------------
+//
+// `decodeJson` casts, it does not check. Every field below is read from a remote
+// response, so a mirror, a proxy, an error body served with a 200, or a delisted
+// id can hand back a shape that type-checks at compile time and is junk at run
+// time. Dereferencing that produces an untyped `TypeError` with a useless
+// message; a base pack naming a few hundred ids makes it likely rather than
+// theoretical. These normalizers keep only fields of the right type and raise a
+// typed {@link UnsatisfiableTarget} when the record cannot be used at all.
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function optionalString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Keep only well-formed `{ value: string, algo: number }` hash entries. */
+function normalizeHashes(v: unknown): CfFileHash[] | undefined {
+  if (!Array.isArray(v)) {
+    return undefined;
+  }
+  const out: CfFileHash[] = [];
+  for (const h of v) {
+    if (isRecord(h) && typeof h.value === "string" && typeof h.algo === "number") {
+      out.push({ value: h.value, algo: h.algo });
+    }
+  }
+  return out;
+}
+
+/** Validate one file record, or throw a typed error naming the subject. */
+export function normalizeCfFile(data: unknown, subject: string): CfFileMetadata {
+  if (
+    !isRecord(data) ||
+    !Number.isSafeInteger(data.id) ||
+    !Number.isSafeInteger(data.modId) ||
+    typeof data.fileName !== "string" ||
+    data.fileName.length === 0
+  ) {
+    throw new UnsatisfiableTarget(subject, "CurseForge returned a malformed file record");
+  }
+  const deps: CfFileDependency[] = [];
+  if (Array.isArray(data.dependencies)) {
+    for (const d of data.dependencies) {
+      if (isRecord(d) && Number.isSafeInteger(d.modId) && typeof d.relationType === "number") {
+        deps.push({ modId: d.modId as number, relationType: d.relationType });
+      }
+    }
+  }
+  const hashes = normalizeHashes(data.hashes);
+  const gameVersions = Array.isArray(data.gameVersions)
+    ? data.gameVersions.filter((g): g is string => typeof g === "string")
+    : undefined;
+  return {
+    id: data.id as number,
+    modId: data.modId as number,
+    displayName: optionalString(data.displayName) ?? data.fileName,
+    fileName: data.fileName,
+    fileDate: optionalString(data.fileDate) ?? "",
+    ...(Number.isSafeInteger(data.fileLength) ? { fileLength: data.fileLength as number } : {}),
+    ...(gameVersions ? { gameVersions } : {}),
+    ...(hashes ? { hashes } : {}),
+    ...(typeof data.fileFingerprint === "number" ? { fileFingerprint: data.fileFingerprint } : {}),
+    dependencies: deps,
+  };
+}
+
+/** Validate a mod record. `slug` drives a lock `name`, so it must be a string. */
+function normalizeCfMod(data: unknown, subject: string): CfModMetadata {
+  if (!isRecord(data) || !Number.isSafeInteger(data.id)) {
+    throw new UnsatisfiableTarget(subject, "CurseForge returned a malformed mod record");
+  }
+  // `slug` becomes a lock row's `name`, which the overlay matches on and which
+  // is rendered into TOML — so it is accepted only in the shape CurseForge slugs
+  // actually take. A non-string, or one carrying separators/whitespace, falls
+  // back to the numeric id rather than being trusted into the lock.
+  const rawSlug = optionalString(data.slug);
+  const slug =
+    rawSlug !== undefined && /^[a-z0-9][a-z0-9._-]*$/i.test(rawSlug) ? rawSlug : undefined;
+  return {
+    id: data.id as number,
+    name: optionalString(data.name) ?? slug ?? String(data.id),
+    slug: slug ?? String(data.id),
+    ...(Number.isSafeInteger(data.classId) ? { classId: data.classId as number } : {}),
+  };
 }
 
 /** Map a manifest loader string to a CurseForge `modLoaderType` code. */
@@ -168,10 +272,10 @@ export class CurseForgeApi {
     return decodeJson<T>(res.body);
   }
 
-  /** `GET /v1/mods/{modId}` → the mod (classId, slug, name). */
+  /** `GET /v1/mods/{modId}` → the mod (classId, slug, name), validated. */
   async getMod(modId: number): Promise<CfMod> {
-    const doc = await this.#getJson<{ data: CfMod }>(`/v1/mods/${modId}`);
-    return doc.data;
+    const doc = await this.#getJson<{ data: unknown }>(`/v1/mods/${modId}`);
+    return normalizeCfMod(doc?.data, `curseforge:${modId}`);
   }
 
   /** `GET /v1/mods/{modId}/files` filtered by game version + loader. */
@@ -187,14 +291,29 @@ export class CurseForgeApi {
       params.set("modLoaderType", String(filters.modLoaderType));
     }
     params.set("pageSize", "50");
-    const doc = await this.#getJson<{ data: CfFile[] }>(`/v1/mods/${modId}/files`, params);
-    return doc.data ?? [];
+    const doc = await this.#getJson<{ data: unknown }>(`/v1/mods/${modId}/files`, params);
+    // A non-array `data` passes a `?? []` fallback and then explodes on
+    // `.filter`. Anything that is not an array is "no files", not a crash.
+    if (!Array.isArray(doc?.data)) {
+      return [];
+    }
+    // Drop malformed entries rather than failing the whole listing: one bad
+    // record in a page should not make a project unresolvable.
+    const out: CfFile[] = [];
+    for (const raw of doc.data) {
+      try {
+        out.push(normalizeCfFile(raw, `curseforge:${modId}`));
+      } catch {
+        // skipped — an unusable record is not a selectable file
+      }
+    }
+    return out;
   }
 
-  /** `GET /v1/mods/{modId}/files/{fileId}` → one file's metadata. */
+  /** `GET /v1/mods/{modId}/files/{fileId}` → one file's metadata, validated. */
   async getModFile(modId: number, fileId: number): Promise<CfFile> {
-    const doc = await this.#getJson<{ data: CfFile }>(`/v1/mods/${modId}/files/${fileId}`);
-    return doc.data;
+    const doc = await this.#getJson<{ data: unknown }>(`/v1/mods/${modId}/files/${fileId}`);
+    return normalizeCfFile(doc?.data, `curseforge:${modId}/${fileId}`);
   }
 
   /**
@@ -203,10 +322,12 @@ export class CurseForgeApi {
    * turns a `null` into a {@link ReplayUnavailable} (never a copy-from-elsewhere).
    */
   async getDownloadUrl(modId: number, fileId: number): Promise<string | null> {
-    const doc = await this.#getJson<{ data: string | null }>(
+    const doc = await this.#getJson<{ data: unknown }>(
       `/v1/mods/${modId}/files/${fileId}/download-url`,
     );
-    return doc.data ?? null;
+    // Anything that is not a usable URL string is "no download", which the
+    // caller already turns into a typed ReplayUnavailable.
+    return typeof doc?.data === "string" && doc.data.length > 0 ? doc.data : null;
   }
 
   /**

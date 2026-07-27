@@ -52,6 +52,30 @@ a defense against the build code of a source you told anvil to build:
   and uncompressed-size bounds.
 - **No telemetry / no phone-home.**
 
+## The CurseForge replay boundary, and exactly where it ends
+
+CurseForge **project files** (mod jars) are `provenance: "replay"`: they are fetched
+per-client under the user's own key into a per-instance `.anvil/replay-cache/`, and
+the shared store, GC, transfer, push, and export paths cannot enumerate that
+directory. A CurseForge **base pack** (`game.from = "curseforge:…"`) holds this in its
+strongest form — resolving one downloads no member bytes at all, so there is nothing
+to leak — and its members are pinned from `(projectID, fileID)` plus CurseForge's
+attested sha1 without a download.
+
+**Where the boundary ends, stated plainly:** a pack's `overrides/` tree — the loose
+configs the *pack author* ships, not project files — is extracted into `.anvil/base/`
+and registered as ordinary `local` / `copy` items. Those bytes **do** enter the shared
+content store, and can therefore be pushed to a remote or written into a `.mrpack`
+export like any other local file.
+
+This is the same line `anvil import` already draws for a CurseForge zip, and it is a
+consequence of there being exactly two provenances: a `copy` row is materialized from
+the shared store, a `replay` row from the replay cache, and a loose config file has no
+`(projectID, fileID)` to re-fetch itself with. It is recorded here rather than papered
+over. If you redistribute instances built on a CurseForge base, that config tree is
+what you are redistributing; a third provenance for "pack-authored bytes that may be
+placed but not shared" would close it and is not implemented.
+
 ## Embedding anvil to build from untrusted or remote sources
 
 If your application builds instances from sources your users supply (a "join this room /
