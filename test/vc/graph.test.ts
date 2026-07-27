@@ -25,6 +25,7 @@ async function mkCommit(
     lock: await store.putBlob(new TextEncoder().encode(`l-${opts.message}`)),
     ignore: await store.putBlob(new Uint8Array()),
     carried: [],
+    tracked: [],
   };
   const parentCommits = await Promise.all(opts.parents.map((p) => store.getCommit(p)));
   const commit: CommitObject = {

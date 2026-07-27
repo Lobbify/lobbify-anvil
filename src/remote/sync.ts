@@ -142,6 +142,9 @@ async function importHistory(deps: SyncDeps, tip: Hash): Promise<void> {
     for (const carried of snap.carried) {
       await ensureVcObject(deps, carried.blob, "carried-blob");
     }
+    for (const tracked of snap.tracked) {
+      await ensureVcObject(deps, tracked.blob, "tracked-blob");
+    }
     for (const parent of commit.parents) {
       if (!seen.has(parent.value)) {
         stack.push(parent);
@@ -182,6 +185,9 @@ async function gatherVcObjects(
     }
     for (const carried of snap.carried) {
       await push(carried.blob);
+    }
+    for (const tracked of snap.tracked) {
+      await push(tracked.blob);
     }
     for (const parent of commit.parents) {
       if (!seen.has(parent.value)) {

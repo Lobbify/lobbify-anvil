@@ -25,6 +25,7 @@ async function buildCommit(store: VcObjectStore): Promise<{ commit: CommitObject
     lock: lockBlob,
     ignore: ignoreBlob,
     carried: [],
+    tracked: [],
   };
   const snapId = await store.put(snapshot);
   const commit: CommitObject = {

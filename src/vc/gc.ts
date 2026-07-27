@@ -5,8 +5,9 @@
  * ref, `HEAD` / `ORIG_HEAD` / `MERGE_HEAD`, every commit ever named by a reflog,
  * and any in-progress operation state (an in-flight rebase's `REBASE_STATE`). From
  * each root we walk the commit DAG, and from each reachable commit its snapshot and
- * that snapshot's blobs — including the **carried local blobs**, so switching to an
- * old commit after a GC never hits a missing object.
+ * that snapshot's blobs — including the **carried local blobs** and the **tracked
+ * working-tree blobs**, so switching to an old commit after a GC never hits a
+ * missing object.
  *
  * The same walk yields the reachable commits' locks + carried content hashes, which
  * the shared content-store GC unions into its roots so a mod pinned only by an old
@@ -87,6 +88,12 @@ export async function vcReachability(
       for (const c of snapshot.carried) {
         keep.add(c.blob.value);
         carriedContent.push(c.content);
+      }
+      // Tracked blobs are kept in the VC store, but they are deliberately NOT
+      // shared-store roots: they hold undeclared working-tree bytes, which are
+      // not build inputs and never live in the shared store.
+      for (const t of snapshot.tracked) {
+        keep.add(t.blob.value);
       }
       try {
         const lockText = new TextDecoder().decode(await objects.getBlobBytes(snapshot.lock));

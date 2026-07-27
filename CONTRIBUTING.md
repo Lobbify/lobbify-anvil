@@ -48,7 +48,7 @@ subsystem and usually has the best doc comments.
 | `src/resolver/` | The manifest → fully-pinned `Lockfile` resolver (BFS worklist, `allowSource` gate, conflict handling). |
 | `src/lock/` | The canonical, deterministic `anvil.lock` TOML schema, serializer, and atomic I/O. |
 | `src/game/` | The Mojang installer walk, Fabric/Quilt/Forge/NeoForge loaders, the merged `version.json` generator, and the Forge/NeoForge installer-processor runner. |
-| `src/vc/` | anvil's own version-control engine (not a git wrapper): the `.anvil/` object model, refs/reflog, generation-number graph + LCA, item-set 3-way merge, and rebase. |
+| `src/vc/` | anvil's own version-control engine (not a git wrapper): the `.anvil/` object model, refs/reflog, generation-number graph + LCA, item-set 3-way merge, rebase, and the working-tree walk that records undeclared files (`.anvilexclude`). |
 | `src/remote/` | Remote descriptors, transports (dir / http / git / room), content-addressed object transfer, and `clone`/`pull`/`push` orchestration. |
 | `src/export/` | `.mrpack` export (a dependency-free deterministic zip writer). |
 | `src/import/` | Pack import: `.mrpack`, CurseForge-zip, Prism/MultiMC (via fingerprint re-identification), and the hardened zip reader. |

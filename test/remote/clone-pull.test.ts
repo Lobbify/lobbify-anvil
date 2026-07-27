@@ -11,7 +11,8 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { rmTmp } from "../helpers/fixtures.js";
+import { type Hash, type TrackedFile, VcObjectStore } from "../../index.js";
+import { mkTmp, rmTmp } from "../helpers/fixtures.js";
 import { bumpMod, makeInstance, modWorldOf, writeAndLock } from "../helpers/remote.js";
 
 const dirs: string[] = [];
@@ -150,5 +151,92 @@ describe("fast-forward on divergence — local work is never discarded", () => {
 
     // saves/ is byte-for-byte intact.
     expect(await readFile(savePath, "utf8")).toBe("PRECIOUS-WORLD-BYTES");
+  });
+});
+
+/**
+ * LB-705: an undeclared working-tree file is part of the commit, so it has to
+ * survive every transfer path. A blob that is walked for the snapshot but not for
+ * the transfer produces a clone that either misses the file or dies on a missing
+ * object — silent on the host, total on the joiner.
+ */
+describe("tracked working-tree files travel over a remote", () => {
+  /** The tracked entry a commit records for `rel`. */
+  async function trackedBlob(
+    dir: string,
+    commit: Hash,
+    rel: string,
+  ): Promise<TrackedFile | undefined> {
+    const objects = new VcObjectStore({ anvilDir: join(dir, ".anvil") });
+    const snap = await objects.getSnapshot((await objects.getCommit(commit)).snapshot);
+    return snap.tracked.find((t) => t.path === rel);
+  }
+
+  it("a clone materializes the host's undeclared config, and a pull carries the edit", async () => {
+    const fake = modWorldOf(2);
+    const host = await makeInstance(fake, "trk-host");
+    const joiner = await makeInstance(fake, "trk-joiner");
+    dirs.push(host.dir, host.storeDir, joiner.dir, joiner.storeDir);
+
+    await writeAndLock(host, ["modrinth:mod0", "modrinth:mod1"]);
+    await mkdir(join(host.dir, "config"), { recursive: true });
+    await writeFile(join(host.dir, "config", "server.toml"), "HOST-V1");
+    const hostAnvil = host.anvil();
+    await hostAnvil.build();
+    const c1 = await hostAnvil.commit("host: base + an undeclared config");
+
+    await joiner.anvil().clone(host.dir);
+    const joinerConfig = join(joiner.dir, "config", "server.toml");
+    expect(await readFile(joinerConfig, "utf8")).toBe("HOST-V1");
+
+    // The blob object itself transferred — not just bytes that happen to match.
+    const entry = await trackedBlob(host.dir, c1.id, "config/server.toml");
+    expect(entry).toBeDefined();
+    if (!entry) {
+      return;
+    }
+    const joinerObjects = new VcObjectStore({ anvilDir: join(joiner.dir, ".anvil") });
+    expect(await joinerObjects.has(entry.blob)).toBe(true);
+
+    // The host edits the file only (no lock change) and commits; the joiner pulls.
+    await writeFile(join(host.dir, "config", "server.toml"), "HOST-V2");
+    await hostAnvil.commit("host: edit the config");
+    const pull = await joiner.anvil().pull();
+    expect(pull.upToDate).toBe(false);
+    expect(pull.fastForwarded).toBe(1);
+    expect(await readFile(joinerConfig, "utf8")).toBe("HOST-V2");
+  });
+
+  it("a push publishes the tracked blobs, so a clone from that remote finds them", async () => {
+    const fake = modWorldOf(2);
+    const host = await makeInstance(fake, "push-host");
+    const joiner = await makeInstance(fake, "push-joiner");
+    const remoteDir = await mkTmp("push-remote");
+    dirs.push(host.dir, host.storeDir, joiner.dir, joiner.storeDir, remoteDir);
+
+    await writeAndLock(host, ["modrinth:mod0", "modrinth:mod1"]);
+    await mkdir(join(host.dir, "config"), { recursive: true });
+    await writeFile(join(host.dir, "config", "server.toml"), "PUSHED-BYTES");
+    const hostAnvil = host.anvil();
+    await hostAnvil.build();
+    const c1 = await hostAnvil.commit("host: base + an undeclared config");
+
+    await hostAnvil.addRemote("dst", remoteDir);
+    await hostAnvil.push("dst");
+
+    // The tracked blob is published at the remote endpoint, under its own id.
+    const entry = await trackedBlob(host.dir, c1.id, "config/server.toml");
+    expect(entry).toBeDefined();
+    if (!entry) {
+      return;
+    }
+    const shard = entry.blob.value.slice(0, 2);
+    expect(await readdir(join(remoteDir, ".anvil", "objects"))).toContain(shard);
+    const published = await readFile(join(remoteDir, ".anvil", "objects", shard, entry.blob.value));
+    expect(published.byteLength).toBeGreaterThan(0);
+
+    // And a joiner cloning from that remote gets the file, not a missing object.
+    await joiner.anvil().clone(remoteDir);
+    expect(await readFile(join(joiner.dir, "config", "server.toml"), "utf8")).toBe("PUSHED-BYTES");
   });
 });

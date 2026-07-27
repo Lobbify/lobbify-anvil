@@ -174,7 +174,38 @@ over the **item-set**, not the raw files:
 
 - **Objects** (`objects.ts`) — sha256-addressed blob / snapshot / commit
   objects, zlib-compressed on disk but **hashed uncompressed**, so a commit id
-  is identical across Node 20/22 and every OS.
+  is identical across Node 20/22 and every OS. A snapshot holds the manifest,
+  lock and ignore blobs, the **carried** local-item bytes (build inputs, kept
+  self-contained across a store GC), and the **tracked** working-tree files
+  (undeclared bytes, VC-only). The tracked set is omitted from the encoding when
+  empty, so a snapshot with nothing undeclared keeps the id it had before
+  tracking existed. No file mode is recorded — an exec bit is unrepresentable on
+  Windows and would make a commit id platform-dependent — and a tracked path is
+  stored NFC for the same reason, since macOS hands back NFD where Linux does
+  not. Decoding bounds what a remote can ask for: an object that inflates past
+  512 MiB is refused as a decompression bomb, and a snapshot listing more than
+  100,000 tracked files is refused outright (each entry is a file materialize
+  would write, so an unbounded list is an amplifier).
+- **The working-tree walk** (`worktree.ts`) — which undeclared files a snapshot
+  records. Exclusion is applied to *directories* during the walk, so the game
+  install is pruned rather than filtered (a real instance holds tens of thousands
+  of asset objects). Excluded: the snapshot's own slots, `saves/` and `.anvil/`,
+  the game-install tops, runtime churn, OS and editor cruft by basename at any
+  depth (`.DS_Store`, `Thumbs.db`, `desktop.ini`, `.directory`, `*.swp`, `*.swo`,
+  `*~` — the top-level rules cannot express those, and without them opening the
+  folder in Finder dirties the tree), everything the current **or** built lock
+  says the build owns, and the instance's `.anvilexclude`. An `.anvilexclude` line
+  with a `/` in it matches the whole instance-relative path segment-wise
+  (`config/*.json`); one without matches a basename at any depth (`*.log`); one
+  with no `*` is a literal prefix. A tracked set whose paths collide under case
+  folding is refused rather than committed: Windows and macOS would resolve the
+  two to one file and a checkout would drop one side's bytes. The one split that
+  catches people: `.anvilignore` entries are *tracked*, not excluded. That file
+  means "the build must not touch this", which is exactly the hand-edited state
+  worth recording. `.anvilexclude` is the separate "version control must not
+  record this" file. A snapshot is full state, so a deleted file is represented by
+  its **absence**; there are no tombstones, and materialize turns absence back
+  into a real deletion (pruning the parents it empties).
 - **Refs** (`refs.ts`) — `HEAD` / `ORIG_HEAD` / `MERGE_HEAD` /
   `refs/heads|tags|remotes`, a reflog, and packed-refs.
 - **Ordering** (`graph.ts`) — a **generation number** is the authoritative
@@ -184,7 +215,10 @@ over the **item-set**, not the raw files:
   stable identity (`<source>:<id>`, `local:<path>`, `config:<path>`, the
   special `@game` key), followed by a constrained, pin-preserving re-lock
   (untouched items keep their exact prior pins; two branches' *derived* locks
-  are never merged directly — only their item-sets are).
+  are never merged directly — only their item-sets are). The tracked set gets
+  its own 3-way, one level down: a merge of the **set by path**, so a branch
+  that added a file does not lose it. File contents are never merged — two sides
+  that changed the same file resolve ours-wins with a warning naming the path.
 - **Rebase** (`rebase.ts`, `repo.ts`) — per-commit item-delta replay with a
   per-step re-lock, `--continue`/`--skip`/`--abort`, and a crash-survivable
   `REBASE_STATE`.
