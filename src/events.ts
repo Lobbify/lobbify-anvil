@@ -132,6 +132,18 @@ export interface VerifyDoneEvent {
   readonly mismatches: number;
 }
 
+// --- warning — something was skipped, and you should know ----------------
+
+/**
+ * A non-fatal skip the run decided on its own: a base pack member targeting
+ * `saves/`, a server-only file, an unusable path. The operation continues, but
+ * the instance is not quite what the input asked for, so it is never silent.
+ */
+export interface WarningEvent {
+  readonly type: "warning";
+  readonly message: string;
+}
+
 // --- error — a surfaced failure (mirrors the error taxonomy `code`) -------
 
 export interface ErrorEvent {
@@ -163,6 +175,7 @@ export type AnvilEvent =
   | VerifyStartEvent
   | VerifyItemEvent
   | VerifyDoneEvent
+  | WarningEvent
   | ErrorEvent;
 
 /** The set of all event discriminants (`"resolve:start" | …`). */

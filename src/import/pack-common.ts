@@ -86,10 +86,22 @@ export interface ImportOverrideTreeInput {
    * kind }` entry appended here too, or it exists only in the lock this import
    * writes and vanishes the moment anything re-resolves the manifest (`anvil
    * lock`, a merge/rebase re-lock).
+   *
+   * **Omitted for a base pack's overrides**, and deliberately: a base's files are
+   * not the instance's authored items. They are re-derived from `game.from` on
+   * every lock, and writing them into `items` would flatten the base into the
+   * instance the first time anything re-locked — exactly the layering the base
+   * exists to keep.
    */
-  readonly manifestItems: ManifestItem[];
+  readonly manifestItems?: ManifestItem[];
   readonly warnings: string[];
   readonly onStored: (hash: LockPackage["hash"]) => void;
+  /**
+   * The `.anvil/` subdirectory the tracked bytes are written under. Defaults to
+   * `"overrides"` (import); base resolution passes `"base"` so a re-resolved
+   * base cannot clobber an imported override that happens to share a path.
+   */
+  readonly trackedSubdir?: string;
 }
 
 /**
@@ -101,8 +113,11 @@ export interface ImportOverrideTreeInput {
  * top segment is protected/unsafe is refused.
  */
 export async function importOverrideTree(input: ImportOverrideTreeInput): Promise<number> {
-  const stageDir = join(input.instanceDir, ".anvil", `import-stage-${process.pid}`);
-  const trackedRoot = join(input.instanceDir, ".anvil", "overrides");
+  const subdir = input.trackedSubdir ?? "overrides";
+  // Namespaced by subdir as well as pid: an import and a base resolve in one
+  // process must not stage into the same throwaway directory.
+  const stageDir = join(input.instanceDir, ".anvil", `import-stage-${subdir}-${process.pid}`);
+  const trackedRoot = join(input.instanceDir, ".anvil", subdir);
   await rm(stageDir, { recursive: true, force: true });
   await ensureDir(stageDir);
 
@@ -150,8 +165,8 @@ export async function importOverrideTree(input: ImportOverrideTreeInput): Promis
         url: pathToFileURL(trackedPath).toString(),
       });
       // Same shape importPrism uses for its unmatched-jar local entries — see
-      // module doc.
-      input.manifestItems.push({ path: destRel, kind });
+      // module doc. A base pack passes no list: its files are not authored items.
+      input.manifestItems?.push({ path: destRel, kind });
       input.onStored(hash);
       count += 1;
     }

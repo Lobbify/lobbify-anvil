@@ -20,10 +20,24 @@ import { formatVersionSpec, refForItem, refKey } from "../manifest/index.js";
 import { canonicalKeyOf } from "../resolver/index.js";
 import type { LockPackage, Manifest, ManifestItem, ResolvedRef } from "../types/index.js";
 
-/** The game-base value (`@game`). */
+/**
+ * The game-base value (`@game`) — every authored field of `[game]`, not just the
+ * two that name a Minecraft version.
+ *
+ * `from` and `remove` live here because a merge **reconstructs** the merged
+ * manifest's `[game]` from this value. Anything `[game]` carries that this type
+ * does not is silently dropped the first time two branches are merged: an
+ * instance that started from a base pack would come back from the merge as a
+ * bare instance with a few hundred packages missing. Adding a field to
+ * {@link GameSpec} means adding it here.
+ */
 export interface GameValue {
   readonly minecraft: string;
   readonly loader: string;
+  /** `game.from` — the base pack, when the manifest declares one. */
+  readonly from?: string;
+  /** `game.remove` — the base/instance items this manifest drops. */
+  readonly remove?: readonly string[];
 }
 
 /** One entry in an item set. */
@@ -102,13 +116,31 @@ export function buildItemSet(
   }
   return {
     items,
-    game: { minecraft: manifest.game.minecraft, loader: manifest.game.loader },
+    game: gameValueOf(manifest),
   };
 }
 
-/** The value string for a game base (`@game`). */
+/** The `@game` value a manifest's `[game]` table carries. */
+export function gameValueOf(manifest: Manifest): GameValue {
+  return {
+    minecraft: manifest.game.minecraft,
+    loader: manifest.game.loader,
+    ...(manifest.game.from !== undefined ? { from: manifest.game.from } : {}),
+    ...(manifest.game.remove !== undefined ? { remove: manifest.game.remove } : {}),
+  };
+}
+
+/**
+ * The value string for a game base (`@game`).
+ *
+ * A base change is deliberately folded into `@game` rather than tracked as its
+ * own item: swapping `game.from` can orphan every mod in the instance, which is
+ * exactly the cascade `@game` already exists to force. Absent `from`/`remove`
+ * contribute empty segments, so an instance that uses neither produces the same
+ * value it always did.
+ */
 export function gameValue(g: GameValue): string {
-  return `${g.minecraft}␟${g.loader}`;
+  return `${g.minecraft}␟${g.loader}␟${g.from ?? ""}␟${(g.remove ?? []).join("␞")}`;
 }
 
 /** One item-level delta between two manifests (for `log --stat` and rebase replay). */

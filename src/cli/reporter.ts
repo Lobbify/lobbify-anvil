@@ -27,6 +27,10 @@ export function describeEvent(event: AnvilEvent): string | undefined {
       return event.ok ? undefined : `  ✗ ${event.name}`;
     case "verify:done":
       return event.ok ? "verify: ok" : `verify: ${event.mismatches} mismatch(es)`;
+    case "warning":
+      // A skip the run decided on its own (a base pack member targeting `saves/`,
+      // a removed item). It changes what gets installed, so it is never quiet.
+      return `warning: ${event.message}`;
     default:
       // object:*, build:start/swap, resolve:item, replay:*, pull:*, error —
       // either too granular for a plain log or handled elsewhere.

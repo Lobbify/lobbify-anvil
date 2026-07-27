@@ -205,7 +205,15 @@ export async function threeWayMerge(input: ThreeWayInput): Promise<ThreeWayResul
     return { conflicts, gameChanged, reResolveKeys, seedPins };
   }
 
-  const game: GameSpec = { minecraft: mergedGame.minecraft, loader: mergedGame.loader };
+  // Every authored `[game]` field, not just the two version strings — a field
+  // dropped here vanishes from the merged manifest silently, and `game.from`
+  // vanishing takes the whole base layer with it.
+  const game: GameSpec = {
+    minecraft: mergedGame.minecraft,
+    loader: mergedGame.loader,
+    ...(mergedGame.from !== undefined ? { from: mergedGame.from } : {}),
+    ...(mergedGame.remove !== undefined ? { remove: mergedGame.remove } : {}),
+  };
   const items = [...mergedItems.values()]
     .sort((a, b2) => (a.key < b2.key ? -1 : a.key > b2.key ? 1 : 0))
     .map((e) => e.item);

@@ -209,6 +209,18 @@ export interface LockPackage {
   readonly url?: string;
   /** Byte size, when known — used for transfer planning and bomb bounds. */
   readonly size?: number;
+  /**
+   * Present (and always `true`) when this package came from the manifest's
+   * `game.from` **base pack** rather than from its own `items`. Absent for every
+   * package of an instance that declares no base, so a base-less lock is
+   * byte-identical to what it was before base packs existed.
+   *
+   * The flag is what makes two base-sharing instances cheap to compare: with
+   * equal {@link LockBase.set} digests the whole flagged partition is known
+   * identical without inspecting a single entry, so only the unflagged overlay
+   * has to be diffed. See `ARCHITECTURE.md` → "Base packs".
+   */
+  readonly fromBase?: true;
 }
 
 /** The lock header. `version` gates the on-disk schema for migrations. */
@@ -222,9 +234,37 @@ export interface LockMeta {
   readonly java: string;
 }
 
+/**
+ * The resolved identity of a manifest's `game.from` base pack, recorded in the
+ * lock so the base is **never re-resolved at build time**. The build reads only
+ * {@link Lockfile.resolved}; this block exists to identify the base and to make
+ * a base-sharing pair of instances comparable without fetching a byte.
+ */
+export interface LockBase {
+  /** The `game.from` string exactly as authored (`"modrinth:atm10@4.6"`). */
+  readonly ref: string;
+  readonly source: SourceKind;
+  /** The source-local pack id (slug / project id) as resolved. */
+  readonly id: string;
+  /** The concrete pack version the ref resolved to under the frozen clock. */
+  readonly version: string;
+  /** The base distribution's own content pin (the `.mrpack` archive's sha256). */
+  readonly archive: Hash;
+  /**
+   * A digest over the base's resolved member set **before** the instance layer
+   * is applied. Two locks with the same `set` started from byte-identical base
+   * members, whatever each instance then did on top.
+   */
+  readonly set: Hash;
+  /** How many members the base contributed, before removals and overrides. */
+  readonly members: number;
+}
+
 /** The fully-resolved, hash-pinned lockfile — deterministic and diff-friendly. */
 export interface Lockfile {
   readonly meta: LockMeta;
+  /** The resolved `game.from` base, when the manifest declares one. */
+  readonly base?: LockBase;
   readonly resolved: readonly LockPackage[];
 }
 
@@ -233,9 +273,17 @@ export interface GameSpec {
   readonly minecraft: string;
   /** `fabric <ver>` | `quilt <ver>` | `neoforge <ver>` | `forge <ver>` | `vanilla`. */
   readonly loader: string;
-  /** Start from an existing pack (`modrinth:cobblemon-pack@1.4.0`). */
+  /**
+   * Start from an existing pack (`modrinth:cobblemon-pack@1.4.0`). The pack's
+   * members become the instance's base layer; `items` is the layer on top and
+   * always wins. See `ARCHITECTURE.md` → "Base packs" for the precedence rules.
+   */
   readonly from?: string;
-  /** Items the base pack ships that this manifest drops. */
+  /**
+   * Items this manifest drops. Each entry matches by **identity** (`modrinth:x`)
+   * or by **placement path** (`"./config/x.toml"`), against the base's members
+   * and this manifest's own `items`. An entry matching nothing is an error.
+   */
   readonly remove?: readonly string[];
 }
 

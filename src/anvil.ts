@@ -14,6 +14,8 @@
 
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { BaseRegistry, CachedBase, ResolvedBasePack } from "./base/index.js";
+import { baseSetDigest, buildBaseRegistry, readBaseCache, writeBaseCache } from "./base/index.js";
 import type { Acquirer, BuildEngineResult, WhyResult } from "./build/index.js";
 import {
   StoreOnlyAcquirer,
@@ -105,6 +107,7 @@ import type {
   Lockfile,
   Manifest,
   ManifestItem,
+  ResolvedRef,
 } from "./types/index.js";
 import type {
   CommitRef,
@@ -147,6 +150,8 @@ const DEFAULT_GC_GRACE_MS = 60_000;
 export interface AnvilEnv {
   /** Build the source registry (Modrinth / URL / local / CurseForge). */
   readonly registry?: () => SourceRegistry;
+  /** Build the `game.from` base-pack registry (Modrinth `.mrpack`; CurseForge next). */
+  readonly baseRegistry?: () => BaseRegistry;
   /** Construct the HTTP client for Mojang / loader / game-CDN fetches. */
   readonly gameHttp?: () => Http;
   /** Mojang endpoint overrides (mirrors or offline fixtures). */
@@ -295,6 +300,49 @@ function priorLoaderVersion(
     return undefined;
   }
   return priorVersion;
+}
+
+/**
+ * Whether the cached base set may be reused instead of re-resolving the pack.
+ *
+ * Same principle as `lockedPins` for items — a re-lock must not move a pin nobody
+ * asked to move, and must not re-download several hundred megabytes to arrive
+ * back where it started. Three conditions, each of which has a failure mode
+ * behind it:
+ *
+ *  - the cache is for the base the manifest **currently** names (edit `from`,
+ *    re-resolve);
+ *  - the prior lock, when there is one, agrees with the cache on the archive pin
+ *    (a cache that disagrees with the lock is stale or tampered — distrust it);
+ *  - the game target is unchanged. This one is easy to miss: the cached members
+ *    were selected for the Minecraft version the manifest declared *then*.
+ *    Editing `game.minecraft` while leaving `game.from` alone must re-resolve, or
+ *    the instance quietly keeps a base built for the version it left.
+ */
+function baseCacheUsable(
+  manifest: Manifest,
+  cached: CachedBase | undefined,
+  prior: Lockfile | undefined,
+  upgrade: boolean | ReadonlySet<string> | undefined,
+): cached is CachedBase {
+  const from = manifest.game.from;
+  if (from === undefined || !cached || cached.ref !== from) {
+    return false;
+  }
+  if (
+    upgrade === true ||
+    (upgrade instanceof Set && (upgrade.has(from) || upgrade.has(cached.pack.id)))
+  ) {
+    return false;
+  }
+  if (prior?.base && prior.base.archive.value !== cached.pack.archive.value) {
+    return false;
+  }
+  if (cached.pack.game.minecraft !== manifest.game.minecraft) {
+    return false;
+  }
+  const loaderName = (s: string): string => (s.trim().split(/\s+/)[0] ?? "vanilla").toLowerCase();
+  return loaderName(cached.pack.game.loader) === loaderName(manifest.game.loader);
 }
 
 /** Options for {@link Anvil.build}. */
@@ -532,6 +580,18 @@ export class Anvil {
   readonly #options: AnvilOptions;
   readonly #env: AnvilEnv;
 
+  /**
+   * A resolved base pack, memoized for this `Anvil` by its `game.from` string.
+   * A rebase re-locks once per replayed commit; without this, each step would
+   * re-download the same pack.
+   *
+   * Keyed by the ref alone, so a manifest edited *between two locks on the same
+   * object* still gets the memo. That is fine and fails closed: the resolver
+   * re-checks the pack's game target against the manifest on every resolve, so an
+   * edit to `game.minecraft` surfaces as a refused lock, never a stale base.
+   */
+  readonly #baseCache = new Map<string, ResolvedBasePack>();
+
   /** The typed progress bus. Prefer {@link on} or `for await` over reaching in. */
   readonly progress = new ProgressBus();
 
@@ -678,6 +738,7 @@ export class Anvil {
         ...(upgrade !== undefined ? { upgrade } : {}),
         emit,
         onEdge: (edge) => edges.push(edge),
+        resolveBase: this.#baseResolver(manifest, store, offline, prior, upgrade, emit),
       });
 
       // The full game install (client + libraries + natives + assets + pinned JRE
@@ -685,6 +746,7 @@ export class Anvil {
       const game = await this.#resolveGamePackages(manifest, store, offline, prior, upgrade);
       const lock: Lockfile = {
         meta: { ...itemLock.meta, java: game.java, loader: game.loader },
+        ...(itemLock.base ? { base: itemLock.base } : {}),
         resolved: [...itemLock.resolved, ...game.packages].sort(comparePackages),
       };
       await writeLock(this.dir, lock);
@@ -697,6 +759,73 @@ export class Anvil {
       }
       throw err;
     }
+  }
+
+  /**
+   * The `game.from` base-pack resolver handed to the resolver, or `undefined`
+   * when this environment registers no base sources at all.
+   *
+   * Three behaviours, in precedence order:
+   *
+   *  1. **Reuse the prior lock's base** when the manifest still names the same
+   *     `from`, under the same game target, and this is not an upgrade. Same
+   *     principle as `lockedPins` for items: a re-lock must not silently move a
+   *     pin nobody asked to move — and it must not re-download several hundred
+   *     megabytes to arrive back where it started.
+   *  2. **Offline** with no reusable prior base is a hard failure, not a silently
+   *     base-less instance.
+   *  3. Otherwise resolve the pack from its source, once per process per ref (a
+   *     rebase re-locks per commit; re-fetching the pack each step is not
+   *     something to make a user watch).
+   */
+  #baseResolver(
+    manifest: Manifest,
+    store: ContentStore,
+    offline: boolean,
+    prior: Lockfile | undefined,
+    upgrade: boolean | ReadonlySet<string> | undefined,
+    emit: (event: AnvilEvent) => void,
+  ): (ref: ResolvedRef) => Promise<ResolvedBasePack> {
+    const registry = this.#env.baseRegistry?.() ?? buildBaseRegistry();
+    return async (ref: ResolvedRef): Promise<ResolvedBasePack> => {
+      const from = manifest.game.from ?? "";
+      const inProcess = this.#baseCache.get(from);
+      if (inProcess) {
+        return inProcess;
+      }
+      const cached = await readBaseCache(this.dir);
+      if (baseCacheUsable(manifest, cached, prior, upgrade)) {
+        this.#baseCache.set(from, cached.pack);
+        return cached.pack;
+      }
+      if (offline) {
+        throw new UnsatisfiableTarget(
+          `game.from ${from}`.trim(),
+          "offline: no usable cached base pack — run `lock` online first",
+        );
+      }
+      const entry = registry.get(ref.source);
+      if (!entry) {
+        throw new ManifestError(
+          `game.from "${from}": no base-pack source is registered for "${ref.source}"`,
+        );
+      }
+      const pack = await entry.source.resolveBase(ref, {
+        ...(entry.http ? { http: entry.http } : {}),
+        now: Date.now(),
+        allowSource: this.#options.allowSource ?? defaultAllowSource,
+        store,
+        instanceDir: this.dir,
+        ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
+        emit,
+      });
+      // Persist the FULL member set beside the lock's survivors, so the next
+      // re-lock re-runs the overlay against what the pack actually ships. See
+      // `base/cache.ts` for why the lock alone cannot answer that.
+      await writeBaseCache(this.dir, { ref: from, pack, set: baseSetDigest(pack.members) });
+      this.#baseCache.set(from, pack);
+      return pack;
+    };
   }
 
   /** A per-endpoint-group rate-limited HTTP client for the game installer. */
@@ -1217,6 +1346,7 @@ export class Anvil {
     const anvilDir = join(this.dir, ".anvil");
     const vcStore = new VcObjectStore({ anvilDir });
     const relock: RelockFn = async (req) => {
+      const prior = await readLockIfPresent(this.dir);
       const itemLock = await resolveManifest({
         manifest: req.manifest,
         registry,
@@ -1228,6 +1358,12 @@ export class Anvil {
         ...(this.#options.curseforgeKey ? { curseforgeKey: this.#options.curseforgeKey } : {}),
         lockedPins: req.seedPins,
         ...(req.reResolveKeys.size > 0 ? { upgrade: req.reResolveKeys } : {}),
+        // A merged/rebased manifest can carry `game.from`; without this the
+        // re-lock would refuse it, and every VC operation on a base-derived
+        // instance would fail.
+        resolveBase: this.#baseResolver(req.manifest, store, false, prior, undefined, (event) => {
+          this.progress.emit(event);
+        }),
       });
       return {
         meta: {
@@ -1236,6 +1372,7 @@ export class Anvil {
           loader: req.gameMeta.loader,
           java: req.gameMeta.java,
         },
+        ...(itemLock.base ? { base: itemLock.base } : {}),
         resolved: [...itemLock.resolved, ...req.gamePackages].sort(comparePackages),
       };
     };

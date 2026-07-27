@@ -74,6 +74,38 @@ own — every `modrinth:` / `curseforge:` / URL item, and a local file that live
 the instance — is placed by its kind, into `mods/`, `resourcepacks/`, `shaderpacks/`,
 `datapacks/`, or `config/`. Paths under `saves/`, `.anvil/`, or `.anvilignore` are refused.
 
+## Starting from an existing pack
+
+An instance can start from a published modpack and describe itself as a diff
+against it, instead of listing several hundred items:
+
+```toml
+[game]
+minecraft = "26.2"
+loader    = "fabric 0.19.3"
+from      = "modrinth:all-the-mods-10@4.6"   # the base layer
+remove    = ["modrinth:unwanted-mod"]        # things the pack ships that you don't want
+
+items = [
+  "modrinth:sodium@0.6.0",     # overrides the pack's sodium, whatever version it shipped
+  "./config/tuning.toml",      # overrides the pack's config at that path
+]
+```
+
+**Your items always win.** An item of yours replaces a base member that shares its
+identity (`modrinth:sodium` replaces the pack's sodium, and the pack's old jar is
+not installed alongside) or its destination (`./config/tuning.toml` replaces the
+pack's file at `config/tuning.toml`). A `remove` entry matches on either axis too,
+and an entry matching nothing fails the lock rather than passing silently.
+
+The pack is resolved **once, at `anvil lock`**. The lock ends up holding ordinary
+pinned rows, so `anvil build` never fetches a pack and a pack changed upstream
+cannot change an instance you already locked. The lock also records which rows
+came from the base and a digest of the base's member set, so two instances built
+on the same pack can be compared without inspecting either one's members.
+
+Full precedence rules: [ARCHITECTURE.md → Base packs](ARCHITECTURE.md#base-packs-gamefrom-srcbase).
+
 ## What a commit captures
 
 A commit records the **source state** of the folder, not the build product:

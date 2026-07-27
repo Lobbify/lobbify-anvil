@@ -7,6 +7,74 @@ carry a breaking change, and each one is called out below.
 
 ### Added
 
+- **`game.from` works: an instance can start from a published modpack.** The field
+  existed in the manifest schema and the resolver refused it; it now resolves the
+  pack (Modrinth `.mrpack`; CurseForge is next) into a base layer and lays the
+  manifest's own `items` over it.
+
+  **Precedence, in full** — the effective set is `remove`, then `override`, then
+  union:
+  - a `game.remove` entry drops matching packages from **both** layers, matching on
+    **identity** (`modrinth:sodium`, same source only) or on **placement path**
+    (`"./config/x.toml"`);
+  - an instance item drops a base member sharing its **identity** *or* its
+    **placement target**. Bumping a base mod drops the whole base member, old
+    filename included, so two versions of one mod never land in `mods/` together;
+    overriding a pack config works on the path, where the two sides share no
+    catalogue identity at all;
+  - **the instance always wins.** No rule lets a base member displace something the
+    manifest asked for.
+
+  A transitive dependency the base already provides reuses the base's pin instead
+  of resolving fresh, so adding one mod cannot silently bump a mod the pack chose.
+  A root you listed yourself is never pinned that way.
+
+  The pack is resolved **once, at lock time**: the lock ends up holding ordinary
+  pinned rows, `build` never fetches a pack, and a pack changed upstream cannot
+  change an instance that already locked.
+
+- **The lock records the base.** A new `[base]` block (`ref`, `source`, `id`,
+  `version`, `archive` pin, `set` digest, `members` count) and `from_base = true`
+  on each base-derived `[[package]]`. Both are omitted entirely for an instance
+  with no base, so such a lock — and therefore its commit ids — is byte-identical
+  to before.
+
+  `set` digests the base's member set *before* the overlay, so two instances whose
+  locks carry the same `set` are known to share several hundred identical rows
+  without comparing any of them; only the unflagged overlay needs reconciling.
+
+- **New user-facing files, both under `.anvil/`** (called out because they are new
+  paths on disk): `.anvil/base/` holds a pack's loose `overrides/` as tracked local
+  files so their bytes are addressable offline, and `.anvil/base.lock` caches the
+  base's *full* member set. The instance lock holds only the survivors, and
+  re-running the overlay against survivors would make a `game.remove` entry match
+  nothing the second time round. Same pattern as `.anvil/graph.json`.
+
+- **A `warning` progress event.** Emitted for a skip the run decided on its own — a
+  base member targeting `saves/`, a server-only pack file, an item dropped by
+  `game.remove`. The CLI prints it; consumers of the event bus should ignore
+  unknown types as before.
+
+### Changed
+
+- **BREAKING: a `game.remove` entry that matches nothing now fails the lock.** It
+  was previously a silent no-op. The failure mode that justifies the break: a typo
+  in a `remove` entry left you shipping the mod you believed you had dropped, and
+  nothing said so. Applies whether or not the manifest declares a base.
+
+- **BREAKING (embedders): `resolveManifest` requires a `resolveBase` callback when
+  the manifest declares `game.from`.** Fetching a pack is I/O the resolver does not
+  own. `Anvil.lock` supplies it; a direct caller that does not gets a typed
+  `ManifestError` rather than a silently base-less instance. Manifests without
+  `game.from` are unaffected.
+
+- **`GameValue` (version control) carries `from` and `remove`.** A merge
+  reconstructs the merged manifest's `[game]` field by field, so a field it did not
+  know about was dropped silently — which for `game.from` would have turned a
+  base-derived instance into a bare one on the next lock. A base change now also
+  triggers the `@game` cascade, which is right: swapping the base can orphan every
+  mod in the instance.
+
 - **A commit now captures the whole working tree, not just the manifest and lock.**
   Undeclared files — a hand-edited `config/sodium/options.json`, an `options.txt`, a
   jar dropped into `mods/` — are recorded in the snapshot and restored by `switch`,

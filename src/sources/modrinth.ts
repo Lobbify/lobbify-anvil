@@ -40,14 +40,14 @@ const MAX_FILE_BYTES = 512 * 1024 * 1024;
 
 // --- Modrinth API shapes (only the fields we read) -------------------------
 
-interface ModrinthProject {
+export interface ModrinthProject {
   readonly id: string;
   readonly slug: string;
   readonly title: string;
   readonly project_type: string;
 }
 
-interface ModrinthFile {
+export interface ModrinthFile {
   readonly hashes: { readonly sha1?: string; readonly sha512?: string };
   readonly url: string;
   readonly filename: string;
@@ -61,7 +61,7 @@ interface ModrinthDependency {
   readonly dependency_type: string;
 }
 
-interface ModrinthVersion {
+export interface ModrinthVersion {
   readonly id: string;
   readonly project_id: string;
   readonly version_number: string;
@@ -213,7 +213,13 @@ function pickRange(
   return best;
 }
 
-function selectVersion(
+/**
+ * Select one version under a spec + the frozen clock. Exported so `game.from`
+ * base resolution selects a **pack** version by exactly the rules an item ref
+ * uses — a base picking "latest" differently from the rest of the resolver would
+ * be a second, quieter clock.
+ */
+export function selectVersion(
   versions: readonly ModrinthVersion[],
   spec: VersionSpec,
   now: number,
@@ -242,7 +248,8 @@ function selectVersion(
   }
 }
 
-function primaryFile(version: ModrinthVersion, subject: string): ModrinthFile {
+/** The version's primary downloadable file (the `.mrpack` for a modpack). */
+export function primaryFile(version: ModrinthVersion, subject: string): ModrinthFile {
   const file = version.files.find((f) => f.primary) ?? version.files[0];
   if (!file) {
     throw new UnsatisfiableTarget(subject, "the selected version has no downloadable file");
