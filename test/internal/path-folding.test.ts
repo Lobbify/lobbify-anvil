@@ -11,8 +11,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { foldPath, normalizeRelPath } from "../../src/internal/fs.js";
 import { WorktreeExclusion } from "../../index.js";
+import { foldPath, normalizeRelPath } from "../../src/internal/fs.js";
 
 describe("instance-relative path canonicalization", () => {
   it("collapses every spelling of one path to one string", () => {

@@ -280,25 +280,47 @@ carry a breaking change, and each one is called out below.
 
   Provenance is now a property of the **bytes** rather than of what the current
   lock happens to name, and it is enforced at the one place a tracked set is
-  produced. Two independent mechanisms veto, either one alone sufficing:
+  produced. That placement is deliberate: all four publish paths read the same
+  `snapshot.tracked`, so refusing at admission closes them together and keeps the
+  bytes out of `.anvil/objects/` entirely, which filtering at each egress would not.
 
-  - `.anvil/refs/replay-paths` records every replay placement target a build has
-    claimed. It is union-only, so a path stays claimed after the lock stops naming
-    it. The walk prunes those paths before reading them, and `materialize` skips
-    them for writes and deletes alike, which is what stops an inbound commit
-    writing CurseForge bytes into a joiner's instance.
-  - A candidate's content digests are checked against the instance's replay cache
-    by membership query — never enumeration — in **both** pin domains: sha256 for a
-    directly-referenced `curseforge:` item, sha1 for a base-pack member. This is
-    the half that survives a rename. It costs no extra read: the digests fold into
-    the same pass that computes the blob id, and an instance with no replay cache
-    computes none of them.
+  Which check can answer depends on what the machine knows:
 
-  `push` additionally refuses outright when a reachable snapshot tracks a claimed
-  replay path. That covers history recorded before this change, which cannot be
-  cleaned retroactively. It refuses rather than dropping the object, because
-  publishing a snapshot whose tracked entry points at an object the remote does not
-  have is broken history that fails later and somewhere else.
+  - **Sending** — a candidate's content digests are checked against this instance's
+    replay cache by membership query, never enumeration, in **both** pin domains:
+    sha256 for a directly-referenced `curseforge:` item, sha1 for a base-pack
+    member. It survives a rename, because it asks about bytes rather than paths.
+    It costs no extra read: the digests fold into the same pass that computes the
+    blob id, and an instance with no replay cache computes none of them.
+  - **Receiving** — a joiner has no replay cache and no local record, and `clone`
+    materializes before it ever runs a build, so every local signal is empty at
+    exactly the moment it is needed. The authority there is the incoming history's
+    own locks: their `provenance: "replay"` rows pin the bytes by content hash.
+    `pull`/`clone` collect that pin union across the whole transferred closure —
+    the commit that strands a jar is the one whose lock stopped naming it, so the
+    pin lives in an ancestor — and a matching object is verified and decoded in
+    memory, then dropped. It is never written to the object store, so a joiner
+    cannot re-publish what it declined to hold.
+
+  `.anvil/refs/replay-paths` records replay placement targets union-only, so a path
+  stays claimed after the lock stops naming it. It is a fallback for the one state
+  where the byte question cannot be asked — the replay cache deleted — plus the
+  claim `clone`/`pull` record before writing anything. It is deliberately not a
+  second path-based rule running alongside the content check: as one, a path that
+  had held a CurseForge jar became permanently un-committable, silently swallowing
+  whatever file a user later put there.
+
+  The pair is **not** exhaustive. With the replay cache deleted *and* the jar since
+  renamed, the bytes cannot be identified and the new path was never claimed;
+  `anvil build` warns when it finds claimed paths with no cache, which is the only
+  signal available before the fact.
+
+  `push` additionally refuses outright when reachable history tracks such bytes.
+  That covers commits recorded before this change, which cannot be cleaned
+  retroactively, and a foreign entry a merge carried in. It refuses rather than
+  dropping the object, because publishing a snapshot whose tracked entry points at
+  an object the remote does not have is broken history that fails later and
+  somewhere else.
 
   Visible effect: a stranded replay jar is no longer restored or removed by
   `switch`, and no longer reported by `status` as a dirty working tree. It stays on

@@ -101,8 +101,18 @@ function cfWorld(): FakeCurseForge {
     slug: "jei",
     classId: 6,
     files: [
-      { id: OLD_FILE, fileName: "jei-1.19.2.jar", gameVersions: ["26.2", "Fabric"], bytes: OLD_BYTES },
-      { id: NEW_FILE, fileName: "jei-1.20.1.jar", gameVersions: ["26.2", "Fabric"], bytes: NEW_BYTES },
+      {
+        id: OLD_FILE,
+        fileName: "jei-1.19.2.jar",
+        gameVersions: ["26.2", "Fabric"],
+        bytes: OLD_BYTES,
+      },
+      {
+        id: NEW_FILE,
+        fileName: "jei-1.20.1.jar",
+        gameVersions: ["26.2", "Fabric"],
+        bytes: NEW_BYTES,
+      },
     ],
   });
 }
@@ -250,6 +260,16 @@ describe("LB-722 — the >=8 MiB streaming branch", () => {
   // memory, at or over it they are streamed and the digests fold into the same
   // chunk loop. Real CurseForge jars sit on both sides of 8 MiB, and the streamed
   // half had no coverage at all.
+  //
+  // The three sizes bracket the boundary, but note what they can and cannot pin.
+  // Which SIDE of the comparison an exactly-8 MiB file falls on is not observable:
+  // both branches produce the same blob id, compute the same content digests, and
+  // run the same veto before any `putBlob`. They differ only in whether the file
+  // is held in memory. So flipping `>=` to `>` leaves the whole suite green, and
+  // that is correct rather than a coverage hole — it is an equivalent mutation,
+  // and asserting otherwise would mean asserting an implementation detail. What
+  // matters is that the streaming branch is genuinely exercised, which the
+  // over-the-threshold case does under either spelling.
   const MIB8 = 8 * 1024 * 1024;
 
   /** Deterministic pseudo-random bytes. A constant buffer would compress to

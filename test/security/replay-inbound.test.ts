@@ -17,19 +17,21 @@
  * than path-level.
  */
 
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   Anvil,
   type AnvilEnv,
   ContentStore,
+  DirTreeIO,
   type Hash,
   type LockPackage,
   type Lockfile,
   type Manifest,
   RemoteError,
   ReplayCache,
+  ServedTreeTransport,
   type SnapshotObject,
   VcObjectStore,
   canonicalJson,
@@ -38,10 +40,14 @@ import {
   hashBuffer,
   idOfEncoding,
   parseRef,
+  readReplayPaths,
+  serializeLock,
+  serializeManifest,
   writeLock,
   writeManifest,
 } from "../../index.js";
-import { pathExists } from "../../src/internal/fs.js";
+import { foldPath, pathExists } from "../../src/internal/fs.js";
+import { Refs } from "../../src/vc/refs.js";
 import { hashOf, mkTmp, rmTmp } from "../helpers/fixtures.js";
 import { FakeModrinth, fabricJar, registryWith } from "../helpers/net.js";
 
@@ -50,6 +56,30 @@ const OLD_BYTES = fabricJar("jei-1.19.2");
 const NEW_BYTES = fabricJar("jei-1.20.1");
 const OLD_TARGET = "mods/jei-1.19.2.jar";
 const NEW_TARGET = "mods/jei-1.20.1.jar";
+
+/**
+ * The positive control, carried in the SAME poisoned snapshot as the CurseForge
+ * jar. Without it, "the jar is not on disk" is satisfied by a clone that fell
+ * over before materialize ever ran — which is precisely how this clone ends
+ * (the build needs a CurseForge key nobody has). This file proves materialize
+ * reached the tracked loop and wrote what it was allowed to write, so the jar's
+ * absence is a refusal rather than an abort.
+ */
+const BENIGN_TARGET = "config/notes.txt";
+const BENIGN_BYTES = new TextEncoder().encode("a hand-edited config the joiner SHOULD receive\n");
+
+/**
+ * A tracked file at the CURRENT replay item's own placement target, holding bytes
+ * that are not the pinned ones — a recompressed or patched jar, say.
+ *
+ * No pin in the incoming history matches it, so neither the transfer's screen nor
+ * `materialize`'s pin rule can refuse it. What refuses it is the path claim
+ * `clone` records from the remote lock before it writes anything, which is the
+ * only reason that claim exists: the build that would otherwise record it runs
+ * after `materialize`, so without it the ledger is empty for the whole inbound
+ * write.
+ */
+const TAMPERED_BYTES = fabricJar("jei-1.20.1-recompressed");
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -148,60 +178,13 @@ async function makeParty(label: string): Promise<Party> {
   };
 }
 
-/**
- * A publisher whose history is exactly the shape LB-722 produces: an older commit
- * whose lock pins the old jar, then a bump, then a commit that TRACKS the old jar
- * as an undeclared file. Built by hand, because current anvil refuses to author
- * it — which is the point: the joiner has no control over what a remote serves.
- */
-async function publishPoisonedHistory(host: Party, remoteDir: string): Promise<void> {
-  // Commit 1 — the old version is a declared, lock-owned replay item.
-  const oldManifest = manifestFor(OLD_TARGET);
-  await writeManifest(host.dir, oldManifest);
-  await writeLock(host.dir, lockFor(oldManifest, replayRow(OLD_TARGET, OLD_BYTES, 5000)));
-  await new ReplayCache({ instanceDir: host.dir }).putBuffer(OLD_BYTES, hashOf(OLD_BYTES, "sha256"));
-  await mkdir(join(host.dir, "mods"), { recursive: true });
-  await writeFile(join(host.dir, OLD_TARGET), Buffer.from(OLD_BYTES));
-  const c1 = await host.anvil.commit("c1: jei 1.19.2");
-
-  // Commit 2 — bumped. The old jar is stranded on disk and no lock names it, so
-  // an anvil without the admission guard records it as an undeclared file. The
-  // tracked entry is forged directly for exactly that reason.
-  const newManifest = manifestFor(NEW_TARGET);
-  await writeManifest(host.dir, newManifest);
-  await writeLock(host.dir, lockFor(newManifest, replayRow(NEW_TARGET, NEW_BYTES, 6000)));
-  await writeFile(join(host.dir, NEW_TARGET), Buffer.from(NEW_BYTES));
-  const c2 = await host.anvil.commit("c2: bump to 1.20.1");
-
-  const commit = await host.vcStore.getCommit(c2.id);
-  const snap = await host.vcStore.getSnapshot(commit.snapshot);
-  const poisoned: SnapshotObject = {
-    ...snap,
-    tracked: [
-      ...snap.tracked,
-      { path: OLD_TARGET, blob: await host.vcStore.putBlob(OLD_BYTES) },
-    ],
-  };
-  const poisonedCommit = await host.vcStore.put({
-    ...commit,
-    snapshot: await host.vcStore.put(poisoned),
-    message: "c3: recorded by an older anvil",
-    gen: commit.gen + 1,
-    parents: [c2.id],
-  });
-  expect(c1.id.value).not.toBe(poisonedCommit.value);
-
-  // Serve it as a plain directory remote, bypassing `push` (whose gate would
-  // refuse). A joiner has no say in how a remote came to hold what it holds.
-  const { Refs } = await import("../../src/vc/refs.js");
-  const refs = new Refs(join(host.dir, ".anvil"));
-  const branch = (await refs.currentBranch()) ?? "refs/heads/main";
-  await refs.writeRef(branch, poisonedCommit);
-  const { ServedTreeTransport } = await import("../../src/remote/transport.js");
-  const { directoryIo } = await import("../../src/remote/transport.js");
+/** Serve `tip` (and everything it reaches) as a plain directory remote. */
+async function serve(host: Party, remoteDir: string, tip: Hash, manifest: Manifest): Promise<void> {
+  // Published by writing the tree directly, bypassing `push` — whose gate would
+  // refuse. A joiner has no say in how a remote came to hold what it holds.
   const transport = new ServedTreeTransport(
-    { name: "src", kind: "dir", url: remoteDir },
-    directoryIo(remoteDir),
+    { name: "src", kind: "url", url: remoteDir },
+    new DirTreeIO(remoteDir),
   );
   const objects: { id: Hash; raw: Uint8Array }[] = [];
   const seen = new Set<string>();
@@ -215,7 +198,7 @@ async function publishPoisonedHistory(host: Party, remoteDir: string): Promise<v
       objects.push({ id, raw });
     }
   };
-  const stack: Hash[] = [poisonedCommit];
+  const stack: Hash[] = [tip];
   while (stack.length > 0) {
     const id = stack.pop();
     if (!id) {
@@ -237,14 +220,78 @@ async function publishPoisonedHistory(host: Party, remoteDir: string): Promise<v
   }
   await transport.publish({
     branch: "main",
-    commit: poisonedCommit,
-    manifest: JSON.stringify(newManifest),
-    lock: (await import("../../index.js")).serializeLock(
-      lockFor(newManifest, replayRow(NEW_TARGET, NEW_BYTES, 6000)),
-    ),
+    commit: tip,
+    manifest: serializeManifest(manifest),
+    lock: serializeLock(lockFor(manifest, replayRow(NEW_TARGET, NEW_BYTES, 6000))),
     vcObjects: objects,
     contentObjects: [],
   });
+}
+
+/**
+ * A publisher whose history is exactly the shape LB-722 produces: an older commit
+ * whose lock pins the old jar, then a bump, then a commit that TRACKS the old jar
+ * as an undeclared file. Built by hand, because current anvil refuses to author
+ * it — which is the point: the joiner has no control over what a remote serves.
+ *
+ * Returns the clean tip and the poisoned one so a caller can serve the clean
+ * history first and poison the remote afterwards, which is what a joiner that
+ * already cloned once experiences: a fast-forward `pull`, not a fresh `clone`.
+ */
+async function buildPoisonedHistory(
+  host: Party,
+): Promise<{ clean: Hash; poisoned: Hash; manifest: Manifest }> {
+  // Commit 1 — the old version is a declared, lock-owned replay item.
+  const oldManifest = manifestFor(OLD_TARGET);
+  await writeManifest(host.dir, oldManifest);
+  await writeLock(host.dir, lockFor(oldManifest, replayRow(OLD_TARGET, OLD_BYTES, 5000)));
+  await new ReplayCache({ instanceDir: host.dir }).putBuffer(
+    OLD_BYTES,
+    hashOf(OLD_BYTES, "sha256"),
+  );
+  await mkdir(join(host.dir, "mods"), { recursive: true });
+  await writeFile(join(host.dir, OLD_TARGET), Buffer.from(OLD_BYTES));
+  const c1 = await host.anvil.commit("c1: jei 1.19.2");
+
+  // Commit 2 — bumped. The old jar is stranded on disk and no lock names it, so
+  // an anvil without the admission guard records it as an undeclared file. The
+  // tracked entry is forged directly for exactly that reason.
+  const newManifest = manifestFor(NEW_TARGET);
+  await writeManifest(host.dir, newManifest);
+  await writeLock(host.dir, lockFor(newManifest, replayRow(NEW_TARGET, NEW_BYTES, 6000)));
+  await writeFile(join(host.dir, NEW_TARGET), Buffer.from(NEW_BYTES));
+  const c2 = await host.anvil.commit("c2: bump to 1.20.1");
+
+  const commit = await host.vcStore.getCommit(c2.id);
+  const snap = await host.vcStore.getSnapshot(commit.snapshot);
+  const poisoned: SnapshotObject = {
+    ...snap,
+    tracked: [
+      ...snap.tracked,
+      { path: BENIGN_TARGET, blob: await host.vcStore.putBlob(BENIGN_BYTES) },
+      { path: OLD_TARGET, blob: await host.vcStore.putBlob(OLD_BYTES) },
+      { path: NEW_TARGET, blob: await host.vcStore.putBlob(TAMPERED_BYTES) },
+    ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
+  };
+  const poisonedCommit = await host.vcStore.put({
+    ...commit,
+    snapshot: await host.vcStore.put(poisoned),
+    message: "c3: recorded by an older anvil",
+    gen: commit.gen + 1,
+    parents: [c2.id],
+  });
+  expect(c1.id.value).not.toBe(poisonedCommit.value);
+
+  const refs = new Refs(join(host.dir, ".anvil"));
+  const branch = (await refs.currentBranch()) ?? "refs/heads/main";
+  await refs.writeRef(branch, poisonedCommit);
+  return { clean: c2.id, poisoned: poisonedCommit, manifest: newManifest };
+}
+
+/** Build the poisoned history and serve its poisoned tip in one step. */
+async function publishPoisonedHistory(host: Party, remoteDir: string): Promise<void> {
+  const built = await buildPoisonedHistory(host);
+  await serve(host, remoteDir, built.poisoned, built.manifest);
 }
 
 describe("LB-722 CRITICAL — clone never writes CurseForge bytes into a joiner", () => {
@@ -267,8 +314,16 @@ describe("LB-722 CRITICAL — clone never writes CurseForge bytes into a joiner"
     expect(await pathExists(join(joiner.dir, ".anvil", "refs", "replay-paths"))).toBe(false);
     expect(await pathExists(join(joiner.dir, ".anvil", "replay-cache"))).toBe(false);
 
-    await joiner.anvil.clone(remoteDir, { offline: true }).catch(() => undefined);
+    // The clone's BUILD fails (a CurseForge key nobody here has), long after the
+    // history transfer and the materialize this test is about.
+    await joiner.anvil.clone(remoteDir).catch(() => undefined);
 
+    // 0. The positive control: the benign tracked file from the SAME snapshot IS
+    //    written. Without this, every assertion below is also satisfied by a
+    //    clone that died before materialize ran.
+    expect(await readFile(join(joiner.dir, BENIGN_TARGET), "utf8")).toBe(
+      new TextDecoder().decode(BENIGN_BYTES),
+    );
     // 1. The CurseForge jar is not written into the joiner's instance.
     expect(await pathExists(join(joiner.dir, OLD_TARGET))).toBe(false);
     // 2. Its bytes are not in the joiner's object store either, so the joiner is
@@ -277,8 +332,18 @@ describe("LB-722 CRITICAL — clone never writes CurseForge bytes into a joiner"
     expect(await allFileNames(join(joiner.dir, ".anvil", "objects"))).not.toContain(
       blobIdOf(OLD_BYTES).value,
     );
-    // 3. The refusal is reported, not silent.
+    // 3. The refusal is reported, not silent — and reported per PATH, which only
+    //    `materialize` can do. The transfer's own warning names no path, so this
+    //    is what distinguishes "materialize declined to write it" from
+    //    "materialize blew up on an object the transfer had already dropped".
     expect(warnings.some((w) => w.toLowerCase().includes("replay"))).toBe(true);
+    expect(warnings.some((w) => w.includes(OLD_TARGET))).toBe(true);
+    // 4. `clone` claims the remote lock's replay targets before it writes
+    //    anything, so a tracked file sitting at the CURRENT replay item's target
+    //    is refused too — even though its bytes match no pin in the history and
+    //    the build that would otherwise record that path has not run yet.
+    expect([...(await readReplayPaths(joiner.dir))]).toContain(foldPath(NEW_TARGET));
+    expect(await pathExists(join(joiner.dir, NEW_TARGET))).toBe(false);
   });
 
   it("GATE no-onward-rehost: the joiner cannot push the history it declined to store", async () => {
@@ -288,7 +353,9 @@ describe("LB-722 CRITICAL — clone never writes CurseForge bytes into a joiner"
     await publishPoisonedHistory(host, remoteDir);
 
     const joiner = await makeParty("lb722-joiner2");
-    await joiner.anvil.clone(remoteDir, { offline: true }).catch(() => undefined);
+    await joiner.anvil.clone(remoteDir).catch(() => undefined);
+    // The import already declined the bytes, so the joiner has nothing to forward.
+    expect(await joiner.vcStore.has(blobIdOf(OLD_BYTES))).toBe(false);
 
     // Forwarding the poisoned history to a third party must fail loudly rather
     // than publish a snapshot pointing at an object the joiner does not have.
@@ -297,5 +364,69 @@ describe("LB-722 CRITICAL — clone never writes CurseForge bytes into a joiner"
     await joiner.anvil.addRemote("onward", thirdParty);
     await expect(joiner.anvil.push("onward")).rejects.toBeInstanceOf(RemoteError);
     expect(await allFileNames(thirdParty)).not.toContain(blobIdOf(OLD_BYTES).value);
+    // Nothing at all was published — a partial tree is a broken remote, not a
+    // safe one, and the benign file must not have been shipped either.
+    expect(await allFileNames(thirdParty)).not.toContain(blobIdOf(BENIGN_BYTES).value);
+  });
+
+  it("GATE inbound-pull: the same refusal holds on the pull path, not just clone", async () => {
+    const host = await makeParty("lb722-host3");
+    const remoteDir = await mkTmp("lb722-served3");
+    dirs.push(remoteDir);
+    await publishPoisonedHistory(host, remoteDir);
+
+    // A joiner with an unborn HEAD that pulls takes `pullInstance`'s adopt-like
+    // branch — a different call site from `clone`, with its own materialize.
+    const joiner = await makeParty("lb722-joiner3");
+    const warnings: string[] = [];
+    joiner.anvil.progress.on((e) => {
+      if (e.type === "warning") {
+        warnings.push(e.message);
+      }
+    });
+    await joiner.anvil.addRemote("origin", remoteDir);
+    await joiner.anvil.pull("origin").catch(() => undefined);
+
+    expect(await readFile(join(joiner.dir, BENIGN_TARGET), "utf8")).toBe(
+      new TextDecoder().decode(BENIGN_BYTES),
+    );
+    expect(await pathExists(join(joiner.dir, OLD_TARGET))).toBe(false);
+    expect(await joiner.vcStore.has(blobIdOf(OLD_BYTES))).toBe(false);
+    expect(warnings.some((w) => w.toLowerCase().includes("replay"))).toBe(true);
+    expect(warnings.some((w) => w.includes(OLD_TARGET))).toBe(true);
+  });
+
+  it("GATE inbound-pull-ff: an established joiner fast-forwarding onto the poison is refused", async () => {
+    // The common case, and a different `materializeSnapshot` call site from both
+    // of the above: the joiner already has this pack, so `pull` takes the
+    // fast-forward branch with a `previous` snapshot rather than adopting.
+    const host = await makeParty("lb722-host4");
+    const remoteDir = await mkTmp("lb722-served4");
+    dirs.push(remoteDir);
+    const built = await buildPoisonedHistory(host);
+
+    // The remote serves clean history first; the joiner clones that.
+    await serve(host, remoteDir, built.clean, built.manifest);
+    const joiner = await makeParty("lb722-joiner4");
+    const warnings: string[] = [];
+    joiner.anvil.progress.on((e) => {
+      if (e.type === "warning") {
+        warnings.push(e.message);
+      }
+    });
+    await joiner.anvil.clone(remoteDir).catch(() => undefined);
+    expect(await pathExists(join(joiner.dir, OLD_TARGET))).toBe(false);
+
+    // The remote is then poisoned, and the joiner pulls the update.
+    await serve(host, remoteDir, built.poisoned, built.manifest);
+    warnings.length = 0;
+    await joiner.anvil.pull("origin").catch(() => undefined);
+
+    expect(await readFile(join(joiner.dir, BENIGN_TARGET), "utf8")).toBe(
+      new TextDecoder().decode(BENIGN_BYTES),
+    );
+    expect(await pathExists(join(joiner.dir, OLD_TARGET))).toBe(false);
+    expect(await joiner.vcStore.has(blobIdOf(OLD_BYTES))).toBe(false);
+    expect(warnings.some((w) => w.includes(OLD_TARGET))).toBe(true);
   });
 });

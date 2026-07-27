@@ -354,7 +354,10 @@ async function assertPushableHistory(deps: SyncDeps, history: ReachableHistory):
     if (history.pins.size > 0) {
       const bytes = deps.vcStore.decodeRaw(entry.blob, raw);
       if (bytes && matchesReplayPin(replayDigestsOf(bytes), history.pins)) {
-        refuse(entry.path, "a lock in this history pins the tracked file's bytes as CurseForge content");
+        refuse(
+          entry.path,
+          "a lock in this history pins the tracked file's bytes as CurseForge content",
+        );
         return;
       }
     }

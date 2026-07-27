@@ -12,11 +12,11 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  ReplayVeto,
   type Hash,
   type LockPackage,
   type Lockfile,
   type Placement,
+  ReplayVeto,
   VcObjectStore,
   WorktreeExclusion,
   buildOwnedPaths,

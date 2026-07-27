@@ -17,6 +17,7 @@ import {
   NetworkAcquirer,
   ReplayAcquirer,
   ReplayCache,
+  ReplayVeto,
   UnsatisfiableTarget,
   VcObjectStore,
   WorktreeExclusion,
@@ -25,7 +26,6 @@ import {
   currentPlatform,
   encodeObject,
   idOfEncoding,
-  ReplayVeto,
   serializeLock,
   trackWorktree,
 } from "../../index.js";

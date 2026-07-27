@@ -85,10 +85,10 @@ import type { InstanceRegistryEntry } from "./store/index.js";
 import {
   ContentStore,
   ReplayCache,
+  ReplayVeto,
   hashBuffer,
   hashFile,
   readInstanceRegistry,
-  ReplayVeto,
   upsertInstance,
   writeInstanceRegistry,
 } from "./store/index.js";

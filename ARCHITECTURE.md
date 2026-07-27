@@ -410,9 +410,31 @@ file in the instance tree, and the version-control walk (`src/vc/worktree.ts`)
 records undeclared files without consulting the lock — so once no lock names a
 superseded jar's path, nothing about the file itself said where its bytes came
 from. Provenance is therefore also enforced at **admission**, in the single
-place a snapshot's tracked set is produced: `src/store/replay-provenance.ts`
-supplies a union-only ledger of every replay placement target a build has
-claimed (`.anvil/refs/replay-paths`) and a content check against the replay
-cache by membership query. Either vetoes on its own — the ledger survives
-deletion of the cache, the content check survives a rename — and `push` refuses
-outright if history recorded before this existed still tracks a claimed path.
+place a snapshot's tracked set is produced (`src/store/replay-provenance.ts`).
+Admission is the right layer because all four publish paths — `pushInstance`,
+a served tree, a git remote, a room — read the same `snapshot.tracked`, so one
+refusal closes all of them, and the bytes never reach `.anvil/objects/` at all.
+Filtering at each egress instead would leave them sitting in the object store.
+
+The instrument differs by direction, and the asymmetry is the design:
+
+- **Sending**, the candidate's content digests are asked of this instance's
+  replay cache by membership query — never enumeration. Definitional, and it
+  survives a rename, because it is a question about bytes rather than paths.
+- **Receiving**, there is no local cache and no ledger: a fresh `clone` has
+  neither, and `materializeSnapshot` runs before the first build. The authority
+  is instead the incoming history's own locks, whose `provenance: "replay"` rows
+  pin the bytes by content hash. `importHistory` collects that pin union across
+  the **whole** transferred closure before deciding about any tracked blob —
+  the stranding commit's lock is precisely the one that stopped naming the file,
+  so the pin lives in an ancestor — and a blob that matches is decoded and
+  content-address-verified in memory, then dropped, never written.
+
+The union-only path ledger (`.anvil/refs/replay-paths`) is narrower than either:
+it covers the one state where the byte question cannot be asked (the replay
+cache deleted), plus the claim `clone`/`pull` record from the remote lock before
+writing anything. It is deliberately not a parallel path-based rule — as one, a
+path that had once held a CurseForge jar became permanently un-committable, for
+whatever file later occupied it. `push` additionally refuses outright when
+reachable history tracks such bytes, which is the only reach into commits made
+before any of this existed.

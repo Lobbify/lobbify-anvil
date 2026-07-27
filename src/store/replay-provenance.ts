@@ -298,21 +298,21 @@ export class ReplayVeto {
   }
 }
 
+const REFUSED_TAIL =
+  "Those bytes are fetched per-client under your own API key and are never re-hosted, so they " +
+  "are not written here. Add the item to `anvil.toml` and run `anvil build` with your own " +
+  "CurseForge key to obtain it.";
+
+const UNVERIFIED_TAIL =
+  "the per-instance replay cache is missing, so its bytes cannot be checked. Re-run `anvil build` " +
+  "to restore the cache; if the file is your own, move it to a path no replay item has used.";
+
 /** The message a refusal to materialize incoming replay bytes reports. */
 export function refusedReplayWarning(relPath: string): string {
-  return (
-    `skipping "${relPath}": the incoming history records CurseForge (replay) content at that ` +
-    "path. Those bytes are fetched per-client under your own API key and are never re-hosted, so " +
-    "they are not written here. Add the item to `anvil.toml` and run `anvil build` with your own " +
-    "CurseForge key to obtain it."
-  );
+  return `skipping "${relPath}": the incoming history records CurseForge (replay) content at that path. ${REFUSED_TAIL}`;
 }
 
 /** The message a `veto-unverified` verdict reports. */
 export function unverifiedReplayWarning(relPath: string): string {
-  return (
-    `not recording "${relPath}": a previous build placed CurseForge (replay) content there, and ` +
-    "the per-instance replay cache is missing, so its bytes cannot be checked. Re-run `anvil build` " +
-    "to restore the cache; if the file is your own, move it to a path no replay item has used."
-  );
+  return `not recording "${relPath}": a previous build placed CurseForge (replay) content there, and ${UNVERIFIED_TAIL}`;
 }

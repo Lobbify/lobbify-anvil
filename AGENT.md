@@ -157,13 +157,32 @@ Every stage is gated on these. A PR that could violate one must prove it cannot.
    cache and is *placed* as a file. At the **storage layer** — CF bytes materialize into
    a per-instance `replay-cache/` that the store-serve, GC, transfer, and export code
    physically cannot enumerate. And at **version-control admission** — the working-tree
-   walk refuses a candidate whose bytes are replay bytes, via the union-only path ledger
-   `.anvil/refs/replay-paths` plus a content check against the replay cache
-   (`src/store/replay-provenance.ts`), so a jar left behind by a version bump cannot be
-   committed or pushed once no lock names it. **Provenance is a property of the bytes,
-   never of whether the current lock names the path** — a review rule in its own right.
-   Keys are never serialized into lock/config/events/logs; only an env-var *reference* is
-   stored. `.mrpack` export omits replay items with a clear warning.
+   walk refuses a candidate whose bytes are replay bytes (`src/store/replay-provenance.ts`),
+   so a jar left behind by a version bump cannot be committed or pushed once no lock
+   names it. **Provenance is a property of the bytes, never of whether the current lock
+   names the path** — a review rule in its own right. Keys are never serialized into
+   lock/config/events/logs; only an env-var *reference* is stored. `.mrpack` export omits
+   replay items with a clear warning.
+
+   Which instrument answers "are these bytes replay bytes" depends on what the asking
+   side knows, and getting that pairing wrong is the mistake to watch for:
+
+   - **Sending** (`trackOne`, and `push`'s backstop) — a membership query against this
+     instance's replay cache. Definitional: bytes in the cache came from CurseForge.
+   - **Receiving** (`importHistory`, `materializeSnapshot`) — the `provenance: "replay"`
+     pins carried by the locks in the **incoming history itself**, unioned across the
+     whole transferred closure. A joiner has no replay cache and no ledger, so anything
+     keyed on local state is empty exactly when it is needed. The union must span the
+     closure and not just the tip: the commit that strands a jar is the one whose lock
+     stopped naming it, so the pin lives in an ancestor's lock.
+   - The union-only path ledger `.anvil/refs/replay-paths` is a **fallback for one state**
+     — the replay cache deleted, so the byte question cannot be asked — plus the claim
+     `clone`/`pull` record before writing anything. It is not a path-based rule running
+     in parallel with the content check: making it one meant a path that once held a
+     CurseForge jar was silently un-committable forever, including for a user's own
+     replacement file. The two do **not** compose into a complete guard; the shared blind
+     spot (cache deleted *and* the jar renamed) is documented in `replay-provenance.ts`
+     and warned about at build time. Do not describe them as exhaustive.
 
 ## Security must-dos (later stages — do not regress)
 
