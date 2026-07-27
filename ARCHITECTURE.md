@@ -120,8 +120,34 @@ items = ["modrinth:sodium@0.6.0"]
 ```
 
 That instance is two layers: the pack's members underneath, the manifest's own
-`items` on top. `src/base/` owns both halves — `mrpack-base.ts` turns a pack
-reference into a pinned member set, `overlay.ts` lays the instance over it.
+`items` on top. `src/base/` owns both halves — `mrpack-base.ts` (Modrinth) and
+`cf-base.ts` (CurseForge) turn a pack reference into a pinned member set,
+`overlay.ts` lays the instance over it, and `diff.ts` compares two member sets.
+
+### The two formats pin differently, and that is the point
+
+A Modrinth `.mrpack` index names each member by **URL + hash**. A CurseForge
+`manifest.json` names each member by a **`(projectID, fileID)` identity pair** and
+states nothing else. So the two sources do genuinely different work:
+
+|                        | `.mrpack`                              | CurseForge pack                        |
+| ---------------------- | -------------------------------------- | -------------------------------------- |
+| member named by        | URL + sha512/sha1                      | `(projectID, fileID)`                   |
+| identity recovery      | reverse the CDN URL, 2 batched calls   | already in the manifest                 |
+| bytes at lock time     | every member downloaded                | **none** — metadata only                |
+| pack can lie about     | hashes, URLs, paths                    | nothing about a member                  |
+| diff two versions      | compare content addresses              | set difference on the pair              |
+
+`cf-base.ts` therefore downloads exactly one thing: the pack archive, to read its
+`manifest.json` and `overrides/`. Member facts (filename, size, class, the attested
+sha1 it pins) come from the CurseForge API for each pair. That is what makes a
+482-member pack usable as a base, and what makes `diffMemberSets` cheap enough to
+run on two pack versions.
+
+Members are emitted `provenance: "replay"` with no `url`, so the replay-never-rehosted
+machinery routes them away from the shared store without `cf-base.ts` enforcing
+anything itself. Their pin is sha1 — the strongest hash CurseForge attests for a file
+— which is why `ReplayCache` carries a sha1 domain alongside sha256.
 
 ### Precedence
 
@@ -200,8 +226,9 @@ lock must not carry, kept where the next `lock` can read it.
 
 `BasePackSource` (`src/base/types.ts`) is the seam. An implementation owes the
 resolver fully-pinned members with decided placements, catalogue identity where
-it exists, and its own bounds on untrusted pack data. CurseForge slots in beside
-Modrinth without the resolver changing.
+it exists, and its own bounds on untrusted pack data. CurseForge was added beside
+Modrinth without the resolver changing: `buildBaseRegistry()` gained one entry,
+and `anvil.ts` already looked the source up by the ref's kind.
 
 ## Build pipeline (`src/build/`)
 

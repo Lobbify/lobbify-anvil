@@ -248,9 +248,40 @@ export CURSEFORGE_API_KEY=…      # your key; stays out of anvil.toml / anvil.l
 
 Per CurseForge's terms, CF items are **replay** provenance: each client re-fetches the
 bytes from CurseForge itself under its own key. anvil **never re-hosts, transfers,
-pushes, or exports** CurseForge bytes — `.mrpack` export omits them with a warning.
-Everything else (Mojang files, Modrinth jars, local files) is `copy` provenance:
-cacheable and shareable through the content store.
+pushes, or exports** CurseForge project files — `.mrpack` export omits them with a
+warning. Everything else (Mojang files, Modrinth jars, local files) is `copy`
+provenance: cacheable and shareable through the content store.
+
+### A CurseForge pack as a base
+
+`game.from` accepts a CurseForge modpack as well as a Modrinth one:
+
+```toml
+[game]
+minecraft = "26.2"
+loader    = "neoforge 21.1.5"
+from      = "curseforge:715572@8323938"   # project id @ file id
+```
+
+A CurseForge `manifest.json` names each member by a `(projectID, fileID)` pair and
+nothing else — no URL, no hash, no filename. anvil uses that directly rather than
+flattening it into the `.mrpack` shape, which buys two things:
+
+- **Resolving a pack downloads no member bytes.** Every member fact is read from the
+  CurseForge API for its pair, so a 482-member pack locks in metadata calls rather
+  than tens of gigabytes of jars that would be re-fetched at build time anyway.
+- **Two pack versions diff by set difference** — no hashing, no filename matching.
+  `diffMemberSets(before, after)` returns `{ added, removed, updated, unchanged }`.
+  All the Mods 10 v7.1 → v7.2 is 482 members each and differs in 90 of them.
+
+Members pin `(projectID, fileID)` plus CurseForge's attested sha1, the strongest hash
+its API exposes for a file.
+
+> **One thing a CurseForge base *does* share.** The pack's `overrides/` tree (the
+> pack author's config files, not project files) is tracked under `.anvil/base/` as
+> ordinary `local` items, so its bytes do enter the shared content store and can be
+> pushed to a remote like any other local file. Only *project files* — the mod jars
+> in `files[]` — carry the replay boundary. See SECURITY.md.
 
 ## Trust model & security
 

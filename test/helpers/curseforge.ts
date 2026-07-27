@@ -35,6 +35,12 @@ export interface FakeCfFileSpec {
   readonly badSha1?: string;
   /** Serve different bytes at the CDN than were indexed (tamper simulation). */
   readonly cdnBytes?: Uint8Array;
+  /**
+   * Route normally, but answer with a body claiming a different `(modId, id)`
+   * than was asked for. Models a response that points at some other artifact —
+   * the thing a caller pinning by `(projectID, fileID)` must cross-check.
+   */
+  readonly lieAboutIdentity?: { readonly modId?: number; readonly id?: number };
 }
 
 export interface FakeCfModSpec {
@@ -57,8 +63,8 @@ function fileJson(modId: number, f: FakeCfFileSpec): unknown {
   const sha1 = f.badSha1 ?? sha1hex(f.bytes);
   const fp = f.badFingerprint ?? curseforgeFingerprint(f.bytes);
   return {
-    id: f.id,
-    modId,
+    id: f.lieAboutIdentity?.id ?? f.id,
+    modId: f.lieAboutIdentity?.modId ?? modId,
     displayName: f.displayName ?? f.fileName,
     fileName: f.fileName,
     fileDate: f.fileDate ?? "2026-06-01T00:00:00Z",

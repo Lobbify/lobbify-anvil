@@ -7,10 +7,37 @@ carry a breaking change, and each one is called out below.
 
 ### Added
 
+- **`game.from` accepts a CurseForge modpack**, alongside Modrinth: `game.from =
+  "curseforge:715572@8323938"`. It resolves through the same `BasePackSource`
+  contract, so precedence, `game.remove`, the `[base]` lock block, the `set`
+  digest and `.anvil/base.lock` all behave identically.
+
+  It is **not** the `.mrpack` path with a different fetcher, because a CurseForge
+  `manifest.json` is a genuinely different (and better) primitive: it names each
+  member by a stable `(projectID, fileID)` identity pair and states nothing else
+  — no URL, no hash, no filename. Two consequences:
+
+  - **Resolving a pack downloads no member bytes.** Every member fact comes from
+    the CurseForge API for that pair, so a 482-member pack locks in metadata
+    calls instead of ~15 GB of jars that would be discarded and re-fetched at
+    build time anyway. The pack archive is the only thing fetched.
+  - **Two pack versions diff as a plain set difference**, with no hashing and no
+    filename matching — exposed as `diffMemberSets(before, after)` →
+    `{ added, removed, updated, unchanged }`. Measured against the live API on
+    2026-07-26, All the Mods 10 v7.1 → v7.2 is 482 members each and differs in
+    90 of them (392 unchanged, 89 updated, 1 added, 1 removed).
+
+  Members are pinned by `(projectID, fileID)` plus CurseForge's attested **sha1**
+  — the strongest hash the API offers for a file (algo 1; algo 2 is md5). They
+  carry `provenance: "replay"` and no rehostable `url`, so the existing
+  replay-never-rehosted machinery applies to them unchanged.
+
+  CurseForge is **bring-your-own-key**: anvil ships none. A base resolve without
+  one fails with a typed `SourceKeyMissing`, never a silent skip or an empty pack.
+
 - **`game.from` works: an instance can start from a published modpack.** The field
   existed in the manifest schema and the resolver refused it; it now resolves the
-  pack (Modrinth `.mrpack`; CurseForge is next) into a base layer and lays the
-  manifest's own `items` over it.
+  pack into a base layer and lays the manifest's own `items` over it.
 
   **Precedence, in full** — the effective set is `remove`, then `override`, then
   union:
@@ -56,6 +83,26 @@ carry a breaking change, and each one is called out below.
   unknown types as before.
 
 ### Changed
+
+- **BREAKING (internal): the per-instance replay cache now has two hash domains.**
+  It previously refused any pin that was not sha256; it now stores an object under
+  whichever algorithm its lock row pins, in a per-algo directory — sha256 keeps
+  the existing `objects/` path (so caches on disk are unaffected), sha1 gets
+  `objects-sha1/`. `ReplayCache.objectPath()` no longer throws for a sha1 hash.
+
+  This exists because a CurseForge **base pack** member is pinned from catalogue
+  metadata rather than from bytes, and sha1 is the strongest hash CurseForge
+  attests for a file. Refusing it would have forced the alternative: downloading
+  every member at lock time purely to compute a sha256, discarding the bytes, and
+  downloading them again at build time — which is what makes a 482-member pack
+  unusable as a base.
+
+  The property that matters is unchanged: **bytes are verified against the lock's
+  pin, in that pin's own algorithm, before they land**, and a mismatch is a hard
+  `ShaMismatch` with nothing admitted. sha1 is weaker tamper-evidence than sha256
+  and is used only where CurseForge offers nothing stronger. A directly-referenced
+  `curseforge:` item is unaffected and still pins sha256, because that path
+  downloads the bytes anyway.
 
 - **BREAKING: a `game.remove` entry that matches nothing now fails the lock.** It
   was previously a silent no-op. The failure mode that justifies the break: a typo

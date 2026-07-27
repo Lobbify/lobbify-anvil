@@ -22,11 +22,32 @@
  * sha-only transfer/serve path cannot leak a CurseForge jar. This is a
  * standing, hard review rule (see AGENT.md "Replay-never-rehosted").
  *
- * It is a small content-addressed cache in its own right — sha256 only (anvil's
- * canonical domain), sharded, written `0444` (immutable), atomic (`tmp → fsync →
- * rename`), and it verifies bytes against their pin on admission — but it is a
- * deliberately **separate type** from {@link ContentStore} so the separation is
- * structural, not a convention.
+ * It is a small content-addressed cache in its own right — sharded, written
+ * `0444` (immutable), atomic (`tmp → fsync → rename`), and it verifies bytes
+ * against their pin on admission — but it is a deliberately **separate type**
+ * from {@link ContentStore} so the separation is structural, not a convention.
+ *
+ * ## Two hash domains, like the shared store
+ *
+ * An object is addressed by **the algorithm its lock row pins**, in a per-algo
+ * domain directory — the same shape {@link ContentStore.domainDir} uses. sha256
+ * stays at `objects/`, so existing caches are unaffected.
+ *
+ * A sha1 domain exists because a CurseForge **base pack** member is pinned from
+ * catalogue metadata rather than from bytes: the pack names `(projectID,
+ * fileID)`, and the strongest hash the CurseForge API attests for a file is sha1
+ * (algo 1; algo 2 is md5). Resolving a 482-member pack therefore downloads
+ * nothing, which is the entire reason a pack that size is usable as a base — but
+ * it means the pin arrives in the sha1 domain. Refusing it here would have
+ * forced the alternative: fetching every member at lock time purely to compute a
+ * sha256, discarding the bytes, and fetching them again at build time.
+ *
+ * The security property that matters is unchanged: **bytes are verified against
+ * the lock's pin before they land**, in whichever algorithm that pin uses, and a
+ * mismatch is a hard {@link ShaMismatch} with nothing admitted. sha1 is weaker
+ * tamper-evidence than sha256 and is used only where CurseForge offers nothing
+ * better; a directly-referenced `curseforge:` item still pins sha256, because
+ * that path downloads the bytes anyway.
  */
 
 import { rename, stat, unlink } from "node:fs/promises";
@@ -77,19 +98,17 @@ export class ReplayCache {
   }
 
   /**
-   * The absolute on-disk path a replay object with `hash` occupies. sha256 only
-   * — a replay object is always in anvil's canonical domain. A sha1 hash is a
-   * programming error (the Mojang asset domain never holds a replay object).
+   * The object directory for a hash algorithm. sha256 keeps the original
+   * `objects/` path so existing caches keep resolving; sha1 gets its own domain
+   * (see the module doc for why a replay pin may be sha1).
    */
+  domainDir(algo: Hash["algo"]): string {
+    return algo === "sha1" ? join(this.root, "objects-sha1") : join(this.root, "objects");
+  }
+
+  /** The absolute on-disk path a replay object with `hash` occupies. */
   objectPath(hash: Hash): string {
-    if (hash.algo !== "sha256") {
-      throw new ShaMismatch(
-        "replay-cache",
-        { algo: "sha256", value: hash.value },
-        { algo: hash.algo, value: hash.value },
-      );
-    }
-    return join(this.root, "objects", shardOf(hash.value), hash.value);
+    return join(this.domainDir(hash.algo), shardOf(hash.value), hash.value);
   }
 
   /** True if the replay object is already cached (a prior build fetched it). */
@@ -103,19 +122,13 @@ export class ReplayCache {
   }
 
   /**
-   * Admit a replay byte stream, verifying it hashes to `expected` (sha256)
-   * before it lands ({@link ShaMismatch} otherwise — the bytes never enter the
-   * cache if they do not match the lock's pin). Dedups when already present.
+   * Admit a replay byte stream, verifying it hashes to `expected` **in that
+   * pin's own algorithm** before it lands ({@link ShaMismatch} otherwise — the
+   * bytes never enter the cache if they do not match the lock's pin). Dedups
+   * when already present.
    */
   async #putStream(source: Readable, expected: Hash): Promise<{ deduped: boolean }> {
-    if (expected.algo !== "sha256") {
-      throw new ShaMismatch(
-        "replay-cache admission",
-        { algo: "sha256", value: expected.value },
-        { algo: expected.algo, value: expected.value },
-      );
-    }
-    const { tmpPath, hash } = await writeTemp(this.#tmpDir, source, "sha256");
+    const { tmpPath, hash } = await writeTemp(this.#tmpDir, source, expected.algo);
     if (!hashEquals(hash, expected)) {
       await unlink(tmpPath).catch(() => undefined);
       throw new ShaMismatch("replay-cache admission", expected, hash);

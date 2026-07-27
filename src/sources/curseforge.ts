@@ -86,7 +86,12 @@ const CF_HASH_SHA1 = 1;
 
 // --- CurseForge Core API v1 shapes (only the fields we read) ---------------
 
-interface CfMod {
+/**
+ * A CurseForge mod (project). Exported as `CfModMetadata` because the base-pack
+ * resolver reads `classId`/`slug` from it to give a pack member the same
+ * identity a direct `curseforge:` item would get.
+ */
+export interface CfModMetadata {
   readonly id: number;
   readonly name: string;
   readonly slug: string;
@@ -103,7 +108,12 @@ interface CfFileDependency {
   readonly relationType: number;
 }
 
-interface CfFile {
+/**
+ * One CurseForge file. Exported as `CfFileMetadata` because a base pack pins its
+ * members from this alone — `hashes` (algo 1 = sha1) and `fileName`/`fileLength`
+ * are everything a lock row needs, with no download.
+ */
+export interface CfFileMetadata {
   readonly id: number;
   readonly modId: number;
   readonly displayName: string;
@@ -115,6 +125,11 @@ interface CfFile {
   readonly fileFingerprint?: number;
   readonly dependencies?: readonly CfFileDependency[];
 }
+
+// Short local aliases — the exported names carry the `Metadata` suffix so they
+// read unambiguously at the call sites outside this module.
+type CfMod = CfModMetadata;
+type CfFile = CfFileMetadata;
 
 function decodeJson<T>(bytes: Uint8Array): T {
   return JSON.parse(new TextDecoder().decode(bytes)) as T;

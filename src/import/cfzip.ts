@@ -57,13 +57,13 @@ import type {
   ManifestItem,
   ObjectSink,
 } from "../types/index.js";
+import { parseCfManifest } from "./cf-manifest.js";
 import type { GamePinsForImport } from "./mrpack.js";
 import { importOverrideTree } from "./pack-common.js";
 import { readZipEntry } from "./zip-read.js";
 
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_CFZIP_BYTES = 128 * 1024 * 1024;
-const MAX_PACK_FILES = 10_000;
 
 /** CurseForge classId → kind (the placeable subset; else infer from bytes). */
 const CF_CLASS_KIND: ReadonlyMap<number, ItemKind> = new Map<number, ItemKind>([
@@ -104,96 +104,6 @@ export interface ImportCfZipResult {
   readonly warnings: readonly string[];
 }
 
-// --- manifest.json shapes (only the fields we read) ------------------------
-
-interface CfManifestFile {
-  readonly projectID: number;
-  readonly fileID: number;
-  readonly required?: boolean;
-}
-
-interface CfManifest {
-  readonly minecraft: string;
-  readonly loader: string;
-  readonly files: readonly CfManifestFile[];
-  readonly overrides: string;
-  readonly name?: string;
-  readonly version?: string;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}
-
-/** Parse a CurseForge `modLoaders` id (`"fabric-0.16.9"`) into a raw loader string. */
-function loaderFromModLoaders(modLoaders: unknown): string {
-  if (!Array.isArray(modLoaders) || modLoaders.length === 0) {
-    return "vanilla";
-  }
-  const primary =
-    modLoaders.find((m): m is Record<string, unknown> => isRecord(m) && m.primary === true) ??
-    (isRecord(modLoaders[0]) ? (modLoaders[0] as Record<string, unknown>) : undefined);
-  const id = primary && typeof primary.id === "string" ? primary.id : undefined;
-  if (!id) {
-    return "vanilla";
-  }
-  const dash = id.indexOf("-");
-  if (dash <= 0) {
-    return id.toLowerCase();
-  }
-  const name = id.slice(0, dash).toLowerCase();
-  const version = id.slice(dash + 1);
-  return `${name} ${version}`;
-}
-
-function parseManifest(bytes: Uint8Array): CfManifest {
-  let doc: unknown;
-  try {
-    doc = JSON.parse(new TextDecoder().decode(bytes));
-  } catch (err) {
-    throw new ManifestError(`manifest.json is not valid JSON: ${(err as Error).message}`);
-  }
-  if (!isRecord(doc)) {
-    throw new ManifestError("manifest.json must be a JSON object");
-  }
-  if (doc.manifestType !== undefined && doc.manifestType !== "minecraftModpack") {
-    throw new ManifestError(
-      `unsupported CurseForge manifestType "${String(doc.manifestType)}" (only "minecraftModpack")`,
-    );
-  }
-  if (!isRecord(doc.minecraft) || typeof doc.minecraft.version !== "string") {
-    throw new ManifestError("manifest.json is missing minecraft.version");
-  }
-  const minecraft = doc.minecraft.version;
-  const loader = loaderFromModLoaders(doc.minecraft.modLoaders);
-  const rawFiles = Array.isArray(doc.files) ? doc.files : [];
-  const files: CfManifestFile[] = [];
-  for (const [i, f] of rawFiles.entries()) {
-    if (
-      !isRecord(f) ||
-      typeof f.projectID !== "number" ||
-      typeof f.fileID !== "number" ||
-      !Number.isSafeInteger(f.projectID) ||
-      !Number.isSafeInteger(f.fileID)
-    ) {
-      throw new ManifestError(`manifest.json files[${i}] is missing numeric projectID/fileID`);
-    }
-    files.push({
-      projectID: f.projectID,
-      fileID: f.fileID,
-      ...(typeof f.required === "boolean" ? { required: f.required } : {}),
-    });
-  }
-  return {
-    minecraft,
-    loader,
-    files,
-    overrides: typeof doc.overrides === "string" ? doc.overrides : "overrides",
-    ...(typeof doc.name === "string" ? { name: doc.name } : {}),
-    ...(typeof doc.version === "string" ? { version: doc.version } : {}),
-  };
-}
-
 // --- CF file metadata → a pinned replay LockPackage ------------------------
 
 interface CfFileMeta {
@@ -227,12 +137,7 @@ export async function importCurseForgeZip(input: ImportCfZipInput): Promise<Impo
       `"${input.archivePath}" is not a valid CurseForge modpack (no manifest.json)`,
     );
   }
-  const cf = parseManifest(manifestBytes);
-  if (cf.files.length > MAX_PACK_FILES) {
-    throw new DecompressionBomb(
-      `CurseForge zip lists ${cf.files.length} files, over the ${MAX_PACK_FILES} limit`,
-    );
-  }
+  const cf = parseCfManifest(manifestBytes);
 
   // Fully pinning CurseForge files requires the BYO key — fail closed, never a
   // silent skip. (An import with files but no key cannot compute their shas.)
