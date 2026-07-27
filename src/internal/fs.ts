@@ -27,6 +27,47 @@ export function isProtectedTop(segment: string): boolean {
   return PROTECTED_TOP_FOLDED.has(foldName(segment));
 }
 
+/**
+ * Canonicalize an instance-relative path: split on either separator, drop empty
+ * and `.` segments, rejoin with `/`.
+ *
+ * It canonicalizes by **decomposition**, not by rewriting rules, because a rule
+ * list is always one case short of `path.join`. Stripping a single leading `./`
+ * and a trailing `/` leaves `mods//jei.jar`, `././mods/jei.jar` and
+ * `mods/./jei.jar` as three distinct strings that `safeJoin` and the filesystem
+ * all resolve to one file. Anything keyed on this string — the exclusion set, the
+ * replay-path ledger, the push gate — then answers differently depending on how
+ * the path happened to be spelled, which is a protection bypass rather than a
+ * cosmetic difference.
+ *
+ * `..` segments are preserved: they are not a normalization question but a
+ * rejection one, and `safeJoin` refuses them outright.
+ */
+export function normalizeRelPath(raw: string): string {
+  return raw
+    .split(/[/\\]/)
+    .filter((s) => s.length > 0 && s !== ".")
+    .join("/");
+}
+
+/**
+ * The comparison form of a whole instance-relative path: normalized, then
+ * case-folded and NFC-normalized.
+ *
+ * It lives here, next to `foldName`, because more than one subsystem stores a
+ * path in order to compare it against a path some other subsystem produced — the
+ * working-tree exclusion set, the replay-path ledger, the `push` backstop. Two
+ * copies of "normalize, then fold" that drift by one rule (a trailing slash, a
+ * backslash) compare unequal for paths that name the same file, and a protection
+ * keyed on that comparison then silently stops matching.
+ *
+ * Folding the whole path is folding each segment: `foldName` only lowercases and
+ * NFC-normalizes, and `/` is fixed under both.
+ */
+export function foldPath(raw: string): string {
+  return foldName(normalizeRelPath(raw));
+}
+
 /** True if `p` exists (file, dir, or symlink). */
 export async function pathExists(p: string): Promise<boolean> {
   try {

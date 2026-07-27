@@ -33,7 +33,13 @@ import type { Conflict, ConflictStrategy, OnConflict } from "./conflict.js";
 import { findLca, isAncestor, nextGeneration } from "./graph.js";
 import { type ItemDelta, type ItemSet, buildItemSet, diffItemSets, gameValue } from "./itemset.js";
 import { type ResolutionPolicy, threeWayMerge } from "./merge.js";
-import type { CommitObject, CommitOp, SnapshotObject, VcObjectStore } from "./objects.js";
+import type {
+  CommitObject,
+  CommitOp,
+  SnapshotObject,
+  TrackedFile,
+  VcObjectStore,
+} from "./objects.js";
 import {
   type RebaseState,
   clearRebaseState,
@@ -75,6 +81,12 @@ export interface VcRepoOptions {
   readonly author: string;
   /** Injected clock (ms). Display-only in commits; ordering is by generation. */
   readonly now: () => number;
+  /**
+   * Where a non-fatal refusal is reported. The working-tree walk uses it to say
+   * that it declined to record a file, which is otherwise indistinguishable from
+   * the file simply not being there.
+   */
+  readonly onWarn?: (message: string) => void;
 }
 
 /** One `log` entry. */
@@ -147,6 +159,7 @@ export class VcRepo {
   readonly #relock: RelockFn;
   readonly #author: string;
   readonly #now: () => number;
+  readonly #onWarn?: (message: string) => void;
   readonly refs: Refs;
 
   constructor(opts: VcRepoOptions) {
@@ -157,6 +170,7 @@ export class VcRepo {
     this.#relock = opts.relock;
     this.#author = opts.author;
     this.#now = opts.now;
+    this.#onWarn = opts.onWarn;
     this.refs = new Refs(opts.anvilDir);
   }
 
@@ -243,6 +257,7 @@ export class VcRepo {
       instanceDir: this.#instanceDir,
       vcStore: this.#objects,
       sharedStore: this.#shared,
+      ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
       requireLockFresh: opts.requireLockFresh ?? true,
     });
     return this.#recordCommit(built.id, message, opts.op ?? "commit", opts.parents);
@@ -350,6 +365,7 @@ export class VcRepo {
         instanceDir: this.#instanceDir,
         vcStore: this.#objects,
         sharedStore: this.#shared,
+        ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
         requireLockFresh: false,
         // A dirty-check is a question, not a write. Storing every tracked blob on
         // every `switch` attempt — including the refused ones — admitted objects
@@ -396,6 +412,7 @@ export class VcRepo {
       snapshot: target.snapshot,
       vcStore: this.#objects,
       sharedStore: this.#shared,
+      ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
       ...(previous ? { previous: await this.#objects.getSnapshot(previous) } : {}),
     });
 
@@ -582,6 +599,7 @@ export class VcRepo {
         snapshot: target.snapshot,
         vcStore: this.#objects,
         sharedStore: this.#shared,
+        ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
         previous,
       });
       const head = await this.refs.readHead();
@@ -715,6 +733,7 @@ export class VcRepo {
       instanceDir: this.#instanceDir,
       vcStore: this.#objects,
       sharedStore: this.#shared,
+      ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
       requireLockFresh: true,
       knownBlobs: known,
     });
@@ -727,7 +746,30 @@ export class VcRepo {
       built.snapshot.tracked,
       args.theirs.snapshot?.tracked ?? [],
     );
-    const snapshot: SnapshotObject = { ...built.snapshot, tracked: tracked.tracked };
+    // `theirs` was never screened by the walk that built `ours` — it is whatever
+    // the other branch recorded, including a branch a `pull` brought in from
+    // another machine. A transfer that refused to store CurseForge bytes leaves
+    // exactly that shape behind: an entry naming an object this store does not
+    // have. Carrying it into a commit would produce history that cannot be
+    // materialized or published, so it is dropped here, out loud, rather than
+    // discovered later by a `switch` that throws or a `push` that refuses.
+    const mergedTracked: TrackedFile[] = [];
+    const dropped: string[] = [];
+    for (const entry of tracked.tracked) {
+      if (await this.#objects.has(entry.blob)) {
+        mergedTracked.push(entry);
+      } else {
+        dropped.push(entry.path);
+      }
+    }
+    const warnings = [
+      ...tracked.warnings,
+      ...dropped.map(
+        (path) =>
+          `tracked file "${path}" came from the other side with no object in this store — it is not carried into the merge. This is what an incoming transfer leaves behind when it declines to store CurseForge (replay) content.`,
+      ),
+    ];
+    const snapshot: SnapshotObject = { ...built.snapshot, tracked: mergedTracked };
     const snapshotId = await this.#objects.put(snapshot);
     // Materialize the merged carried + tracked files back onto the working tree, so
     // a file whose winning side differs from the current working tree (theirs won a
@@ -738,6 +780,7 @@ export class VcRepo {
       snapshot,
       vcStore: this.#objects,
       sharedStore: this.#shared,
+      ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
       previous: args.ours.snapshot,
     });
     if (args.recordOnly) {
@@ -756,11 +799,11 @@ export class VcRepo {
       return {
         committed: { id, generation: commit.gen },
         conflicts: [],
-        warnings: tracked.warnings,
+        warnings,
       };
     }
     const committed = await this.#recordCommit(snapshotId, args.message, args.op, args.parents);
-    return { committed, conflicts: [], warnings: tracked.warnings };
+    return { committed, conflicts: [], warnings };
   }
 
   // --- revert --------------------------------------------------------------
@@ -841,6 +884,7 @@ export class VcRepo {
         snapshot: ontoContent.snapshot,
         vcStore: this.#objects,
         sharedStore: this.#shared,
+        ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
         previous: oursSnap,
       });
       await this.refs.appendReflog(
@@ -895,6 +939,7 @@ export class VcRepo {
       snapshot: ontoContent.snapshot,
       vcStore: this.#objects,
       sharedStore: this.#shared,
+      ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
       previous: oursSnap,
     });
     return this.#runRebase(state, policy);
@@ -914,6 +959,7 @@ export class VcRepo {
         instanceDir: this.#instanceDir,
         vcStore: this.#objects,
         sharedStore: this.#shared,
+        ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
         requireLockFresh: true,
       });
       const tipCommit = await this.#objects.getCommit(state.tip);
@@ -976,6 +1022,7 @@ export class VcRepo {
       snapshot: orig.snapshot,
       vcStore: this.#objects,
       sharedStore: this.#shared,
+      ...(this.#onWarn ? { onWarn: this.#onWarn } : {}),
       ...(tipSnap ? { previous: tipSnap } : {}),
     });
     await this.refs.appendReflog(

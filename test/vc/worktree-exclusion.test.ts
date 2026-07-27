@@ -16,6 +16,7 @@ import {
   type LockPackage,
   type Lockfile,
   type Placement,
+  ReplayVeto,
   VcObjectStore,
   WorktreeExclusion,
   buildOwnedPaths,
@@ -312,7 +313,13 @@ describe("worktree: the walk", () => {
     await writeFile(join(dir, "options.txt"), "fov:70");
 
     const exclude = new WorktreeExclusion();
-    const readOnly = await trackWorktree({ instanceDir: dir, vcStore, exclude, store: false });
+    const readOnly = await trackWorktree({
+      instanceDir: dir,
+      vcStore,
+      exclude,
+      store: false,
+      replayVeto: ReplayVeto.none(),
+    });
     expect(readOnly.map((t) => t.path)).toEqual(["options.txt"]);
     const blob = readOnly[0]?.blob;
     expect(blob).toBeDefined();
@@ -322,7 +329,13 @@ describe("worktree: the walk", () => {
     // `store: false` is a pure read — `status` must never write history.
     expect(await vcStore.has(blob)).toBe(false);
 
-    const stored = await trackWorktree({ instanceDir: dir, vcStore, exclude, store: true });
+    const stored = await trackWorktree({
+      instanceDir: dir,
+      vcStore,
+      exclude,
+      store: true,
+      replayVeto: ReplayVeto.none(),
+    });
     expect(stored.map((t) => t.blob.value)).toEqual([blob.value]);
     expect(await vcStore.has(blob)).toBe(true);
     expect(new TextDecoder().decode(await vcStore.getBlobBytes(blob))).toBe("fov:70");

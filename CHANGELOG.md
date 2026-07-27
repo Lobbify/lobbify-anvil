@@ -46,15 +46,12 @@ carry a breaking change, and each one is called out below.
     (`curseforge:<project>@<fileId>`) for a reproducible base — which is what the
     determinism story wants anyway. Pre-existing; it affects a direct
     `curseforge:` item reference the same way.
-  - A CurseForge member's bytes can still reach a remote through an unrelated
-    interaction between `.anvilignore` and the atomic swap: `.anvilignore`
+  - A superseded member's jar can be left behind in `mods/`. `.anvilignore`
     matching is top-level-segment-wide, so a line naming any file under `mods/`
-    makes the swap skip *removing* a superseded replay jar, which then becomes an
-    untracked worktree file that the VC layer tracks and `push` ships. Not
-    introduced here — it applies to any replay item whose version moves — but a
-    base version bump moves many at once, so it is much more reachable. Fixing it
-    means exempting replay targets from the ignore filter in `journaledSwap`, in
-    its own change.
+    makes the swap skip *removing* it, and a bump that renames many members at
+    once leaves many. The leftover file is inert: it is refused by version
+    control and by `push` (see Security, below), so it costs disk and nothing
+    else. Pre-existing; it applies to any replay item whose version moves.
 
 - **`game.from` works: an instance can start from a published modpack.** The field
   existed in the manifest schema and the resolver refused it; it now resolves the
@@ -265,6 +262,69 @@ carry a breaking change, and each one is called out below.
   kind. Such a move is now reported in `warnings` rather than happening quietly.
 
 ### Security
+
+- **A superseded CurseForge jar can no longer enter version control, or a remote.**
+  The replay boundary was enforced on lock rows: the shared store, GC, transfer and
+  export code all skip `provenance: "replay"` packages, and the bytes live in a
+  per-instance cache none of them can enumerate. Tracked working-tree files, added
+  in this same release, do not go through the lock at all.
+
+  A replay item is placed as an ordinary file in `mods/`. Once no lock names its
+  path — a version bump renamed it, the built-lock ref was lost, or `.anvilignore`
+  made the atomic swap skip the removal — the working-tree walk read it as an
+  undeclared file and admitted its bytes as a VC blob. A tracked file records a
+  path and a blob id and nothing else, so from that point nothing downstream could
+  tell where the bytes came from: `push` shipped them to a served tree, a git
+  remote or a room, and a joiner's `pull` wrote them into `mods/` with no
+  CurseForge key involved anywhere.
+
+  Provenance is now a property of the **bytes** rather than of what the current
+  lock happens to name, and it is enforced at the one place a tracked set is
+  produced. That placement is deliberate: all four publish paths read the same
+  `snapshot.tracked`, so refusing at admission closes them together and keeps the
+  bytes out of `.anvil/objects/` entirely, which filtering at each egress would not.
+
+  Which check can answer depends on what the machine knows:
+
+  - **Sending** — a candidate's content digests are checked against this instance's
+    replay cache by membership query, never enumeration, in **both** pin domains:
+    sha256 for a directly-referenced `curseforge:` item, sha1 for a base-pack
+    member. It survives a rename, because it asks about bytes rather than paths.
+    It costs no extra read: the digests fold into the same pass that computes the
+    blob id, and an instance with no replay cache computes none of them.
+  - **Receiving** — a joiner has no replay cache and no local record, and `clone`
+    materializes before it ever runs a build, so every local signal is empty at
+    exactly the moment it is needed. The authority there is the incoming history's
+    own locks: their `provenance: "replay"` rows pin the bytes by content hash.
+    `pull`/`clone` collect that pin union across the whole transferred closure —
+    the commit that strands a jar is the one whose lock stopped naming it, so the
+    pin lives in an ancestor — and a matching object is verified and decoded in
+    memory, then dropped. It is never written to the object store, so a joiner
+    cannot re-publish what it declined to hold.
+
+  `.anvil/refs/replay-paths` records replay placement targets union-only, so a path
+  stays claimed after the lock stops naming it. It is a fallback for the one state
+  where the byte question cannot be asked — the replay cache deleted — plus the
+  claim `clone`/`pull` record before writing anything. It is deliberately not a
+  second path-based rule running alongside the content check: as one, a path that
+  had held a CurseForge jar became permanently un-committable, silently swallowing
+  whatever file a user later put there.
+
+  The pair is **not** exhaustive. With the replay cache deleted *and* the jar since
+  renamed, the bytes cannot be identified and the new path was never claimed;
+  `anvil build` warns when it finds claimed paths with no cache, which is the only
+  signal available before the fact.
+
+  `push` additionally refuses outright when reachable history tracks such bytes.
+  That covers commits recorded before this change, which cannot be cleaned
+  retroactively, and a foreign entry a merge carried in. It refuses rather than
+  dropping the object, because publishing a snapshot whose tracked entry points at
+  an object the remote does not have is broken history that fails later and
+  somewhere else.
+
+  Visible effect: a stranded replay jar is no longer restored or removed by
+  `switch`, and no longer reported by `status` as a dirty working tree. It stays on
+  disk until a build removes it.
 
 - Path handling for placement targets is guarded independently of extraction: `.` and
   `..` are folded at derivation, anything resolving outside the instance names no

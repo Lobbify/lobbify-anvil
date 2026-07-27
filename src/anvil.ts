@@ -85,6 +85,7 @@ import type { InstanceRegistryEntry } from "./store/index.js";
 import {
   ContentStore,
   ReplayCache,
+  ReplayVeto,
   hashBuffer,
   hashFile,
   readInstanceRegistry,
@@ -1229,6 +1230,9 @@ export class Anvil {
       vcStore,
       exclude: await snapshotExclusion(this.dir, lock),
       store: false,
+      // The same veto `commit` applies, or `status` reports a tree dirty over a
+      // file no commit will ever record.
+      replayVeto: await ReplayVeto.load(this.dir),
     });
     return (
       tracked.length !== committed.size ||
@@ -1384,6 +1388,9 @@ export class Anvil {
       relock,
       author: this.#env.author ?? "anvil",
       now: nowFn,
+      // A refusal to record (or to materialize) a file is otherwise invisible:
+      // the file is simply absent from the commit, which reads as a bug.
+      onWarn: (message: string) => this.progress.emit({ type: "warning", message }),
     });
   }
 

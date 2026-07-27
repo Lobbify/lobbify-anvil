@@ -12,6 +12,12 @@
  *     build honors `.anvilignore`; materialize only rewrites tracked source files).
  *   - **push**: publish the two files + VC history + **copy-only** content objects
  *     (never a replay object; the replay cache is never read) to a writable remote.
+ *     Skipping `provenance: "replay"` rows covers the content objects, which come
+ *     from the lock. It does **not** cover the VC history, whose tracked blobs
+ *     carry no provenance at all. Those are refused at admission by the
+ *     working-tree walk, refused on arrival by `importHistory`, and screened
+ *     again by `assertPushableHistory` for history that predates either guard or
+ *     that a merge carried in from a pull.
  *
  * VC history transfers as verbatim (zlib) objects the receiver re-verifies on
  * arrival (`VcObjectStore.importRaw`), so a corrupted/hostile mirror cannot inject
@@ -24,16 +30,22 @@ import { join } from "node:path";
 import type { BuildEngineResult } from "../build/index.js";
 import { readBuiltLock } from "../build/index.js";
 import type { AnvilEvent } from "../events.js";
-import { ensureDir } from "../internal/fs.js";
+import { ensureDir, foldPath } from "../internal/fs.js";
 import { parseLock } from "../lock/index.js";
 import type { ContentStore } from "../store/index.js";
+import {
+  matchesReplayPin,
+  readReplayPaths,
+  recordReplayPaths,
+  replayDigestsOf,
+} from "../store/replay-provenance.js";
 import { PushNotSupported, RemoteError, VcStateError } from "../types/errors.js";
 import type { AllowSource, Hash, Lockfile } from "../types/index.js";
 import { ancestors, isAncestor } from "../vc/graph.js";
 import type { CommitObject, VcObjectStore } from "../vc/objects.js";
 import { hashToString } from "../vc/objects.js";
 import type { Refs } from "../vc/refs.js";
-import { buildSnapshot, materializeSnapshot } from "../vc/snapshot.js";
+import { buildSnapshot, materializeSnapshot, replayPinsOfSnapshot } from "../vc/snapshot.js";
 import { addRemote } from "./config.js";
 import type { RemoteDescriptor } from "./descriptor.js";
 import { remoteBranch } from "./descriptor.js";
@@ -122,10 +134,42 @@ async function ensureVcObject(deps: SyncDeps, id: Hash, kind: string): Promise<v
   await deps.vcStore.importRaw(id, raw); // content-address verified on arrival
 }
 
-/** Import the full commit closure reachable from `tip` into the local VC store. */
-async function importHistory(deps: SyncDeps, tip: Hash): Promise<void> {
+/** What an import brought in, and what it declined to bring in. */
+interface ImportedHistory {
+  /** Replay content pins named by every lock in the transferred closure. */
+  readonly pins: ReadonlySet<string>;
+  /** Blob ids refused on arrival because their bytes match one of those pins. */
+  readonly refusedBlobs: ReadonlySet<string>;
+}
+
+/**
+ * Import the full commit closure reachable from `tip` into the local VC store,
+ * refusing to admit any tracked blob whose bytes a lock in that same closure pins
+ * as replay content.
+ *
+ * It runs in two passes because the answer is not local. The commit that strands
+ * a CurseForge jar is the one whose lock stopped naming it, so the pin that
+ * identifies those bytes lives in an ANCESTOR's lock — pass 1 therefore brings in
+ * every commit, snapshot and lock and accumulates the pin union before pass 2
+ * decides about a single tracked blob.
+ *
+ * A refused blob is never written: it is fetched, content-address-verified and
+ * decoded in memory, and dropped. Importing first and deleting afterwards would
+ * mean the CurseForge bytes were in `.anvil/objects/`, which is the thing being
+ * prevented, and a joiner holding them could re-publish them to a third party.
+ *
+ * This is the receive side's whole defence, and it is deliberately self-contained:
+ * a fresh `clone` has no replay-path ledger and no replay cache, so anything
+ * keyed on local state is empty exactly when it is needed most.
+ */
+async function importHistory(deps: SyncDeps, tip: Hash): Promise<ImportedHistory> {
   const seen = new Set<string>();
   const stack: Hash[] = [tip];
+  const pins = new Set<string>();
+  const trackedBlobs = new Map<string, Hash>();
+
+  // Pass 1 — the skeleton: commits, snapshots, the three source blobs, carried
+  // bytes, and the replay pins every lock in the closure names.
   while (stack.length > 0) {
     const id = stack.pop();
     if (!id || seen.has(id.value)) {
@@ -139,11 +183,14 @@ async function importHistory(deps: SyncDeps, tip: Hash): Promise<void> {
     for (const blob of [snap.manifest, snap.lock, snap.ignore]) {
       await ensureVcObject(deps, blob, "blob");
     }
+    for (const pin of await replayPinsOfSnapshot(snap, deps.vcStore)) {
+      pins.add(pin);
+    }
     for (const carried of snap.carried) {
       await ensureVcObject(deps, carried.blob, "carried-blob");
     }
     for (const tracked of snap.tracked) {
-      await ensureVcObject(deps, tracked.blob, "tracked-blob");
+      trackedBlobs.set(tracked.blob.value, tracked.blob);
     }
     for (const parent of commit.parents) {
       if (!seen.has(parent.value)) {
@@ -151,14 +198,61 @@ async function importHistory(deps: SyncDeps, tip: Hash): Promise<void> {
       }
     }
   }
+
+  // Pass 2 — tracked blobs, screened against the pins pass 1 collected.
+  const refusedBlobs = new Set<string>();
+  for (const blob of trackedBlobs.values()) {
+    if (await deps.vcStore.has(blob)) {
+      continue; // already ours — this transfer is not what put it here
+    }
+    const raw = await deps.transport.fetchVcObject(blob);
+    if (!raw) {
+      throw new RemoteError(
+        deps.descriptor.name,
+        `history is incomplete — missing tracked-blob object ${hashToString(blob)}`,
+      );
+    }
+    if (pins.size > 0) {
+      const bytes = deps.vcStore.decodeRaw(blob, raw);
+      if (bytes && matchesReplayPin(replayDigestsOf(bytes), pins)) {
+        refusedBlobs.add(blob.value);
+        deps.emit?.({
+          type: "warning",
+          message: `refused an incoming object: its bytes are pinned as CurseForge (replay) content by a lock in ${deps.descriptor.name}'s history, and replay bytes are never re-hosted`,
+        });
+        continue;
+      }
+    }
+    await deps.vcStore.importRaw(blob, raw); // content-address verified on arrival
+  }
+  return { pins, refusedBlobs };
+}
+
+/** The dedup key for one tracked entry: the same bytes at two paths are two entries. */
+function trackedKey(path: string, blob: Hash): string {
+  return `${path}::${blob.value}`;
+}
+
+/** What a push has to publish: the VC object closure, plus what it tracks. */
+interface ReachableHistory {
+  readonly objects: { id: Hash; raw: Uint8Array }[];
+  /**
+   * One entry per DISTINCT tracked (path, blob) pair across the closure. Deduped
+   * because the tracked set is full state, not a delta: a file untouched for a
+   * thousand commits appears in a thousand snapshots, and screening it once per
+   * appearance turns a cheap gate into a per-push cost proportional to
+   * `files × commits`.
+   */
+  readonly tracked: { path: string; blob: Hash }[];
+  /** Replay content pins named by every lock in the closure. */
+  readonly pins: ReadonlySet<string>;
 }
 
 /** Every VC object reachable from `tip`, raw (zlib) bytes, for a push. */
-async function gatherVcObjects(
-  vcStore: VcObjectStore,
-  tip: Hash,
-): Promise<{ id: Hash; raw: Uint8Array }[]> {
+async function gatherVcObjects(vcStore: VcObjectStore, tip: Hash): Promise<ReachableHistory> {
   const out: { id: Hash; raw: Uint8Array }[] = [];
+  const tracked = new Map<string, { path: string; blob: Hash }>();
+  const pins = new Set<string>();
   const seen = new Set<string>();
   const stack: Hash[] = [tip];
   const push = async (id: Hash): Promise<void> => {
@@ -183,11 +277,15 @@ async function gatherVcObjects(
     for (const blob of [snap.manifest, snap.lock, snap.ignore]) {
       await push(blob);
     }
+    for (const pin of await replayPinsOfSnapshot(snap, vcStore)) {
+      pins.add(pin);
+    }
     for (const carried of snap.carried) {
       await push(carried.blob);
     }
-    for (const tracked of snap.tracked) {
-      await push(tracked.blob);
+    for (const entry of snap.tracked) {
+      await push(entry.blob);
+      tracked.set(trackedKey(entry.path, entry.blob), { path: entry.path, blob: entry.blob });
     }
     for (const parent of commit.parents) {
       if (!seen.has(parent.value)) {
@@ -195,7 +293,82 @@ async function gatherVcObjects(
       }
     }
   }
-  return out;
+  return { objects: out, tracked: [...tracked.values()], pins };
+}
+
+/** The shared tail of every push refusal: what to do about it. */
+const PUSH_REFUSAL_REMEDY =
+  "Replay bytes are fetched per-client under your own CurseForge key and are never re-hosted, " +
+  "so publishing this history would leak them. Such a commit predates the guard that keeps " +
+  "replay bytes out of a tracked set. Drop or rewrite the commits that track that path, then " +
+  "push again.";
+
+/**
+ * Refuse a push whose reachable history tracks CurseForge content.
+ *
+ * The walk that produces a tracked set refuses those bytes at admission, and the
+ * receive side refuses them on arrival, so nothing this instance authored reaches
+ * this check. It exists for what neither of those can reach: commits recorded
+ * before the admission guard existed, and — via `mergeTrackedSets`, which unions
+ * two tracked sets without re-screening either — a foreign entry that a `pull`
+ * brought in and a later local merge carried into a new commit.
+ *
+ * Three questions, in cost order:
+ *
+ *   1. **Is every tracked blob actually here?** A tracked entry pointing at an
+ *      object the local store lacks is history that cannot be published intact.
+ *      It is also what a refused import leaves behind, so this is the check that
+ *      stops a joiner forwarding what it declined to store.
+ *   2. **Do a blob's bytes match a replay pin from this history's own locks?**
+ *      Byte-level and machine-independent — the pin lives in an ancestor's lock
+ *      even once the stranding commit's lock has stopped naming the file.
+ *   3. **Does a tracked path appear in this instance's replay ledger?** The
+ *      local-knowledge backstop, for a history whose own locks no longer state
+ *      the pin at all.
+ *
+ * It refuses loudly rather than dropping the object. Silently omitting a blob
+ * publishes a snapshot whose tracked entry points at an object the remote does
+ * not have — broken history that fails on the joiner's `pull`, far from the
+ * cause. Every refusal names the path.
+ */
+async function assertPushableHistory(deps: SyncDeps, history: ReachableHistory): Promise<void> {
+  const refuse = (path: string, why: string): never => {
+    throw new RemoteError(
+      deps.descriptor.name,
+      `refusing to push: ${why} ("${path}"). ${PUSH_REFUSAL_REMEDY}`,
+    );
+  };
+
+  const claimed = await readReplayPaths(deps.instanceDir);
+  for (const entry of history.tracked) {
+    const raw = await deps.vcStore.readRaw(entry.blob);
+    if (!raw) {
+      refuse(
+        entry.path,
+        "the commit history tracks a file whose object is not in this instance's store, so the " +
+          "history cannot be published intact. This is what an incoming transfer leaves behind " +
+          "when it declines to store CurseForge content",
+      );
+      return;
+    }
+    if (history.pins.size > 0) {
+      const bytes = deps.vcStore.decodeRaw(entry.blob, raw);
+      if (bytes && matchesReplayPin(replayDigestsOf(bytes), history.pins)) {
+        refuse(
+          entry.path,
+          "a lock in this history pins the tracked file's bytes as CurseForge content",
+        );
+        return;
+      }
+    }
+    if (claimed.has(foldPath(entry.path))) {
+      refuse(
+        entry.path,
+        "the commit history tracks a path this instance recorded as holding CurseForge content",
+      );
+      return;
+    }
+  }
 }
 
 /** The number of commits reachable from `tip` but not from `base`. */
@@ -263,10 +436,15 @@ export async function cloneInstance(deps: SyncDeps): Promise<CloneOutcome> {
   const remoteLock = parseLock(head.lock);
   // The remote lock is untrusted — veto hostile/vetoed sources before any I/O.
   await validateRemoteLock(remoteLock, deps.allowSource, deps.resolveHost);
+  // Claim the remote lock's replay targets BEFORE anything is written. The build
+  // that would otherwise record them runs last, so on a clone the ledger is
+  // empty for the whole materialize. Necessary, and on its own not sufficient:
+  // the byte-level check below is what actually holds here.
+  await recordReplayPaths(deps.instanceDir, [remoteLock]);
 
   let commitId: Hash;
   if (head.commit) {
-    await importHistory(deps, head.commit);
+    const imported = await importHistory(deps, head.commit);
     commitId = head.commit;
     const commit = await deps.vcStore.getCommit(commitId);
     const snap = await deps.vcStore.getSnapshot(commit.snapshot);
@@ -275,6 +453,9 @@ export async function cloneInstance(deps: SyncDeps): Promise<CloneOutcome> {
       snapshot: snap,
       vcStore: deps.vcStore,
       sharedStore: deps.sharedStore,
+      replayPins: imported.pins,
+      refusedBlobs: imported.refusedBlobs,
+      onWarn: (message) => deps.emit?.({ type: "warning", message }),
     });
   } else {
     // A static remote with no VC history → one initial commit from the files.
@@ -324,6 +505,9 @@ export async function pullInstance(deps: SyncDeps): Promise<PullOutcome> {
   const head = await deps.transport.fetchHead(deps.ref);
   const remoteLock = parseLock(head.lock);
   await validateRemoteLock(remoteLock, deps.allowSource, deps.resolveHost);
+  // Claim before any write, for the same reason as clone: the build that would
+  // otherwise record these paths runs after materialize, not before it.
+  await recordReplayPaths(deps.instanceDir, [remoteLock]);
 
   const localHead = await deps.refs.resolveHead();
   const currentBranch = await deps.refs.currentBranch();
@@ -333,7 +517,12 @@ export async function pullInstance(deps: SyncDeps): Promise<PullOutcome> {
     return pullStatic(deps, head, localHead, currentBranch);
   }
   const target = head.commit;
-  await importHistory(deps, target);
+  const imported = await importHistory(deps, target);
+  const inbound = {
+    replayPins: imported.pins,
+    refusedBlobs: imported.refusedBlobs,
+    onWarn: (message: string) => deps.emit?.({ type: "warning" as const, message }),
+  };
   const trackingRef = remoteTrackingRef(deps.descriptor.name, head.branch);
 
   // Unborn local HEAD → adopt the remote like a clone.
@@ -346,6 +535,7 @@ export async function pullInstance(deps: SyncDeps): Promise<PullOutcome> {
       snapshot: snap,
       vcStore: deps.vcStore,
       sharedStore: deps.sharedStore,
+      ...inbound,
     });
     await deps.refs.writeRef(branchRef, target);
     await deps.refs.setHeadSymbolic(branchRef);
@@ -388,6 +578,7 @@ export async function pullInstance(deps: SyncDeps): Promise<PullOutcome> {
     vcStore: deps.vcStore,
     sharedStore: deps.sharedStore,
     previous: prevSnap,
+    ...inbound,
   });
   await deps.refs.writeRef(currentBranch, target);
   await deps.refs.writeRef(trackingRef, target);
@@ -504,7 +695,9 @@ export async function pushInstance(deps: SyncDeps): Promise<PushOutcome> {
     throw new VcStateError("nothing to push — the branch has no commits yet");
   }
   const branch = remoteBranch(deps.descriptor, deps.ref);
-  const vcObjects = await gatherVcObjects(deps.vcStore, localHead);
+  const history = await gatherVcObjects(deps.vcStore, localHead);
+  await assertPushableHistory(deps, history);
+  const vcObjects = history.objects;
 
   // Content objects: COPY provenance only, from the shared store. A replay row is
   // skipped entirely and the replay cache is never opened.
