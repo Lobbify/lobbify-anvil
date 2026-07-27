@@ -65,6 +65,7 @@ export * from "./src/export/index.js";
 
 // Stage 5 — the anvil-native version-control engine (commit/branch/merge/rebase).
 export type {
+  BuildOwnedPaths,
   CarriedBlob,
   CommitObject,
   CommitOp,
@@ -72,6 +73,7 @@ export type {
   Conflict,
   ConflictKind,
   ConflictStrategy,
+  ExcludePattern,
   ItemDelta,
   ItemEntry,
   ItemSet,
@@ -85,19 +87,31 @@ export type {
   Resolution,
   RevertOutcome,
   SnapshotObject,
+  TrackedFile,
+  TrackedMergeResult,
+  TrackWorktreeInput,
   VcObject,
 } from "./src/vc/index.js";
 export {
   ancestors,
+  blobIdOfStream,
+  buildOwnedPaths,
   describeConflict,
   diffItemSets,
   encodeObject,
+  EXCLUDE_FILE,
   findLca,
   idOf,
   idOfEncoding,
   isAncestor,
+  loadWorktreeExclusion,
+  mergeTrackedSets,
   nextGeneration,
+  parseAnvilexclude,
   Refs,
+  trackWorktree,
   VcObjectStore,
   VcRepo,
+  walkWorktree,
+  WorktreeExclusion,
 } from "./src/vc/index.js";

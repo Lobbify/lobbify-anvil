@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Manifest, VcObjectStore, parseRef } from "../../index.js";
@@ -71,6 +71,45 @@ describe("vc gc: reachability across the full ref/reflog closure + carried blobs
     if (carried) {
       expect(await readFile(join(fx.dir, carried.path), "utf8")).toBe("LOCAL-V1");
     }
+  });
+
+  it("GATE gc-tracked: a tracked working-tree blob survives GC and still materializes", async () => {
+    const fx = await makeVcFixture(
+      modWorld([{ slug: "alpha", id: "ALPHA", versions: [version("ALPHA", "1.0.0", ["26.2"])] }]),
+    );
+    dirs.push(fx.dir, fx.storeDir);
+    const anvil = fx.anvil();
+    const objects = new VcObjectStore({ anvilDir: join(fx.dir, ".anvil") });
+    const config = join(fx.dir, "config", "mymod.toml");
+
+    // c1: a carried local jar AND an undeclared hand-edited config.
+    await writeFile(join(fx.dir, "mymod.jar"), "LOCAL-V1");
+    await mkdir(join(fx.dir, "config"), { recursive: true });
+    await writeFile(config, "TRACKED-V1");
+    await fx.writeLockFor(localManifest("26.2", ["modrinth:alpha"], "./mymod.jar"));
+    const c1 = await anvil.commit("c1: local v1 + tracked v1");
+
+    // c2: the tracked file's bytes change, so c1's blob is referenced by history only.
+    await writeFile(config, "TRACKED-V2");
+    await anvil.commit("c2: tracked v2");
+
+    const c1Snap = await objects.getSnapshot((await objects.getCommit(c1.id)).snapshot);
+    const tracked = c1Snap.tracked.find((t) => t.path === "config/mymod.toml");
+    expect(tracked).toBeDefined();
+
+    // A dangling object, so a GC that reclaimed nothing cannot pass this test.
+    const dangling = await objects.putBlob(new TextEncoder().encode("garbage-tracked-gc-blob"));
+    const result = await anvil.gc();
+    expect(result.removed).toBeGreaterThanOrEqual(1);
+    expect(await objects.has(dangling)).toBe(false);
+
+    if (!tracked) {
+      return;
+    }
+    expect(await objects.has(tracked.blob)).toBe(true);
+    // The real gate: switch back to c1 after GC and read the old tracked bytes.
+    await anvil.switch(c1.id.value);
+    expect(await readFile(config, "utf8")).toBe("TRACKED-V1");
   });
 
   it("keeps commits reachable only through the reflog (e.g. after a branch delete)", async () => {

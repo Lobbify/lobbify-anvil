@@ -340,7 +340,8 @@ export class StatusCommand extends AnvilCommand {
         s.summary,
         `  manifest: ${manifestState(s)}  ·  lock: ${
           s.hasLock ? (s.manifestDirty ? "stale" : "present") : "missing"
-        }  ·  built: ${s.hasBuilt ? (s.buildDirty ? "out-of-date" : "current") : "never"}`,
+        }  ·  built: ${s.hasBuilt ? (s.buildDirty ? "out-of-date" : "current") : "never"}` +
+          `  ·  worktree: ${s.worktreeDirty ? "uncommitted" : "up to date"}`,
       ],
       json: (s) => ({ status: s }),
       // A present-but-unparseable manifest is a real problem, not a clean state.
@@ -628,6 +629,7 @@ export class RevertCommand extends AnvilCommand {
       plain: (r) =>
         r.committed
           ? [
+              ...r.warnings.map((w) => `warning: ${w}`),
               `reverted — committed ${shortId(r.committed.id)} (generation ${r.committed.generation})`,
             ]
           : [
@@ -637,6 +639,7 @@ export class RevertCommand extends AnvilCommand {
       json: (r) => ({
         committed: r.committed ? `${r.committed.id.algo}:${r.committed.id.value}` : null,
         conflicts: r.conflicts,
+        warnings: r.warnings,
       }),
       exitCode: (r) => (r.conflicts.length > 0 ? EXIT_ERROR : EXIT_OK),
     });
@@ -668,11 +671,12 @@ export class RebaseCommand extends ResolvingCommand {
         plain: (r) => {
           switch (r.status) {
             case "done":
-              return r.head
-                ? [
-                    `rebase complete — HEAD at ${shortId(r.head.id)} (generation ${r.head.generation})`,
-                  ]
-                : ["rebase complete"];
+              return [
+                ...r.warnings.map((w) => `warning: ${w}`),
+                r.head
+                  ? `rebase complete — HEAD at ${shortId(r.head.id)} (generation ${r.head.generation})`
+                  : "rebase complete",
+              ];
             case "up-to-date":
               return ["already up to date — nothing to rebase"];
             case "aborted":

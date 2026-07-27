@@ -117,7 +117,15 @@ import type {
   RelockFn,
   RevertOutcome,
 } from "./vc/index.js";
-import { Refs, VcObjectStore, VcRepo, vcReachability } from "./vc/index.js";
+import {
+  EXCLUDE_FILE,
+  Refs,
+  VcObjectStore,
+  VcRepo,
+  snapshotExclusion,
+  trackWorktree,
+  vcReachability,
+} from "./vc/index.js";
 
 /**
  * The default GC grace window (ms). Objects modified within this window are kept
@@ -368,6 +376,32 @@ const DEFAULT_ANVILIGNORE = `# .anvilignore — top-level entries a build must n
 # config/
 `;
 
+/**
+ * The `.anvilexclude` a fresh `anvil init` scaffolds. The two files are easy to
+ * confuse, so the template says it outright: **`.anvilignore` protects a path from
+ * the build, `.anvilexclude` hides a path from version control.** The built-in
+ * defaults are listed as comments so they are discoverable without reading source.
+ */
+const DEFAULT_ANVILEXCLUDE = `# .anvilexclude — paths version control must not record in a commit.
+# .anvilignore protects a path from the BUILD; .anvilexclude hides it from COMMITS.
+#
+# Excluded already, whether or not this file exists:
+#   the game install — assets/ libraries/ versions/ natives/ runtime/
+#   runtime churn    — logs/ crash-reports/ screenshots/ backups/ debug/ .fabric/
+#                      .mixin.out/ .cache/ server-resource-packs/
+#   user-local data  — usercache.json usernamecache.json realms_persistence.json
+#   OS + editor cruft, at any depth — .DS_Store Thumbs.db desktop.ini .directory
+#                      *.swp *.swo *~
+#   saves/, .anvil/, .anvilignore, and everything the lock says the build owns
+#
+# A line takes one of three forms. * is the only wildcard (no ? and no **), it
+# never crosses a /, matching ignores case, and there is no negation:
+#   *.log          a * and no / — a basename glob, matched at any depth
+#   config/*.json  a * and a /  — matched against the whole path, segment by
+#                                 segment, and everything under a match
+#   notes/         no *         — a literal path, and everything under it
+`;
+
 /** The manifest-vs-lock-vs-built dirty state reported by {@link Anvil.status}. */
 export interface StatusResult {
   /** An `anvil.toml` file is present on disk (whether or not it parses). */
@@ -384,6 +418,12 @@ export interface StatusResult {
   readonly manifestDirty: boolean;
   /** The lock differs from what the instance was built from — a `build` is due. */
   readonly buildDirty: boolean;
+  /**
+   * Tracked working-tree files differ from HEAD's commit — a `commit` is due.
+   * `false` before the first commit (there is nothing to be dirty against) and
+   * for an instance with no `.anvil/` history at all.
+   */
+  readonly worktreeDirty: boolean;
   /** A one-line, human-readable summary of the state. */
   readonly summary: string;
 }
@@ -555,6 +595,9 @@ export class Anvil {
     await writeManifest(this.dir, manifest);
     if (!(await pathExists(join(this.dir, ".anvilignore")))) {
       await writeFile(join(this.dir, ".anvilignore"), DEFAULT_ANVILIGNORE);
+    }
+    if (!(await pathExists(join(this.dir, EXCLUDE_FILE)))) {
+      await writeFile(join(this.dir, EXCLUDE_FILE), DEFAULT_ANVILEXCLUDE);
     }
     return manifest;
   }
@@ -1027,9 +1070,48 @@ export class Anvil {
   }
 
   /**
+   * Whether the tracked working-tree files differ from the ones HEAD's commit
+   * recorded. **A read, not a write**: it hashes candidates to compare blob ids
+   * and never admits an object, so `status` cannot mutate history. An unborn HEAD
+   * — or no `.anvil/` at all — reports clean, since there is nothing to differ
+   * from. Offline; it needs only the VC object store and the refs.
+   */
+  async #worktreeDirty(lock: Lockfile | undefined): Promise<boolean> {
+    const anvilDir = join(this.dir, ".anvil");
+    const vcStore = new VcObjectStore({ anvilDir });
+    // Only the history lookup is tolerant: an instance with no `.anvil/`, an unborn
+    // HEAD, or an object database that will not read has nothing to be dirty
+    // against, and `status` never crashes on one. The WALK is deliberately outside
+    // this guard — a directory it cannot read would otherwise report "clean", which
+    // is the same lie as a commit silently recording a deletion.
+    let committed: Map<string, string>;
+    try {
+      const head = await new Refs(anvilDir).resolveHead();
+      if (!head) {
+        return false;
+      }
+      const snapshot = await vcStore.getSnapshot((await vcStore.getCommit(head)).snapshot);
+      committed = new Map(snapshot.tracked.map((t) => [t.path, t.blob.value]));
+    } catch {
+      return false;
+    }
+    const tracked = await trackWorktree({
+      instanceDir: this.dir,
+      vcStore,
+      exclude: await snapshotExclusion(this.dir, lock),
+      store: false,
+    });
+    return (
+      tracked.length !== committed.size ||
+      tracked.some((t) => committed.get(t.path) !== t.blob.value)
+    );
+  }
+
+  /**
    * `anvil status` — the manifest-vs-lock-vs-built dirty state: whether the
-   * manifest has changed since the lock (a re-`lock` is due), and whether the
-   * lock has changed since the last build (a `build` is due). Offline.
+   * manifest has changed since the lock (a re-`lock` is due), whether the lock has
+   * changed since the last build (a `build` is due), and whether the tracked
+   * working-tree files have changed since HEAD (a `commit` is due). Offline.
    */
   async status(): Promise<StatusResult> {
     // Distinguish a truly-absent manifest from one that is present but won't
@@ -1054,6 +1136,7 @@ export class Anvil {
       manifestDirty = mh.value !== input.meta.manifestHash.value;
     }
     const buildDirty = input ? this.#buildDirty(input, built) : false;
+    const worktreeDirty = await this.#worktreeDirty(input);
     let summary: string;
     if (!manifestPresent) {
       summary = "no anvil.toml — run `anvil init`";
@@ -1073,6 +1156,8 @@ export class Anvil {
       summary = "locked but never built — run `anvil build`";
     } else if (buildDirty) {
       summary = "lock changed since build — run `anvil build`";
+    } else if (worktreeDirty) {
+      summary = "working tree changed since the last commit — run `anvil commit`";
     } else {
       summary = "clean — manifest, lock, and instance are in sync";
     }
@@ -1083,6 +1168,7 @@ export class Anvil {
       hasBuilt: built !== undefined,
       manifestDirty,
       buildDirty,
+      worktreeDirty,
       summary,
     };
   }

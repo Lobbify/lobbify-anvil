@@ -39,8 +39,13 @@ wrapper):
 - **rebase** (`rebase.ts` + `repo.ts`) — per-commit item-delta replay + per-step
   re-lock, `--continue` / `--skip` / `--abort`, crash-survivable via `REBASE_STATE`;
 - an extended **`gc`** (`gc.ts`) that walks the full ref/reflog/in-progress-op
-  closure + carried local blobs (VC store) and unions every reachable commit's lock
-  into the shared-store roots.
+  closure + carried local blobs + tracked working-tree blobs (VC store) and unions
+  every reachable commit's lock into the shared-store roots. Tracked blobs are kept
+  in the VC store but are deliberately NOT shared-store roots — they are not build
+  inputs;
+- the **working-tree walk** (`worktree.ts`) — the undeclared files a snapshot
+  records, the exclusion model (`.anvilexclude`, the game install, runtime churn,
+  lock-owned paths), and the path-level 3-way that merges two tracked sets.
 
 **Stage 6 adds the CurseForge source (`src/sources/curseforge.ts`)** — BYO-key
 (`x-api-key`), `classId`→kind + `relationType`→dep maps, sha256 pinned on the first

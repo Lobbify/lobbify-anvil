@@ -74,6 +74,56 @@ own — every `modrinth:` / `curseforge:` / URL item, and a local file that live
 the instance — is placed by its kind, into `mods/`, `resourcepacks/`, `shaderpacks/`,
 `datapacks/`, or `config/`. Paths under `saves/`, `.anvil/`, or `.anvilignore` are refused.
 
+## What a commit captures
+
+A commit records the **source state** of the folder, not the build product:
+
+- `anvil.toml`, `anvil.lock`, and `.anvilignore`;
+- the bytes of every **local** item the lock declares, so an old commit is
+  self-contained and still switchable after the shared store has been garbage
+  collected;
+- every **undeclared** file in the folder — a hand-edited `config/…`, your
+  `options.txt`, a jar you dropped into `mods/` yourself.
+
+It does not record the game install (`assets/`, `libraries/`, `versions/`,
+`natives/`, `runtime/`), which `anvil build` re-derives from the lock; anything else
+the lock says the build owns; `saves/`; runtime churn (`logs/`, `crash-reports/`,
+`screenshots/`, `backups/`, `debug/`, `.fabric/`, `.mixin.out/`, `.cache/`,
+`server-resource-packs/`, `usercache.json`, `usernamecache.json`,
+`realms_persistence.json`); or the cruft your OS and editor leave anywhere in the
+tree (`.DS_Store`, `Thumbs.db`, `desktop.ini`, `.directory`, `*.swp`, `*.swo`,
+`*~`). Opening the folder in Finder or Explorer therefore does not dirty it.
+
+To keep something else out of your history, list it in **`.anvilexclude`**. The two
+dotfiles are easy to confuse, so:
+
+> **`.anvilignore` says the build must not touch this. `.anvilexclude` says version
+> control must not record this.**
+
+In `.anvilexclude`, blank lines and `#` comments are ignored and a line takes one of
+three forms:
+
+| Line | Form | Matches |
+|---|---|---|
+| `*.log` | a `*`, no `/` | that **basename**, at any depth |
+| `config/*.json` | a `*` and a `/` | the whole **path**, segment by segment |
+| `notes/` | no `*` | that literal path, and everything under it |
+
+`*` is the only wildcard (no `?`, no `**`) and it never crosses a `/`, so
+`config/*.json` matches `config/a.json` but not `config/sub/a.json`. A path or
+prefix line also claims everything under what it matches. Matching ignores case, and
+there is no negation. An excluded path is skipped in both directions — never
+written, never deleted — so excluding `screenshots/` and then switching branches
+does not delete your screenshots.
+
+Three limits worth knowing. **Symlinks are not tracked**: there is no way to record
+a link target in the object store, and following one can escape the instance. **No
+file mode is recorded**: Windows cannot represent an exec bit, and recording one
+would make the same tree produce different commit ids on different machines. **Two
+files whose paths differ only by case or Unicode form are refused**: they are one
+file on Windows and macOS, so a checkout would keep one and silently lose the
+other's bytes. `commit` names both paths and asks you to rename one.
+
 ## Quickstart
 
 ```bash
@@ -98,13 +148,13 @@ lobbify-anvil import cobblemon.mrpack && lobbify-anvil build
 
 | Command | What it does |
 |---|---|
-| `init` | Scaffold `anvil.toml` (+ a documented `.anvilignore`). Flags: `--name`, `--minecraft/--mc`, `--loader`, `--summary`, `--force`. |
+| `init` | Scaffold `anvil.toml` (+ documented `.anvilignore` and `.anvilexclude` files). Flags: `--name`, `--minecraft/--mc`, `--loader`, `--summary`, `--force`. |
 | `add <ref>…` | Append item references (`source:id@ver`, a URL, or a `./path`) to the manifest. |
 | `remove <ref>…` | Drop item references from the manifest. |
 | `lock` | Resolve the manifest → a fully-pinned `anvil.lock`. `--upgrade` re-resolves everything; `--upgrade=<item>` just one. |
 | `build` | Install a launch-ready instance from the lock, atomically. `--offline` builds only from the populated store. |
 | `verify` | Re-hash the materialized instance against the lock. `--strict` also fails on drift from the current lock. |
-| `status` | The manifest-vs-lock-vs-built dirty state (what to run next). |
+| `status` | The manifest-vs-lock-vs-built dirty state, plus whether the working tree has uncommitted changes (what to run next). |
 | `diff` | The package delta the next `build` would apply. |
 | `why <item>` | Which root item pulled a (transitive) dependency in. |
 | `import <pack.mrpack>` | Adopt a Modrinth modpack (writes `anvil.toml` + a pre-resolved `anvil.lock`). |
@@ -196,8 +246,11 @@ This is the same, deliberate **trust-the-source** model you already rely on else
 safety-from-your-inputs: every fetched artifact (including processor jars and their
 classpath deps) is **sha256-pinned** so a rebuild is byte-identical; all network I/O
 goes through an **SSRF-guarded** client; and every archive extraction is **zip-slip
-guarded**. Those are integrity/DoS protections — they are *not* a defense against the
-build code of a source you told it to build.
+guarded**. History pulled from a remote is bounded the same way: an object is
+verified against the hash it arrived under, refused if it inflates past 512 MiB, and
+refused if a snapshot lists more than 100,000 tracked files. Those are integrity/DoS
+protections — they are *not* a defense against the build code of a source you told
+it to build.
 
 **Embedding anvil to build from untrusted/remote sources?** Then *you* own the
 sandboxing, and anvil gives you the seams:

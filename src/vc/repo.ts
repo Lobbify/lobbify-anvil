@@ -10,6 +10,10 @@
  *   - **Never merge two derived locks.** Merge/rebase merge the *item set* (authored
  *     intent), then re-derive the lock through a constrained, pin-preserving
  *     re-lock (the injected {@link RelockFn}, wired to the Stage-2 resolver).
+ *
+ * A 3-way also merges the snapshot's **tracked** set, by path (`mergeTrackedSets`).
+ * That is a set merge, not a content merge: two sides that changed the same file
+ * resolve ours-wins with a warning, never a spliced file.
  */
 
 import { writeFile } from "node:fs/promises";
@@ -23,7 +27,7 @@ import { parseManifest, readManifest, writeManifest } from "../manifest/index.js
 import { pinsFromLock } from "../resolver/index.js";
 import { hashBuffer } from "../store/hash.js";
 import type { ContentStore } from "../store/index.js";
-import { DirtyWorkingTree, UnknownRef, VcStateError } from "../types/errors.js";
+import { AnvilError, DirtyWorkingTree, UnknownRef, VcStateError } from "../types/errors.js";
 import type { Hash, LockPackage, Lockfile, Manifest } from "../types/index.js";
 import type { Conflict, ConflictStrategy, OnConflict } from "./conflict.js";
 import { findLca, isAncestor, nextGeneration } from "./graph.js";
@@ -39,6 +43,7 @@ import {
 } from "./rebase.js";
 import { Refs } from "./refs.js";
 import { buildSnapshot, materializeSnapshot } from "./snapshot.js";
+import { mergeTrackedSets } from "./worktree.js";
 
 /** A commit reference. Generation numbers order history — wall-clock never does. */
 export interface CommitRef {
@@ -100,6 +105,8 @@ export interface MergeOutcome {
 export interface RevertOutcome {
   readonly committed?: CommitRef;
   readonly conflicts: readonly Conflict[];
+  /** Non-fatal decisions the revert had to make (a tracked file that diverged). */
+  readonly warnings: readonly string[];
 }
 
 /** Result of a rebase (start / continue / skip / abort). */
@@ -118,6 +125,16 @@ interface CommitContent {
   readonly snapshot: SnapshotObject;
   readonly manifest: Manifest;
   readonly lock: Lockfile;
+}
+
+/**
+ * One side of a 3-way apply: a real commit, or a synthesized empty parent for a
+ * root commit (which has no snapshot, so its carried and tracked sets are empty).
+ */
+interface ThreeWaySide {
+  readonly manifest: Manifest;
+  readonly lock: Lockfile;
+  readonly snapshot?: SnapshotObject;
 }
 
 const EMPTY_MANIFEST_ITEMS: readonly never[] = [];
@@ -308,7 +325,22 @@ export class VcRepo {
 
   // --- switch --------------------------------------------------------------
 
-  /** The snapshot id the working tree currently represents (undefined if untracked). */
+  /**
+   * The snapshot id the working tree currently represents (undefined if untracked).
+   *
+   * Only an {@link AnvilError} means "this tree does not represent a snapshot" — an
+   * unparseable manifest, a lock whose local bytes have gone. Those are the states
+   * `switch` may proceed through. An I/O failure is NOT one of them: swallowing an
+   * `EACCES` here would return `undefined`, which makes {@link switchTo} skip the
+   * dirty-tree guard entirely and materialize over uncommitted work. Now that a
+   * snapshot covers the whole tracked tree, a read it could not perform must stop
+   * the switch, not silently widen it.
+   *
+   * A path collision is the same kind of stop. It is a {@link VcStateError}, which
+   * is an {@link AnvilError}, so it would otherwise be swallowed into `undefined`
+   * — and the switch that follows would materialize over the very files whose
+   * collision makes them impossible to keep apart. Refusing is the point.
+   */
   async #worktreeSnapshotId(): Promise<Hash | undefined> {
     if (!(await pathExists(join(this.#instanceDir, "anvil.lock")))) {
       return undefined;
@@ -319,10 +351,22 @@ export class VcRepo {
         vcStore: this.#objects,
         sharedStore: this.#shared,
         requireLockFresh: false,
+        // A dirty-check is a question, not a write. Storing every tracked blob on
+        // every `switch` attempt — including the refused ones — admitted objects
+        // no commit references. The id is identical either way (it is the sha256
+        // of an encoding that holds blob ids, and a blob id comes from the bytes,
+        // not from the store holding them).
+        storeTracked: false,
       });
       return built.id;
-    } catch {
-      return undefined;
+    } catch (err) {
+      if (err instanceof VcStateError) {
+        throw err;
+      }
+      if (err instanceof AnvilError) {
+        return undefined;
+      }
+      throw err;
     }
   }
 
@@ -478,7 +522,15 @@ export class VcRepo {
     };
   }
 
-  /** VC blobs already holding carried local bytes across a set of snapshots. */
+  /**
+   * VC blobs already holding carried local bytes across a set of snapshots.
+   *
+   * Deliberately **carried only**, though the LB-705 design sketched extending it
+   * to index `tracked` by path: "a snapshot mentioned this blob" is not the claim
+   * "this store holds those bytes", and `VcObjectStore.put` already dedups with a
+   * `has()` stat, so the index would trade a real probe for an inference and buy
+   * nothing. Its absence here is a decision, not an omission.
+   */
   #knownBlobs(snapshots: readonly SnapshotObject[]): Map<string, Hash> {
     const map = new Map<string, Hash>();
     for (const snap of snapshots) {
@@ -572,13 +624,18 @@ export class VcRepo {
         parents: [oursId, theirsId],
       });
       if (!outcome.committed) {
-        return { conflicts: outcome.conflicts, warnings, fastForward: false, upToDate: false };
+        return {
+          conflicts: outcome.conflicts,
+          warnings: [...warnings, ...outcome.warnings],
+          fastForward: false,
+          upToDate: false,
+        };
       }
       await this.refs.writeOrigHead(oursId);
       return {
         committed: outcome.committed,
         conflicts: [],
-        warnings,
+        warnings: [...warnings, ...outcome.warnings],
         fastForward: false,
         upToDate: false,
       };
@@ -593,9 +650,9 @@ export class VcRepo {
    * conflict → abort) → write worktree + record commit.
    */
   async #applyThreeWay(args: {
-    base: { manifest: Manifest; lock: Lockfile };
+    base: ThreeWaySide;
     ours: CommitContent;
-    theirs: { manifest: Manifest; lock: Lockfile; snapshot?: SnapshotObject };
+    theirs: ThreeWaySide;
     project: Manifest["project"];
     policy: ResolutionPolicy;
     message: string;
@@ -603,7 +660,11 @@ export class VcRepo {
     parents: readonly Hash[];
     /** When set, do not advance HEAD (rebase manages its own tip); just record. */
     readonly recordOnly?: boolean;
-  }): Promise<{ committed?: CommitRef; conflicts: readonly Conflict[] }> {
+  }): Promise<{
+    committed?: CommitRef;
+    conflicts: readonly Conflict[];
+    warnings: readonly string[];
+  }> {
     const merged = await threeWayMerge({
       base: this.#itemSetOf(args.base),
       ours: this.#itemSetOf(args.ours),
@@ -615,7 +676,7 @@ export class VcRepo {
       policy: args.policy,
     });
     if (!merged.manifest) {
-      return { conflicts: merged.conflicts };
+      return { conflicts: merged.conflicts, warnings: [] };
     }
 
     const game = this.#gameFor(merged.manifest.game, [
@@ -641,31 +702,40 @@ export class VcRepo {
         severity: "high",
         message,
       };
-      return { conflicts: [conflict] };
+      return { conflicts: [conflict], warnings: [] };
     }
 
     await this.#writeWorktree(merged.manifest, relocked);
-    const carriedKnown = this.#knownBlobs(
-      [
-        args.ours.snapshot,
-        (args.theirs as CommitContent).snapshot,
-        (args.base as CommitContent).snapshot,
-      ].filter((s): s is SnapshotObject => Boolean(s)),
+    const known = this.#knownBlobs(
+      [args.ours.snapshot, args.theirs.snapshot, args.base.snapshot].filter(
+        (s): s is SnapshotObject => Boolean(s),
+      ),
     );
     const built = await buildSnapshot({
       instanceDir: this.#instanceDir,
       vcStore: this.#objects,
       sharedStore: this.#shared,
       requireLockFresh: true,
-      knownBlobs: carriedKnown,
+      knownBlobs: known,
     });
-    // Materialize the merged carried local files back onto the working tree, so a
-    // local item whose winning side differs from the current working tree (e.g.
-    // theirs won a config edit) is written to disk — the tree now matches the
-    // commit, not just the manifest+lock.
+    // The snapshot just built captured the working tree, whose tracked set is
+    // "ours" by construction. Left at that, merging a branch that added
+    // `config/foo.json` would silently drop it — the exact class of loss tracked
+    // files exist to prevent — so the tracked sets get their own path-level 3-way.
+    const tracked = mergeTrackedSets(
+      args.base.snapshot?.tracked ?? [],
+      built.snapshot.tracked,
+      args.theirs.snapshot?.tracked ?? [],
+    );
+    const snapshot: SnapshotObject = { ...built.snapshot, tracked: tracked.tracked };
+    const snapshotId = await this.#objects.put(snapshot);
+    // Materialize the merged carried + tracked files back onto the working tree, so
+    // a file whose winning side differs from the current working tree (theirs won a
+    // config edit, theirs added a file) is written to disk — the tree now matches
+    // the commit, not just the manifest+lock.
     await materializeSnapshot({
       instanceDir: this.#instanceDir,
-      snapshot: built.snapshot,
+      snapshot,
       vcStore: this.#objects,
       sharedStore: this.#shared,
       previous: args.ours.snapshot,
@@ -674,7 +744,7 @@ export class VcRepo {
       const parentCommits = await Promise.all(args.parents.map((p) => this.#objects.getCommit(p)));
       const commit: CommitObject = {
         type: "commit",
-        snapshot: built.id,
+        snapshot: snapshotId,
         parents: args.parents,
         gen: nextGeneration(parentCommits),
         author: this.#author,
@@ -683,10 +753,14 @@ export class VcRepo {
         op: args.op,
       };
       const id = await this.#objects.put(commit);
-      return { committed: { id, generation: commit.gen }, conflicts: [] };
+      return {
+        committed: { id, generation: commit.gen },
+        conflicts: [],
+        warnings: tracked.warnings,
+      };
     }
-    const committed = await this.#recordCommit(built.id, args.message, args.op, args.parents);
-    return { committed, conflicts: [] };
+    const committed = await this.#recordCommit(snapshotId, args.message, args.op, args.parents);
+    return { committed, conflicts: [], warnings: tracked.warnings };
   }
 
   // --- revert --------------------------------------------------------------
@@ -713,7 +787,7 @@ export class VcRepo {
     const outcome = await this.#applyThreeWay({
       base: target,
       ours: head,
-      theirs: parent as { manifest: Manifest; lock: Lockfile },
+      theirs: parent as ThreeWaySide,
       project: head.manifest.project,
       policy: {},
       message: `revert "${target.commit.message}"`,
@@ -723,7 +797,11 @@ export class VcRepo {
     if (outcome.committed) {
       await this.refs.writeOrigHead(headId);
     }
-    return { committed: outcome.committed, conflicts: outcome.conflicts };
+    return {
+      committed: outcome.committed,
+      conflicts: outcome.conflicts,
+      warnings: outcome.warnings,
+    };
   }
 
   // --- rebase --------------------------------------------------------------
@@ -915,6 +993,7 @@ export class VcRepo {
   /** Drive the rebase todo list, one item-delta replay + re-lock per step. */
   async #runRebase(initial: RebaseState, policy: ResolutionPolicy): Promise<RebaseOutcome> {
     let state = initial;
+    const warnings: string[] = [];
     while (state.todo.length > 0) {
       const currentId = state.todo[0];
       if (!currentId) {
@@ -932,7 +1011,7 @@ export class VcRepo {
 
       // Replay `current`'s delta (parent → current) onto the rebased tip.
       const applied = await this.#applyThreeWay({
-        base: parent as { manifest: Manifest; lock: Lockfile },
+        base: parent as ThreeWaySide,
         ours: tip,
         theirs: current,
         project: tip.manifest.project,
@@ -942,6 +1021,7 @@ export class VcRepo {
         parents: [state.tip],
         recordOnly: true,
       });
+      warnings.push(...applied.warnings);
       if (!applied.committed) {
         // Pause: persist which commit is stuck; the working tree holds tip's state.
         const paused: RebaseState = { ...state, current: currentId };
@@ -949,7 +1029,7 @@ export class VcRepo {
         return {
           status: "conflicts",
           conflicts: applied.conflicts,
-          warnings: [],
+          warnings,
           remaining: state.todo.length,
         };
       }
@@ -990,7 +1070,7 @@ export class VcRepo {
       status: "done",
       head: { id: state.tip, generation: tipCommit.gen },
       conflicts: [],
-      warnings: [],
+      warnings,
       remaining: 0,
     };
   }

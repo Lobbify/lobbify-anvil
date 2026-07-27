@@ -267,6 +267,7 @@ describe("tui: plain fallback emits NO ANSI escapes", () => {
         hasBuilt: false,
         manifestDirty: false,
         buildDirty: true,
+        worktreeDirty: false,
         summary: "locked but never built — run `anvil build`",
       },
       lock: packLock,
