@@ -41,6 +41,7 @@ describe("a hostile base pack", () => {
   ) {
     const instanceDir = opts.instanceDir ?? (await tmp("inst"));
     const store = new ContentStore({ root: await tmp("store") });
+    const warnings: string[] = [];
     const lock = await resolveManifest({
       manifest,
       registry: registryWith({ modrinth: world.http }),
@@ -48,13 +49,18 @@ describe("a hostile base pack", () => {
       now: NOW,
       baseDir: instanceDir,
       store,
+      emit: (event) => {
+        if (event.type === "warning") {
+          warnings.push(event.message);
+        }
+      },
       resolveBase: baseResolverFor(world, instanceDir, {
         now: NOW,
         store,
         ...(opts.allowSource ? { allowSource: opts.allowSource } : {}),
       }),
     });
-    return { lock, instanceDir };
+    return { lock, instanceDir, warnings };
   }
 
   it("cannot write into saves/ — the member is skipped, the world is untouched", async () => {
@@ -72,13 +78,18 @@ describe("a hostile base pack", () => {
     await mkdir(join(instanceDir, "saves", "MyWorld"), { recursive: true });
     await writeFile(join(instanceDir, "saves", "MyWorld", "level.dat"), "mine");
 
-    const { lock } = await lockIt(world, baseManifest(world.from), { instanceDir });
+    const { lock, warnings } = await lockIt(world, baseManifest(world.from), { instanceDir });
     expect(
       lock.resolved.some(
         (p) => p.placement.method === "link" && p.placement.target.startsWith("saves/"),
       ),
     ).toBe(false);
     expect(await readFile(join(instanceDir, "saves", "MyWorld", "level.dat"), "utf8")).toBe("mine");
+    // …and the user is told *why*, naming the protected path. A pack that tries
+    // this is either broken or hostile; either way it is not a quiet skip.
+    expect(warnings).toContainEqual(
+      expect.stringContaining("protected path: saves/MyWorld/level.dat"),
+    );
   });
 
   it("cannot write into .anvil/ via a member path", async () => {
