@@ -5,7 +5,18 @@ carry a breaking change, and each one is called out below.
 
 ## Unreleased
 
+## v0.2.0 — 2026-07-28
+
 ### Added
+
+- **Forge and NeoForge are supported**, alongside Fabric and Quilt — anvil now covers
+  all four loaders. `anvil build` runs the loader installer's own processors to produce
+  a launch-ready instance. Those processors are JVM code from the pack's sources and
+  **are executed by design**: anvil trusts what you build, as git trusts hooks and
+  `npm install` trusts scripts. It is not a sandbox against its own inputs and does not
+  claim to be — see SECURITY.md and the README's "Trust model & security". Embedders
+  restrict via the `allowSource` / `allowProcessor` hooks and an injectable
+  `ProcessorRunner`.
 
 - **`game.from` accepts a CurseForge modpack**, alongside Modrinth: `game.from =
   "curseforge:715572@8323938"`. It resolves through the same `BasePackSource`
@@ -210,7 +221,6 @@ carry a breaking change, and each one is called out below.
 
 - `revert` now returns `warnings`, alongside `merge` and `rebase`.
 
-### Changed
 
 - **After upgrading, an instance holding undeclared files reports a dirty working
   tree where it previously reported clean, and needs one commit to re-baseline.**
@@ -336,5 +346,5 @@ carry a breaking change, and each one is called out below.
 
 First public release. Reproducible, content-addressed Minecraft instances: the folder
 is the instance, `anvil.toml` declares it, `.anvil/` holds the object store and
-history. Covers vanilla plus Fabric, Quilt, Forge and NeoForge; version control with
+history. Covers vanilla plus Fabric and Quilt; version control with
 branch, merge and rebase; remotes; `.mrpack` export and Prism import; an Ink TUI.
