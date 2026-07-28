@@ -5,6 +5,17 @@ carry a breaking change, and each one is called out below.
 
 ## Unreleased
 
+### Fixed
+
+- **`import` followed by `lock`, with no `build` in between, no longer crashes.** It
+  exited 70 with an internal-error banner and an `ENOENT` on an override path. An
+  imported override is tracked under `.anvil/overrides/`, but its manifest entry named
+  the in-instance path, which only exists once a build has materialised it — so the
+  resolver went looking for a file that was not there yet. The manifest is now
+  self-consistent before any build: a path-carrying item records where to **read** from
+  and, separately, where to **place**. A genuinely missing local file still fails
+  loudly; the fix deliberately does not trade the crash for a silent drop.
+
 ## v0.2.0 — 2026-07-28
 
 ### Added
