@@ -1,8 +1,11 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ConflictError,
   ContentStore,
   type Manifest,
+  PathEscape,
   SourceNotAllowed,
   SsrfBlocked,
   UnsatisfiableTarget,
@@ -266,5 +269,99 @@ describe("resolver", () => {
         offline: true,
       }),
     ).rejects.toBeInstanceOf(UnsatisfiableTarget);
+  });
+
+  // --- LB-719: an explicitly declared placement target -----------------------
+  //
+  // A declared target is attacker-controlled independently of the read path, so
+  // it gets the same guards a derived target does — and never the kind-directory
+  // fallback, which would turn a refused placement into a silent relocation.
+
+  /** An instance dir holding one tracked file at `.anvil/overrides/tracked.txt`. */
+  async function instanceWithTrackedFile(): Promise<string> {
+    const dir = await mkTmp("tgt-inst");
+    dirs.push(dir);
+    await mkdir(join(dir, ".anvil", "overrides"), { recursive: true });
+    await writeFile(join(dir, ".anvil", "overrides", "tracked.txt"), "tracked bytes\n");
+    return dir;
+  }
+
+  function manifestWithTarget(target: string): Manifest {
+    return {
+      project: { name: "p", version: "1" },
+      game: { minecraft: "26.2", loader: "fabric 0.19.1" },
+      items: [{ path: ".anvil/overrides/tracked.txt", kind: "config", target }],
+    };
+  }
+
+  async function resolveWithTarget(target: string, baseDir: string) {
+    return resolveManifest({
+      manifest: manifestWithTarget(target),
+      registry: registryWith({}),
+      allowSource: () => true,
+      now: NOW,
+      baseDir,
+      store: await freshStore(),
+    });
+  }
+
+  it("LB-719: a declared target places the tracked file where it says", async () => {
+    const dir = await instanceWithTrackedFile();
+    const lock = await resolveWithTarget("config/deep/settings.txt", dir);
+    expect(lock.resolved.find((p) => p.source === "local")?.placement).toEqual({
+      method: "link",
+      target: "config/deep/settings.txt",
+    });
+  });
+
+  it("LB-719: a declared target under a protected top is REFUSED (never relocated)", async () => {
+    const dir = await instanceWithTrackedFile();
+    for (const evil of ["saves/world/level.dat", ".anvil/objects/x", ".anvilignore"]) {
+      await expect(resolveWithTarget(evil, dir)).rejects.toBeInstanceOf(PathEscape);
+    }
+  });
+
+  it("LB-719: a declared target escaping the instance is REFUSED, not placed by kind", async () => {
+    const dir = await instanceWithTrackedFile();
+    // Falling back to `<kind-dir>/<basename>` here is the tempting move and the
+    // wrong one: the manifest stated a placement, so ignoring it relocates the
+    // file silently instead of refusing an illegal one.
+    for (const evil of ["../../etc/passwd", "/etc/passwd", "..", "./"]) {
+      await expect(resolveWithTarget(evil, dir)).rejects.toBeInstanceOf(PathEscape);
+    }
+  });
+
+  it("LB-719: a reader that ignores `target` REFUSES the item rather than misplacing it", async () => {
+    // `target` is an addition to a published format, and an older anvil drops
+    // unknown keys — which is the field's one real hazard. It lands safely here
+    // only because the read path it pairs with is inside `.anvil/`: strip the
+    // target and what is left is an item claiming a protected placement, which
+    // has always been refused. The failure mode is a hard error on a manifest it
+    // cannot honor, not a file quietly written somewhere else.
+    const dir = await instanceWithTrackedFile();
+    const manifest: Manifest = {
+      project: { name: "p", version: "1" },
+      game: { minecraft: "26.2", loader: "fabric 0.19.1" },
+      items: [{ path: ".anvil/overrides/tracked.txt", kind: "config" }], // target dropped
+    };
+    await expect(
+      resolveManifest({
+        manifest,
+        registry: registryWith({}),
+        allowSource: () => true,
+        now: NOW,
+        baseDir: dir,
+        store: await freshStore(),
+      }),
+    ).rejects.toBeInstanceOf(PathEscape);
+  });
+
+  it("LB-719: a missing tracked file still fails LOUDLY — never a silent drop", async () => {
+    const dir = await mkTmp("tgt-gone");
+    dirs.push(dir);
+    // No `.anvil/overrides/tracked.txt` at all. Tolerating this is the patch the
+    // ticket refused: the item would vanish from the lock, and the next build
+    // would delete the file from the instance without a word.
+    await expect(resolveWithTarget("config/settings.txt", dir)).rejects.toThrow(/ENOENT|tracked/);
   });
 });

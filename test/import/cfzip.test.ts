@@ -1,5 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ContentStore,
@@ -140,21 +140,24 @@ describe("importCurseForgeZip", () => {
     // initial hand-built lock) and never `manifestItems`. Without an entry here,
     // a later `anvil lock` has nothing in anvil.toml to reproduce the override
     // from, and silently drops it.
-    expect(result.manifest.items).toContainEqual({ path: "config/mymod.toml", kind: "config" });
-    expect(result.manifest.items).toContainEqual({ path: "options.txt", kind: "config" });
+    // Each entry reads from its tracked copy and declares where it is placed
+    // (LB-719) — the pack-relative path names nothing on disk until a build has
+    // run, so it cannot be the read location.
+    expect(result.manifest.items).toContainEqual({
+      path: ".anvil/overrides/config/mymod.toml",
+      kind: "config",
+      target: "config/mymod.toml",
+    });
+    expect(result.manifest.items).toContainEqual({
+      path: ".anvil/overrides/options.txt",
+      kind: "config",
+      target: "options.txt",
+    });
 
-    // Simulate the state after a `build` has materialized the overrides onto
-    // disk at their placement target (what a real build does before any later
-    // re-lock could run) — the tracked `.anvil/overrides/` copy is only ever
-    // consulted at import time, per the `local` source contract.
-    for (const [rel, bytes] of [
-      ["config/mymod.toml", "greeting = 'hi'\n"],
-      ["options.txt", "fov:70\n"],
-    ] as const) {
-      const dest = join(instanceDir, rel);
-      await mkdir(dirname(dest), { recursive: true });
-      await writeFile(dest, bytes);
-    }
+    // No build is simulated here on purpose: the manifest is self-consistent as
+    // written, so the re-lock below reads the tracked copies. Before LB-719 this
+    // test had to materialize the overrides onto disk first, or the resolve
+    // crashed with ENOENT.
 
     // Re-lock from the manifest alone (constrained re-lock, reusing the prior
     // lock's pins where possible) — this is exactly what `anvil lock` does.

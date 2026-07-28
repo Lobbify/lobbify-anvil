@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT_CODES } from "../../src/cli/errors.js";
@@ -211,6 +211,92 @@ describe("mrpack import (untrusted input) → build", () => {
     expect(files).toContain("config/a/b/c.toml");
     expect(files).not.toContain("config/c.toml");
     expect(await readFile(join(cwd, "config", "a", "b", "c.toml"), "utf8")).toBe("nested = true\n");
+  });
+
+  it("LB-719 GATE: import → lock with NO build in between succeeds and reproduces the import's lock", async () => {
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      overrides: [{ path: "config/a/b/c.toml", data: "nested = true\n" }],
+      clientOverrides: [{ path: "options.txt", data: "fov:70" }],
+    });
+
+    expect((await cli.run(["import", pack])).code).toBe(0);
+    const importLock = await readFile(join(cwd, "anvil.lock"), "utf8");
+
+    // No `build` runs here — that is the whole point. The override bytes exist
+    // only at `.anvil/overrides/<path>`; nothing has been materialized yet.
+    const beforeLock = await listFiles(cwd);
+    expect(beforeLock).not.toContain("config/a/b/c.toml");
+    expect(beforeLock).not.toContain("options.txt");
+
+    const locked = await cli.run(["lock"]);
+    // Used to be exit 70 + "unexpected failure: ENOENT … /config/a/b/c.toml"
+    // with the internal-error banner, on a perfectly ordinary command sequence.
+    expect(locked.code).toBe(0);
+    expect(locked.stderr).not.toContain("ENOENT");
+    expect(locked.stderr).not.toContain("please report it");
+
+    // "Equivalent to the import's own lock" — byte for byte, in fact.
+    expect(await readFile(join(cwd, "anvil.lock"), "utf8")).toBe(importLock);
+
+    // And the placement survived the round trip: a build off the re-lock puts
+    // both overrides exactly where the pack had them.
+    expect((await cli.run(["build"])).code).toBe(0);
+    const files = await listFiles(cwd);
+    expect(files).toContain("config/a/b/c.toml");
+    expect(files).toContain("options.txt");
+    expect(await readFile(join(cwd, "options.txt"), "utf8")).toBe("fov:70");
+  });
+
+  it("LB-719 GATE: import → lock with NO build and NO prior lock resolves the override from scratch", async () => {
+    // The sibling gate above is satisfied by the constrained re-lock reusing the
+    // import's pin verbatim (a local ref's key now matches the pin's, which is
+    // half of what was broken). This one deletes the lock first, so the override
+    // has to be resolved from the manifest alone — `local` actually reads the
+    // file. That is the state a fresh clone or a post-merge re-lock is in.
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      overrides: [{ path: "config/sodium.json", data: '{"quality":"high"}' }],
+    });
+    expect((await cli.run(["import", pack])).code).toBe(0);
+    await rm(join(cwd, "anvil.lock"));
+
+    const locked = await cli.run(["lock"]);
+    expect(locked.code).toBe(0);
+    const lock = await readFile(join(cwd, "anvil.lock"), "utf8");
+    // Placed at the pack-relative path, not at the path it was read from.
+    expect(lock).toContain('target = "config/sodium.json"');
+    expect(lock).not.toContain('target = ".anvil/overrides/config/sodium.json"');
+
+    expect((await cli.run(["build"])).code).toBe(0);
+    expect(await readFile(join(cwd, "config", "sodium.json"), "utf8")).toBe('{"quality":"high"}');
+  });
+
+  it("LB-719 GATE: a deleted tracked override fails the lock LOUDLY, never a silent drop", async () => {
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      overrides: [{ path: "config/sodium.json", data: '{"quality":"high"}' }],
+    });
+    expect((await cli.run(["import", pack])).code).toBe(0);
+    // Drop the prior lock so the item is genuinely re-resolved rather than
+    // reused from its pin — otherwise nothing reads the file and this proves
+    // nothing about the missing-file path.
+    await rm(join(cwd, "anvil.lock"));
+
+    // Now remove the bytes the manifest reads from. The tempting fix for LB-719
+    // was to let the resolver shrug at a missing local file — which turns this
+    // into an item that quietly leaves the lock, and a file the next build
+    // deletes from the instance without a word. That is LB-704 all over again.
+    await rm(join(cwd, ".anvil", "overrides", "config", "sodium.json"));
+
+    const locked = await cli.run(["lock"]);
+    expect(locked.code).not.toBe(0);
+    expect(locked.stderr).toContain("sodium.json");
+    // And it refused rather than writing a lock with the item missing.
+    expect(await listFiles(cwd)).not.toContain("anvil.lock");
   });
 
   it("skips an override targeting a protected path (saves/) rather than clobbering it", async () => {

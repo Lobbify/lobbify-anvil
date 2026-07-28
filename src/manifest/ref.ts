@@ -109,6 +109,9 @@ export function refForItem(item: ManifestItem): ResolvedRef {
       id: item.path,
       versionSpec: { kind: "latest" },
       ...(item.kind ? { kind: item.kind } : {}),
+      // An explicit placement, when the read location and the placement differ
+      // (a tracked copy). Carried as-authored; the resolver validates it.
+      ...(item.target !== undefined ? { target: item.target } : {}),
     };
   }
   throw new ManifestError("manifest item has neither a ref nor a path");

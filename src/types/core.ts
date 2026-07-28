@@ -115,6 +115,29 @@ export interface ManifestItem {
   readonly path?: string;
   /** An explicit kind, when the source/path cannot be trusted to infer it. */
   readonly kind?: ItemKind;
+  /**
+   * Where this item is **placed**, when that differs from where its bytes are
+   * **read**. Instance-relative POSIX, the same currency as {@link ResolvedRef}'s
+   * `target`.
+   *
+   * A `path` item normally names both at once — `"config/sodium/mixins.json"` is
+   * read from there and built back there. That breaks down for a **tracked copy**:
+   * an imported override's bytes live at `.anvil/overrides/<path>` from the moment
+   * `import` writes them, while the file belongs at `<path>` in the built tree. The
+   * pack-relative path alone cannot express that, and a manifest that names it as
+   * the read location describes a file that does not exist until a build has run.
+   *
+   * So the two halves are separable: `path` is the read location, `target` is the
+   * placement. Declaring it is what keeps such a manifest self-consistent before
+   * any build, and it is validated by the same {@link declaredPlacementTarget}
+   * guards a derived target passes — an explicit field is attacker-controlled
+   * independently of the read path, so it gets the stricter, not the looser, check.
+   *
+   * Only a `path` item may declare it today. A `ref` item that carries one is
+   * refused by the parser rather than ignored: silently dropping it would place the
+   * file somewhere other than where the manifest says.
+   */
+  readonly target?: string;
 }
 
 /**

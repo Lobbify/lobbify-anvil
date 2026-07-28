@@ -8,7 +8,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ContentStore,
@@ -141,12 +141,16 @@ describe("Prism import", () => {
     expect(result.local).toBe(1);
     const imported = result.lock.resolved.find((p) => p.source === "local");
     expect(imported?.placement).toEqual({ method: "link", target: "mods/26.2/nested.jar" });
-    expect(result.manifest.items).toContainEqual({ path: "mods/26.2/nested.jar", kind: "mod" });
+    // The item reads from the tracked copy and declares its placement (LB-719).
+    expect(result.manifest.items).toContainEqual({
+      path: ".anvil/overrides/mods/26.2/nested.jar",
+      kind: "mod",
+      target: "mods/26.2/nested.jar",
+    });
 
-    // What a build puts on disk, which is what a later `lock` re-reads.
-    const built = join(instanceDir, "mods", "26.2", "nested.jar");
-    await mkdir(dirname(built), { recursive: true });
-    await writeFile(built, nested);
+    // Nothing is written to `mods/26.2/nested.jar` here: since LB-719 the
+    // manifest reads from the tracked copy, so the re-lock below needs no build
+    // to have run first.
 
     // The round trip: re-resolving the manifest must reproduce the SAME target.
     // Before LB-706 the local source rebuilt it from kind + basename, so this

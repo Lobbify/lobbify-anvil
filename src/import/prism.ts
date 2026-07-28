@@ -12,9 +12,11 @@
  *     item (project/file, sha256-pinned, bytes never stored — re-fetched per client);
  *   - else it stays a **local** file under `.anvil/overrides/` (tracked verbatim).
  *
- * Placement follows what the manifest can reproduce. An unmatched file becomes a
- * `{ path, kind }` item and keeps its pack-relative path, subdirectories and all,
- * across every later re-lock. A re-identified one becomes a bare `source:id` ref,
+ * Placement follows what the manifest can reproduce. An unmatched file becomes an
+ * item that reads from its tracked copy and declares the pack-relative path as its
+ * `target`, so it keeps that path, subdirectories and all, across every later
+ * re-lock — and resolves before a build has run. A re-identified one becomes a
+ * bare `source:id` ref,
  * which carries no path, so it is placed by kind — the same thing a re-lock would
  * derive. Preserving a subdirectory only in the import lock would put the lock and
  * every later re-lock into silent disagreement, so a jar that does move is
@@ -315,7 +317,14 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
         size: bytes.byteLength,
         url: pathToFileURL(trackedPath).toString(),
       });
-      manifestItems.push({ path: packRel, kind });
+      // Read from the tracked copy, place at the pack-relative path. The
+      // pack-relative path names nothing on disk until a build materializes it,
+      // so naming it as the read location made `import` → `lock` crash (LB-719).
+      manifestItems.push({
+        path: posix.join(".anvil", "overrides", packRel),
+        kind,
+        target: packRel,
+      });
       localCount += 1;
       emit({ type: "object:store", hash: sha256, deduped: false });
     }

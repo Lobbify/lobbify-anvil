@@ -49,6 +49,53 @@ describe("anvil.toml parser", () => {
     expect(again.items).toHaveLength(m.items.length);
   });
 
+  it("LB-719: a path item may declare a target, and it round-trips", () => {
+    const m = parseManifest(`
+[project]
+name = "x"
+version = "1"
+
+[game]
+minecraft = "26.2"
+loader = "vanilla"
+
+items = [
+  { path = ".anvil/overrides/config/sodium.json", kind = "config", target = "config/sodium.json" },
+  { path = ".anvil/overrides/options.txt", target = "options.txt" },
+]
+`);
+    expect(m.items[0]).toEqual({
+      path: ".anvil/overrides/config/sodium.json",
+      kind: "config",
+      target: "config/sodium.json",
+    });
+    // A target with no kind still forces the table form out of the serializer —
+    // rendering it as a bare string would drop the placement silently.
+    expect(m.items[1]).toEqual({ path: ".anvil/overrides/options.txt", target: "options.txt" });
+    expect(parseManifest(serializeManifest(m)).items).toEqual(m.items);
+  });
+
+  it("LB-719: a ref item declaring a target is REFUSED, not silently ignored", () => {
+    // Honoring it needs every source to place by a declared target (LB-720).
+    // Accepting and dropping the field would put the file somewhere other than
+    // where the manifest plainly says — the silent-misplacement class.
+    expect(() =>
+      parseManifest(`
+[project]
+name = "x"
+version = "1"
+
+[game]
+minecraft = "26.2"
+loader = "vanilla"
+
+items = [
+  { ref = "modrinth:sodium", target = "mods/nested/sodium.jar" },
+]
+`),
+    ).toThrow(ManifestError);
+  });
+
   it("rejects a missing [game] table and a malformed item", () => {
     expect(() => parseManifest("[project]\nname='x'\nversion='1'\n")).toThrow(ManifestError);
     expect(() =>

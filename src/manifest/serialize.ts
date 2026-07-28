@@ -20,13 +20,14 @@ export function formatRef(ref: ResolvedRef): string {
   return ref.versionSpec.kind === "latest" ? base : `${base}@${formatVersionSpec(ref.versionSpec)}`;
 }
 
-/** Render a single item as either a string or a `{ path, kind }` inline table. */
+/** Render a single item as either a string or a `{ path, kind, target }` table. */
 function renderItem(item: ManifestItem): string {
   if (item.path !== undefined) {
-    if (item.kind) {
+    if (item.kind || item.target !== undefined) {
       return inlineTable([
         ["path", tomlString(item.path)],
-        ["kind", tomlString(item.kind)],
+        ...(item.kind ? [["kind", tomlString(item.kind)] as const] : []),
+        ...(item.target !== undefined ? [["target", tomlString(item.target)] as const] : []),
       ]);
     }
     return tomlString(item.path);

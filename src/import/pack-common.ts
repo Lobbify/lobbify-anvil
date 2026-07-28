@@ -8,10 +8,15 @@
  * throwaway stage dir, and any file whose destination is a protected/unsafe path
  * is refused, never placed. Each surviving file becomes a tracked **local**
  * (copy) entry under `.anvil/overrides/` — placed into the pre-resolved import
- * lock **and** appended to the manifest's `items` (a `{ path, kind }` entry, the
- * same shape {@link importPrism} uses for its unmatched-jar case), so a later
- * `anvil lock` (regenerating the lock FROM the manifest, e.g. after a merge or
- * rebase) reproduces the override instead of silently dropping it.
+ * lock **and** appended to the manifest's `items` (the same shape
+ * {@link importPrism} uses for its unmatched-jar case), so a later `anvil lock`
+ * (regenerating the lock FROM the manifest, e.g. after a merge or rebase)
+ * reproduces the override instead of silently dropping it.
+ *
+ * That manifest entry reads from the tracked copy and declares the pack-relative
+ * path as its `target`. Both halves matter: the tracked copy is the only place
+ * the bytes exist before a build has run, and the target is where they belong in
+ * the built tree.
  */
 
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -166,7 +171,17 @@ export async function importOverrideTree(input: ImportOverrideTreeInput): Promis
       });
       // Same shape importPrism uses for its unmatched-jar local entries — see
       // module doc. A base pack passes no list: its files are not authored items.
-      input.manifestItems?.push({ path: destRel, kind });
+      //
+      // The item reads from the TRACKED copy and places at the pack-relative
+      // path. Naming `destRel` for both would describe a file that does not
+      // exist until a build has materialized it, so `import` → `lock` with no
+      // build in between went looking for it and crashed (LB-719). The tracked
+      // copy exists from the moment this loop writes it.
+      input.manifestItems?.push({
+        path: posix.join(".anvil", subdir, destRel),
+        kind,
+        target: destRel,
+      });
       input.onStored(hash);
       count += 1;
     }

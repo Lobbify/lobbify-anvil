@@ -23,6 +23,8 @@
  *   "https://example.com/mod.jar",
  *   "./config/sodium/mixins.json",
  *   { path = "./options.txt", kind = "config" },
+ *   # a tracked copy: read from .anvil/, placed where it belongs
+ *   { path = ".anvil/overrides/config/sodium.json", target = "config/sodium.json" },
  * ]
  *
  * [sources]                       # optional per-source base-URL overrides
@@ -37,8 +39,15 @@
  * there, and `"./options.txt"` stays at the instance root. Only a path that
  * resolves outside the instance (`"../shared/mods/foo.jar"`, an absolute path)
  * names no placement of its own; such an item is placed by its kind, like any
- * Modrinth/CurseForge/URL item. `saves/`, `.anvil/`, and `.anvilignore` are
- * refused outright.
+ * Modrinth/CurseForge/URL item.
+ *
+ * An explicit `target` splits those two halves apart: `path` stays the read
+ * location and `target` becomes the placement. That is how a **tracked copy**
+ * (an imported override, whose bytes live under `.anvil/overrides/` before any
+ * build has run) names a manifest that is self-consistent from the moment
+ * `import` writes it. Either way, `saves/`, `.anvil/`, and `.anvilignore` are
+ * refused as a *placement* — a target is checked by the same guards a derived
+ * one is, so the field cannot be used to write where a path could not.
  */
 
 import { readFile } from "node:fs/promises";
@@ -121,9 +130,19 @@ function parseItemValue(v: unknown, i: number): ManifestItem {
       return {
         path: t.path,
         ...(t.kind !== undefined ? { kind: asOptionalKind(t.kind, `items[${i}].kind`) } : {}),
+        ...(t.target !== undefined ? { target: asString(t.target, `items[${i}].target`) } : {}),
       };
     }
     if (typeof t.ref === "string") {
+      // Refused, not ignored. A `ref` item carries no path to place from, so
+      // honoring `target` here means teaching every source to honor it — see
+      // LB-720. Until then, accepting the field and dropping it would put the
+      // file somewhere other than where the manifest plainly says.
+      if (t.target !== undefined) {
+        throw new ManifestError(
+          `items[${i}]: a "ref" item cannot declare a "target" — only a "path" item can name a placement separate from where its bytes are read. Reference it as a path, or drop the target and let it be placed by kind.`,
+        );
+      }
       const kind = asOptionalKind(t.kind, `items[${i}].kind`);
       const ref = parseRef(t.ref);
       return { ref: kind ? { ...ref, kind } : ref };
