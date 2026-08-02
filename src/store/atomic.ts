@@ -9,7 +9,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
 import { open, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -57,13 +56,30 @@ export async function writeTemp(
   // Create the temp already-immutable (0444): the write fd (O_WRONLY) can still
   // write it, but the object is read-only the instant it appears at its final
   // path after rename — no rename→chmod window, and dedup can't leave a mutable
-  // object behind. Reopen read-only (not "r+", which EACCESes on 0444) to fsync.
-  await pipeline(source, tap, createWriteStream(tmpPath, { mode: OBJECT_MODE }));
-  await fireFault(fault, "object:temp-written");
-  const fh = await open(tmpPath, "r");
+  // object behind.
+  //
+  // Then fsync THROUGH THAT SAME WRITE HANDLE, before it is closed. Reopening the
+  // 0444 temp is not an option on either side: "r+" EACCESes on POSIX, and a
+  // read-only "r" handle is what Windows rejects — there `fsync` is
+  // `FlushFileBuffers`, which demands a handle with write access and returns
+  // ERROR_ACCESS_DENIED → EPERM without one (LB-821). Owning the handle keeps
+  // both properties: the file is never mode-writable for an instant, and the
+  // sync still goes through a writable fd.
+  //
+  // `autoClose: false` is load-bearing. The stream's fd belongs to `fh`, and the
+  // default (autoClose: true) closes it the moment the pipeline finishes, so the
+  // sync would land on a closed fd (EBADF). Destroying the stream also releases
+  // the handle, so it must not be destroyed until after the sync — and it MUST be
+  // destroyed before `fh.close()`, which otherwise waits forever on the stream's
+  // outstanding reference.
+  const fh = await open(tmpPath, "w", OBJECT_MODE);
+  const sink = fh.createWriteStream({ autoClose: false });
   try {
+    await pipeline(source, tap, sink);
+    await fireFault(fault, "object:temp-written");
     await fh.sync();
   } finally {
+    sink.destroy();
     await fh.close();
   }
   return { tmpPath, hash: digest() };

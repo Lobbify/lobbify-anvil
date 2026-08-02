@@ -206,7 +206,12 @@ export async function recordReplayPaths(
   const tmpPath = `${finalPath}.${process.pid}.tmp`;
   try {
     await writeFile(tmpPath, `${merged.join("\n")}\n`);
-    const fh = await open(tmpPath, "r");
+    // Reopen "r+", not "r": on Windows `fsync` is `FlushFileBuffers`, which needs
+    // a handle with write access and returns ERROR_ACCESS_DENIED → EPERM without
+    // one (LB-821, same defect as `writeTemp` in `atomic.ts`). "r+" opens the
+    // already-written file for read/write without truncating it — "w" would
+    // truncate and discard the bytes `writeFile` just wrote.
+    const fh = await open(tmpPath, "r+");
     try {
       await fh.sync();
     } finally {
