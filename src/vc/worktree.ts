@@ -693,10 +693,12 @@ function indexByPath(files: readonly TrackedFile[]): Map<string, TrackedFile> {
  * | present as B | differs from B | absent | keep ours, **with a warning** |
  * | present as B | absent | equals B | stay deleted (theirs untouched) |
  * | present as B | absent | differs from B | stay deleted, **with a warning** |
- * | present | present | present, blobs differ | ours wins, with a warning |
+ * | present as B | equals B | differs from B | **take theirs** (ours untouched) |
+ * | present as B | differs from B | equals B | keep ours (theirs untouched) |
+ * | present as B | differs from B | differs from B and from ours | ours wins, with a warning |
  * | any | same blob | same blob | keep, no warning |
  *
- * The two modify/delete rows are why the base is consulted at all. Deciding a
+ * The modify/delete rows are why the base is consulted at all. Deciding a
  * one-sided survivor purely on "was it in the base" drops a file that one side
  * *edited* and the other merely deleted — the edit is gone, no commit records it,
  * and nothing says so. That is exactly the silent-loss class tracked files exist
@@ -704,9 +706,21 @@ function indexByPath(files: readonly TrackedFile[]): Map<string, TrackedFile> {
  * announced along with what was thrown away. An untouched-vs-deleted pair is a
  * clean deletion and stays silent, or every switch would be noise.
  *
+ * The same reasoning decides the modify/modify rows, and for the same reason
+ * (LB-819). A side that still holds the base's bytes has expressed no intent
+ * about the file, so "both sides have it" is not by itself a disagreement: when
+ * only one side moved, that side wins whether it moved by editing or by
+ * deleting. Resolving ours-wins there instead would discard every config the
+ * other branch retuned — the most common kind of work on a variant — and is the
+ * same silent loss the modify/delete rows exist to prevent, pointed the other
+ * way. Only a genuine two-sided divergence resolves ours-wins, and only that
+ * warns: a warning that also fired when nothing was lost would be noise the
+ * reader learns to skip, which costs more than it gives.
+ *
  * It merges the set **by path**. It never merges file **contents** — anvil does
- * not diff or splice bytes, and divergent content is resolved ours-wins loudly
- * rather than quietly.
+ * not diff or splice bytes. Taking a side whole is not a content merge, so the
+ * rule is unchanged: divergent content is resolved ours-wins loudly rather than
+ * quietly, and no file is ever spliced.
  */
 export function mergeTrackedSets(
   base: readonly TrackedFile[],
@@ -725,10 +739,22 @@ export function mergeTrackedSets(
     const their = inTheirs.get(path);
     const priorFile = inBase.get(path);
     if (our && their) {
+      if (our.blob.value === their.blob.value) {
+        tracked.push(our); // same bytes either way — no decision to make, no noise
+        continue;
+      }
+      // Only a side whose bytes moved off the base has said anything about this
+      // file. With no base the path is new to both, so both sides moved.
+      const oursMoved = !priorFile || our.blob.value !== priorFile.blob.value;
+      const theirsMoved = !priorFile || their.blob.value !== priorFile.blob.value;
+      if (!oursMoved) {
+        tracked.push(their); // ours still holds the base's bytes: their edit is the only intent
+        continue;
+      }
       tracked.push(our);
-      if (our.blob.value !== their.blob.value) {
+      if (theirsMoved) {
         warnings.push(
-          `tracked file "${path}" changed on both sides — keeping ours (anvil never merges file contents)`,
+          `tracked file "${path}" changed on both sides — keeping ours and discarding theirs (anvil never merges file contents)`,
         );
       }
       continue;
