@@ -1,7 +1,13 @@
 import { readFile, stat } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ContentStore, OBJECT_MODE } from "../../index.js";
-import { mkTmp, rmTmp } from "../helpers/fixtures.js";
+import {
+  ContentStore,
+  type Lockfile,
+  OBJECT_MODE,
+  readReplayPaths,
+  recordReplayPaths,
+} from "../../index.js";
+import { hashOf, mkTmp, rmTmp } from "../helpers/fixtures.js";
 
 // Records every fsync the store issues, and the access mode of the handle it was
 // issued on. Hoisted so the `vi.mock` factory below can reach it.
@@ -98,5 +104,61 @@ describe("object writes fsync through a write handle (LB-821)", () => {
       code: "SHA_MISMATCH",
     });
     expect(await store.has(wrong)).toBe(false);
+  });
+});
+
+// The sibling site: `recordReplayPaths` (replay-provenance.ts) has the same defect
+// — `writeFile(tmp)` then reopen "r" to `fsync`, which is genuine EPERM under the
+// same Windows fsync semantics the mock above imposes. Reached on every build via
+// `pipeline.ts` and twice from `remote/sync.ts`, so it is live on the hot path, not
+// a theoretical duplicate.
+describe("the replay-path ledger fsyncs through a write handle (LB-821 sibling)", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const d of dirs) {
+      await rmTmp(d);
+    }
+    dirs.length = 0;
+    fsyncs.calls.length = 0;
+  });
+
+  function lockWithReplayTarget(target: string): Lockfile {
+    return {
+      meta: {
+        version: 1,
+        manifestHash: hashOf(new Uint8Array([1]), "sha256"),
+        minecraft: "26.2",
+        loader: "fabric 0.19.1",
+        java: "j",
+      },
+      resolved: [
+        {
+          name: "jei",
+          kind: "mod",
+          source: "curseforge",
+          hash: hashOf(Buffer.from("replay-bytes"), "sha256"),
+          provenance: "replay",
+          placement: { method: "link", target },
+          project: 1,
+          file: 1,
+        },
+      ],
+    };
+  }
+
+  it("writes the ledger under Windows fsync semantics, synced on a writable handle", async () => {
+    const dir = await mkTmp("replay-ledger");
+    dirs.push(dir);
+
+    // On the unfixed code this rejects with EPERM/-4048 — the exact CI failure.
+    await recordReplayPaths(dir, [lockWithReplayTarget("mods/jei.jar")]);
+
+    // The claim landed, so the write cannot have been skipped.
+    expect(await readReplayPaths(dir)).toContain("mods/jei.jar");
+
+    // The ledger fsync actually happened, on a handle that had write access.
+    // Without this, quietly dropping the fsync (or swallowing EPERM) would still
+    // pass.
+    expect(fsyncs.calls.some((c) => c.writable)).toBe(true);
   });
 });
