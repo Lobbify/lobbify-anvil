@@ -1,6 +1,6 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EXIT_CODES } from "../../src/cli/errors.js";
 import { type OfflineCli, makeOfflineCli } from "../helpers/cli.js";
 import { listFiles, mkTmp, rmTmp } from "../helpers/fixtures.js";
@@ -10,6 +10,25 @@ import { fabricJar } from "../helpers/net.js";
 
 const FABRIC_ID = `fabric-loader-${FABRIC_LOADER}-${MC}`;
 const MIRROR = (name: string) => `https://cdn.modrinth.com/data/${name}/x/${name}.jar`;
+
+/**
+ * LB-829 — twelve real import → build → re-lock → build round trips over a
+ * fresh CLI instance each `beforeEach`, so this file is fs- and
+ * build-pipeline-heavy, and `windows-latest · Node 22` has timed out here on
+ * both recent `main` runs at vitest's 5000ms default — a DIFFERENT test each
+ * time (not one pathological case):
+ *   - "LB-706 GATE: a root-level override survives ... AT THE ROOT" — 5601ms
+ *     (run b398187).
+ *   - "GATE: import pack.mrpack → build ..." — 5080ms (run 8af2bbc).
+ * `windows-latest · Node 20`, same two runs: 4137ms / 3945ms for the whole
+ * file. A clean `windows-latest · Node 22` run one PR earlier (LB-819, all
+ * six jobs green): 3422ms, faster than that run's own Node 20 leg (4481ms).
+ * That swing is Windows runner variance, not a fixed Node-version cost — so
+ * headroom has to survive noise, not just the two timeouts already seen.
+ * 20s is ~4x the clean baseline and ~3.5x the worst timeout; don't halve it
+ * without re-measuring on windows-latest · Node 22.
+ */
+vi.setConfig({ testTimeout: 20_000 });
 
 describe("mrpack import (untrusted input) → build", () => {
   const dirs: string[] = [];
