@@ -18,7 +18,7 @@
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ContentStore,
@@ -38,6 +38,30 @@ afterEach(async () => {
   }
   dirs.length = 0;
 });
+
+/**
+ * Whether `abs` is `root` itself or genuinely nested under it, asked of the
+ * PLATFORM `path` module rather than a hardcoded separator (LB-825).
+ *
+ * On Windows `safeJoin` legitimately returns a backslash-separated,
+ * drive-lettered absolute path (e.g. `C:\tmp\anvil-instance\options.txt`), so
+ * a POSIX `startsWith(root + "/")` string check is false for well-contained
+ * output — it asserts the test runner's platform, not containment. Resolving
+ * the root and comparing with the platform's own `path.sep` is correct on
+ * every OS `safeJoin` runs on, and — unlike a bare `startsWith(root)` — the
+ * trailing `sep` still refuses a sibling that merely shares `root`'s string
+ * prefix (`/tmp/anvil-instance-evil-twin` is not under `/tmp/anvil-instance`).
+ *
+ * `abs` is taken as given rather than resolved: `safeJoin` already returns a
+ * resolved path, and resolving it a second time would let a caller pass a
+ * relative one and still pass — which would be this check quietly accepting
+ * input it was never meant to see. Callers that build `abs` themselves resolve
+ * it themselves.
+ */
+function isUnderRoot(root: string, abs: string): boolean {
+  const normalizedRoot = resolve(root);
+  return abs === normalizedRoot || abs.startsWith(normalizedRoot + sep);
+}
 
 function manifestWith(path: string, kind?: "mod" | "config"): Manifest {
   return {
@@ -109,8 +133,24 @@ describe("declaredPlacementTarget — the placement half of the path guard", () 
       expect(target).toBeDefined();
       // safeJoin is the build-time enforcement; it must accept what we hand it.
       const abs = safeJoin(root, target as string);
-      expect(abs.startsWith(`${root}/`)).toBe(true);
+      expect(isUnderRoot(root, abs), `${abs} is not under ${root}`).toBe(true);
     }
+  });
+
+  it("isUnderRoot itself goes red for a genuine escape (negative control for the check above)", () => {
+    // Not routed through safeJoin: safeJoin's job is to THROW on an escaping
+    // input rather than return one, and that refusal is already covered by
+    // the "declares NO placement" and PathEscape tests above. This test is
+    // about the containment CHECK, not the guard — proving isUnderRoot can
+    // actually observe an escape, so the assertion it replaced above is not
+    // silently vacuous on any platform.
+    const root = "/tmp/anvil-instance";
+    expect(isUnderRoot(root, resolve(root, "options.txt"))).toBe(true);
+    // A sibling directory that merely shares root's string prefix — the
+    // classic `startsWith(root)`-without-separator bug class.
+    expect(isUnderRoot(root, resolve("/tmp/anvil-instance-evil-twin/options.txt"))).toBe(false);
+    // A path with no relation to root at all.
+    expect(isUnderRoot(root, resolve("/etc/passwd"))).toBe(false);
   });
 });
 
