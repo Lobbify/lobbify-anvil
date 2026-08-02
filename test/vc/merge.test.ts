@@ -1,10 +1,28 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Manifest, parseRef, readLock, serializeLock } from "../../index.js";
 import { pathExists } from "../../src/internal/fs.js";
 import { rmTmp } from "../helpers/fixtures.js";
 import { makeVcFixture, manifest, modWorld, version } from "../helpers/vc.js";
+
+/**
+ * LB-829 — this file does real 3-way merges over a materialized VC fixture
+ * (writes/reads the working tree, re-locks, re-materializes), and on
+ * `windows-latest · Node 22` that lands close enough to vitest's 5000ms
+ * default that CI has timed out here twice on `main`:
+ *   - "GATE determinism: a clean merge is byte-identical across runs" hit
+ *     the 5000ms abort at 5006ms (run b398187).
+ * The same file on the SAME two runs, `windows-latest · Node 20`: 2201ms /
+ * 1996ms total. A clean `windows-latest · Node 22` run one PR earlier
+ * (LB-819, all six jobs green): 2108ms. So this isn't a stable "Node 22 is
+ * 1.7x slower" law — a later run of the identical file on Node 22 took
+ * 3366ms with the flagged test itself at only 1389ms — it's Windows runner
+ * variance pushing an already-thin margin over the line. 20s gives ~4x
+ * headroom over the worst clean number seen and ~3.5x over the timeout
+ * itself; don't halve it without re-measuring on windows-latest · Node 22.
+ */
+vi.setConfig({ testTimeout: 20_000 });
 
 function cleanWorld(): ReturnType<typeof modWorld> {
   return modWorld([

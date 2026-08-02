@@ -10,10 +10,28 @@
 
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Hash, type TrackedFile, VcObjectStore } from "../../index.js";
 import { mkTmp, rmTmp } from "../helpers/fixtures.js";
 import { bumpMod, makeInstance, modWorldOf, writeAndLock } from "../helpers/remote.js";
+
+/**
+ * LB-829 — the 40-item-pack test below builds a real pack, serves it from a
+ * real remote, and content-addresses a pull against it; that's genuine I/O,
+ * not incidental slowness, and it's the ONE test that has hit
+ * `windows-latest · Node 22`'s 5000ms default on BOTH recent `main` runs:
+ *   - "a 40-item pack, host bumps 1 mod → exactly 1 object transfers,
+ *     the rest stay linked" — 5627ms (run b398187), 5096ms (run 8af2bbc).
+ * `windows-latest · Node 20`, same two runs, whole-file total: 5087ms /
+ * 5646ms — already brushing 5s even there, just distributed across 5 tests
+ * instead of concentrated in one. A clean `windows-latest · Node 22` run one
+ * PR earlier (LB-819, all six jobs green): 4208ms, faster than that run's
+ * own Node 20 leg (6218ms) — this is Windows runner variance riding on a
+ * margin that was already too thin, not a one-way Node 22 regression.
+ * 20s is ~4x the clean baseline and ~3.5x the worst timeout observed so
+ * far; don't halve it without re-measuring on windows-latest · Node 22.
+ */
+vi.setConfig({ testTimeout: 20_000 });
 
 const dirs: string[] = [];
 afterEach(async () => {
