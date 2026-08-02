@@ -1,0 +1,7 @@
+# Normalize line endings to LF everywhere, regardless of the checkout platform
+# or a contributor's local `core.autocrlf`. Without this, Windows checkouts
+# convert every tracked text file's LF to CRLF, and biome's `lineEnding: "lf"`
+# formatter then reports the entire tree as unformatted (LB-816: 234 errors
+# across 236 files on windows-latest, none of them a real content diff — every
+# line the diagnostic showed was `content` vs `content␍`).
+* text=auto eol=lf

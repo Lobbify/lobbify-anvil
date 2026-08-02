@@ -78,6 +78,52 @@ function nativesJar(soName: string): Uint8Array {
   );
 }
 
+/**
+ * The one lwjgl natives library, per (os, arch) classifier — hoisted to module
+ * scope (rather than local to {@link makeGameFixtures}) so a test can look up
+ * "what file does THIS classifier extract to" without re-deriving it or guessing
+ * a host's native filename itself. Bytes/hashes are pure, so hoisting changes
+ * nothing about what `makeGameFixtures()` serves.
+ */
+const natives = {
+  linux: {
+    classifier: "natives-linux",
+    so: "liblwjgl.so",
+    url: `${H}/objects/nat-linux.jar`,
+    jar: nativesJar("liblwjgl.so"),
+  },
+  macos: {
+    classifier: "natives-macos",
+    so: "liblwjgl.dylib",
+    url: `${H}/objects/nat-macos.jar`,
+    jar: nativesJar("liblwjgl.dylib"),
+  },
+  macosArm: {
+    classifier: "natives-macos-arm64",
+    so: "liblwjgl-arm.dylib",
+    url: `${H}/objects/nat-macos-arm.jar`,
+    jar: nativesJar("liblwjgl-arm.dylib"),
+  },
+  windows: {
+    classifier: "natives-windows",
+    so: "lwjgl.dll",
+    url: `${H}/objects/nat-win.jar`,
+    jar: nativesJar("lwjgl.dll"),
+  },
+};
+
+/**
+ * Fixture-only lookup: the natives-classifier suffix (as returned by the
+ * production `nativesClassifierOf`, i.e. WITHOUT the leading `natives-`) to the
+ * filename this fixture's jar extracts to. A test resolves "which classifier
+ * applies to this host" through the real `packageAppliesToPlatform` gate on the
+ * built lock, then asks this map for the resulting filename — the host-detection
+ * stays production code; only "what did the fixture name the file" is test-owned.
+ */
+export const NATIVE_SO_BY_CLASSIFIER: Record<string, string> = Object.fromEntries(
+  Object.values(natives).map((n) => [n.classifier.replace(/^natives-/, ""), n.so]),
+);
+
 /** Build the full offline game dataset (vanilla + a Fabric loader). */
 export function makeGameFixtures(): FakeGameData {
   const g = new FakeGame();
@@ -97,32 +143,6 @@ export function makeGameFixtures(): FakeGameData {
   g.put(objcUrl, objcJar);
   g.put(asmVUrl, asmVanillaJar);
 
-  const natives = {
-    linux: {
-      classifier: "natives-linux",
-      so: "liblwjgl.so",
-      url: `${H}/objects/nat-linux.jar`,
-      jar: nativesJar("liblwjgl.so"),
-    },
-    macos: {
-      classifier: "natives-macos",
-      so: "liblwjgl.dylib",
-      url: `${H}/objects/nat-macos.jar`,
-      jar: nativesJar("liblwjgl.dylib"),
-    },
-    macosArm: {
-      classifier: "natives-macos-arm64",
-      so: "liblwjgl-arm.dylib",
-      url: `${H}/objects/nat-macos-arm.jar`,
-      jar: nativesJar("liblwjgl-arm.dylib"),
-    },
-    windows: {
-      classifier: "natives-windows",
-      so: "lwjgl.dll",
-      url: `${H}/objects/nat-win.jar`,
-      jar: nativesJar("lwjgl.dll"),
-    },
-  };
   for (const n of Object.values(natives)) {
     g.put(n.url, n.jar);
   }
