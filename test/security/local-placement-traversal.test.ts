@@ -47,10 +47,16 @@ afterEach(async () => {
  * drive-lettered absolute path (e.g. `C:\tmp\anvil-instance\options.txt`), so
  * a POSIX `startsWith(root + "/")` string check is false for well-contained
  * output — it asserts the test runner's platform, not containment. Resolving
- * both sides and comparing with the platform's own `path.sep` is correct on
+ * the root and comparing with the platform's own `path.sep` is correct on
  * every OS `safeJoin` runs on, and — unlike a bare `startsWith(root)` — the
  * trailing `sep` still refuses a sibling that merely shares `root`'s string
  * prefix (`/tmp/anvil-instance-evil-twin` is not under `/tmp/anvil-instance`).
+ *
+ * `abs` is taken as given rather than resolved: `safeJoin` already returns a
+ * resolved path, and resolving it a second time would let a caller pass a
+ * relative one and still pass — which would be this check quietly accepting
+ * input it was never meant to see. Callers that build `abs` themselves resolve
+ * it themselves.
  */
 function isUnderRoot(root: string, abs: string): boolean {
   const normalizedRoot = resolve(root);
