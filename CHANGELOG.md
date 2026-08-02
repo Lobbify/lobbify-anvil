@@ -17,19 +17,38 @@ carry a breaking change, and each one is called out below.
   bypass the protected-top-level guard by construction. Enforced, on every
   segment (not only a protected top, since an unprotected `config:foo`
   diverges the identical way):
-  - at lock time, in `declaredPlacementTarget` — a manifest item declaring
-    such a path is refused (`PathEscape`);
+  - at lock time, in `declaredPlacementTarget` — any manifest item declaring
+    such a path is refused (`PathEscape`), whether the manifest was
+    hand-written or produced by an importer;
   - at build time, in `safeJoin` — every write of a pack- or lock-derived
     target (the placement executor, the atomic swap, Forge/NeoForge
     processor replay) is refused (`PathEscape`);
+  - at build time, in `safeExtract` (its new opt-in `rejectColon`) — an
+    archive entry with such a segment is refused when the extraction lands
+    directly on the build's instance stage rather than a throwaway
+    directory (the `extract` placement — a natives jar's own contents);
   - at import time, in `isUnsafePackPath` — a `.mrpack`/CurseForge-zip
-    `overrides/` file or top-level `files[]` entry with such a path is
+    `overrides/` file, a top-level `files[]` entry, or a Prism/MultiMC
+    import's unmatched file that would generate such a manifest target is
     skipped with a warning rather than written, before its bytes reach the
-    tracked-copy store.
+    tracked-copy store (Prism: before the target is ever recorded at all).
 
-  A pack that legitimately shipped a colon in a path was never installable
-  on Windows in the first place, so the practical compatibility cost of all
-  three is close to zero.
+  **What this costs, stated plainly instead of as "close to zero":** a
+  *pack* (a `.mrpack` or CurseForge modpack) declaring a colon path was
+  never installable on a Windows client to begin with, so refusing it there
+  costs that pack nothing it had. That reasoning does **not** cover a path
+  that originates from the user's own POSIX filesystem: a hand-written
+  `anvil.toml` with an explicit colon `target`, or a Prism/MultiMC import of
+  a directory containing a colon-named file, both worked (built, on POSIX)
+  before this change. A hand-written manifest now fails loudly, at the next
+  `anvil lock`, with a `PathEscape` naming the offending path. A Prism
+  import instead skips just that file with a warning and imports the rest
+  of the instance normally — the instance stays lockable, but that one file
+  is left out and has to be brought over some other way. **And a manifest
+  or lock that already carries a colon target from before this change stops
+  building the moment you upgrade anvil** — the guard cannot distinguish
+  old state from new, so an existing instance that happened to work is a
+  real, if narrow, upgrade break, not just a restriction on new input.
 
   **Deliberately not enforced on `anvil switch`/`branch` (VC checkout).**
   Those paths are the user's own already-committed working-tree files, not

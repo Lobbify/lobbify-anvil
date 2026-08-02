@@ -26,6 +26,17 @@
  * importer is fully offline-testable and the (network) Modrinth/CurseForge lookups
  * are a thin production wiring. The written lock never carries a rehostable URL for
  * a replay item; matched CurseForge jars are `provenance: "replay"` from the start.
+ *
+ * The user's own Prism instance is trusted content — the same category as a VC
+ * checkout, not a hostile pack — but an **unmatched** file's `target` is still the
+ * one thing here that later meets a hostile-manifest gate: `declaredPlacementTarget`
+ * refuses any `:`-bearing segment unconditionally at lock time (an NTFS
+ * alternate-data-stream trigger on Windows — LB-827), and it cannot tell an import's
+ * own output from a hand-written manifest. So an unmatched file whose pack-relative
+ * path would be refused is skipped with a warning ({@link isUnsafePackPath}) rather
+ * than recorded — this importer must never write a `target` its own lock-time gate
+ * will later reject, or the import "succeeds" today and the instance can never lock
+ * or build again.
  */
 
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
@@ -53,7 +64,7 @@ import type {
   ObjectSink,
 } from "../types/index.js";
 import type { GamePinsForImport } from "./mrpack.js";
-import { kindForPackPath } from "./pack-common.js";
+import { isUnsafePackPath, kindForPackPath } from "./pack-common.js";
 
 /** A Modrinth re-identification of a local jar. */
 export interface ModrinthMatch {
@@ -303,6 +314,20 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
       }
 
       // 3. Unmatched → a tracked local file under .anvil/overrides/.
+      //
+      // A ':'-bearing (or otherwise unplaceable) packRel must not become a
+      // manifest `target`: `declaredPlacementTarget` refuses it unconditionally
+      // at lock time (LB-827). Writing it anyway would make THIS import report
+      // success (`warnings: []`, an item recorded, bytes on disk) and leave the
+      // instance permanently unable to lock or build from that moment on — a
+      // silently broken instance is worse than one file the import declines to
+      // carry. Skip it, same per-file treatment `importOverrideTree` already
+      // gives a hostile `.mrpack`/CurseForge-zip override for the identical
+      // reason: the user still has the file in Prism, only this import doesn't.
+      if (isUnsafePackPath(packRel)) {
+        warnings.push(`skipped file with an unplaceable path: ${packRel}`);
+        continue;
+      }
       const trackedPath = join(trackedRoot, packRel);
       await mkdir(join(trackedPath, ".."), { recursive: true });
       await writeFile(trackedPath, bytes);

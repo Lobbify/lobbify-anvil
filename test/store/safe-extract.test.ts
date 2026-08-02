@@ -119,3 +119,96 @@ describe("safeExtract — zip-slip and bomb guards", () => {
     ).rejects.toBeInstanceOf(DecompressionBomb);
   });
 });
+
+// GATE (security must-do) — LB-827 round 3: `safeExtract` gained an opt-in
+// `rejectColon`, closing the gap the round-2 review found (a `:`-bearing entry
+// extracted verbatim, with no check at all). Opt-in, not unconditional, because
+// `import/pack-common.ts`'s override-tree import extracts into a throwaway dir
+// it always removes and filters colon-bearing entries itself before the one
+// persisted write — see test/import/mrpack.test.ts's "skips a ':'-segment
+// override" cases for that half. This block proves both sides of the option:
+// the default still passes a colon through (no behavior change for existing
+// callers), and `rejectColon: true` refuses it outright.
+describe("safeExtract — refuses a ':'-bearing entry only when the caller opts in (LB-827 round 3)", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const d of dirs) {
+      await rmTmp(d);
+    }
+    dirs.length = 0;
+  });
+
+  it("DEFAULT (no rejectColon): a ':'-named entry extracts verbatim, unchanged from before", async () => {
+    const work = await mkTmp("xtr-colon");
+    dirs.push(work);
+    const zip = await zipFile(
+      work,
+      "colon.zip",
+      makeZip([{ name: "evil:stream.dll", data: "PAYLOAD" }]),
+    );
+    const out = join(work, "out");
+    const written = await safeExtract(zip, out);
+    expect(written).toEqual(["evil:stream.dll"]);
+    expect(await listFiles(out)).toContain("evil:stream.dll");
+  });
+
+  it("rejectColon: true — refuses a top-level ':'-bearing entry (PathEscape)", async () => {
+    const work = await mkTmp("xtr-colon");
+    dirs.push(work);
+    const zip = await zipFile(
+      work,
+      "colon.zip",
+      makeZip([{ name: "evil:stream.dll", data: "PAYLOAD" }]),
+    );
+    const out = join(work, "out");
+    await expect(safeExtract(zip, out, { rejectColon: true })).rejects.toBeInstanceOf(PathEscape);
+    const files = await listFiles(out).catch(() => []);
+    expect(files).not.toContain("evil:stream.dll");
+  });
+
+  it("rejectColon: true — refuses a colon buried in a NESTED entry segment too", async () => {
+    const work = await mkTmp("xtr-colon");
+    dirs.push(work);
+    const zip = await zipFile(
+      work,
+      "colon.zip",
+      makeZip([{ name: "natives/sub/name:stream.txt", data: "x" }]),
+    );
+    await expect(safeExtract(zip, join(work, "out"), { rejectColon: true })).rejects.toBeInstanceOf(
+      PathEscape,
+    );
+  });
+
+  it("rejectColon: true does not over-reject an ordinary colon-free archive", async () => {
+    const work = await mkTmp("xtr-colon");
+    dirs.push(work);
+    const zip = await zipFile(
+      work,
+      "ok.zip",
+      makeZip([
+        { name: "libfoo.so", data: "FOO" },
+        { name: "nested/libbar.so", data: "BAR" },
+      ]),
+    );
+    const out = join(work, "out");
+    const written = await safeExtract(zip, out, { rejectColon: true });
+    expect(written.sort()).toEqual(["libfoo.so", "nested/libbar.so"]);
+  });
+
+  it("rejectColon: true still enforces every OTHER guard (traversal, absolute, symlink)", async () => {
+    const work = await mkTmp("xtr-colon");
+    dirs.push(work);
+    const trav = await zipFile(
+      work,
+      "trav.zip",
+      makeZip([{ name: "../escaped.txt", data: "pwned" }]),
+    );
+    await expect(
+      safeExtract(trav, join(work, "out1"), { rejectColon: true }),
+    ).rejects.toBeInstanceOf(PathEscape);
+    const abs = await zipFile(work, "abs.zip", makeZip([{ name: "/etc/pwned", data: "x" }]));
+    await expect(
+      safeExtract(abs, join(work, "out2"), { rejectColon: true }),
+    ).rejects.toBeInstanceOf(PathEscape);
+  });
+});

@@ -17,6 +17,11 @@
  * lock/manifest-derived, never a file already sitting in the user's own
  * instance, so refusing a `:`-bearing segment (an NTFS alternate-data-stream
  * trigger on Windows) costs nothing and closes the placement half of that gap.
+ * `extract` additionally passes `rejectColon: true` through to `safeExtract`
+ * itself — that guards the archive's OWN entries (a natives jar with a
+ * `evil:stream.dll` member), which `destDir`'s `safeJoin` check cannot see,
+ * because this extraction lands on the build's instance stage, not a
+ * throwaway dir.
  */
 
 import { randomUUID } from "node:crypto";
@@ -209,7 +214,14 @@ export async function executePlacement(
     }
     case "extract": {
       const destDir = safeJoin(ctx.stageRoot, p.targetDir, { rejectColon: true });
-      await safeExtract(ctx.store.objectPath(pkg.hash), destDir, { exclude: excludeMetaInf });
+      // rejectColon: true (LB-827) — this unpacks straight onto the build's
+      // instance stage, which is NOT a throwaway dir like the pack importers'
+      // (see safe-extract.ts's module doc): an entry safeExtract let through
+      // here would land in the built instance for real.
+      await safeExtract(ctx.store.objectPath(pkg.hash), destDir, {
+        exclude: excludeMetaInf,
+        rejectColon: true,
+      });
       return { targets: [p.targetDir] };
     }
     case "asset-tree":

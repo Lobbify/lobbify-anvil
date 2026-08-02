@@ -221,4 +221,78 @@ describe("Prism import", () => {
     expect(result.warnings.join("\n")).toContain("mods/26.2/alpha.jar");
     expect(result.warnings.join("\n")).toContain("mods/alpha.jar");
   });
+
+  it("LB-827: an unmatched file with a ':'-bearing path is skipped, not turned into an unlockable instance", async () => {
+    // Regression for a round-3 finding: importPrism's unmatched-local case wrote
+    // packRel straight into the manifest item's `target` — untouched by
+    // isUnsafePackPath/declaredPlacementTarget — so import "succeeded" with
+    // warnings: [] while quietly writing a manifest that declaredPlacementTarget
+    // refuses UNCONDITIONALLY at lock time. Every later `anvil lock` (and every
+    // build, which locks internally) then threw PathEscape forever. The Prism
+    // instance itself is trusted content (the user's own install, not a hostile
+    // pack) — the fix is not "distrust Prism", it's "don't emit a manifest
+    // target the importer's own lock-time gate will refuse".
+    const prismDir = await mkTmp("prism");
+    const instanceDir = await mkTmp("prism-inst");
+    const storeDir = await mkTmp("prism-store");
+    dirs.push(prismDir, instanceDir, storeDir);
+    const store = new ContentStore({ root: storeDir });
+
+    await writeFile(
+      join(prismDir, "mmc-pack.json"),
+      JSON.stringify({
+        formatVersion: 1,
+        components: [
+          { uid: "net.minecraft", version: "26.2" },
+          { uid: "net.fabricmc.fabric-loader", version: "0.19.1" },
+        ],
+      }),
+    );
+    await mkdir(join(prismDir, ".minecraft", "resourcepacks"), { recursive: true });
+    // An ordinary POSIX filename — legal on the user's real disk, exactly the
+    // shape LB-827 is about: a colon inside a single segment, no traversal.
+    await writeFile(
+      join(prismDir, ".minecraft", "resourcepacks", "mypack:v2.zip"),
+      fabricJar("mypack"),
+    );
+
+    const identify: IdentityResolver = {
+      async matchModrinth() {
+        return undefined; // unmatched, on purpose — exercises the local-file branch
+      },
+      async matchCurseForge() {
+        return undefined;
+      },
+    };
+
+    const result = await importPrism({
+      prismDir,
+      instanceDir,
+      store,
+      resolveGame: async () => ({ packages: [], java: "runtime-j", loader: "fabric 0.19.1" }),
+      identify,
+    });
+
+    // Import succeeds outright (LB-827: "successfully imports with warnings: []"
+    // is exactly the bug — assert that path is now correctly NOT taken silently:
+    // it succeeds, but says so and carries nothing for the bad file).
+    expect(result.local).toBe(0);
+    expect(result.warnings.join("\n")).toContain("mypack:v2.zip");
+    expect(result.manifest.items).toEqual([]);
+    expect(result.lock.resolved.filter((p) => p.source === "local")).toEqual([]);
+
+    // The assertion that actually makes this a regression test rather than a
+    // spot check: the resulting instance LOCKS. Before the fix this threw
+    // PathEscape — the exact "every later anvil lock refuses" failure mode.
+    const relocked = await resolveManifest({
+      manifest: result.manifest,
+      registry: registryWith({}),
+      allowSource: () => true,
+      now: Date.now(),
+      baseDir: instanceDir,
+      store,
+      lockedPins: pinsFromLock(result.lock),
+    });
+    expect(relocked.resolved.filter((p) => p.source === "local")).toEqual([]);
+  });
 });

@@ -14,15 +14,23 @@
  * (regenerating the lock FROM the manifest, e.g. after a merge or rebase)
  * reproduces the override instead of silently dropping it.
  *
- * `safeExtract` itself does **not** check for a colon segment — it only guards
- * the extraction into the throwaway stage dir (traversal/absolute/symlink/bomb),
- * and that dir is unconditionally removed once this function returns, so a
- * colon-bearing entry can pass through it. The refusal that actually matters is
- * `isUnsafePackPath` below, checked against `destRel` (the pack-relative,
- * final tracked-copy destination) **before** the persisted write at
- * {@link importOverrideTree}'s `writeFile(trackedPath, bytes)` — that write is
- * the one bare `join` (no `safeJoin`) in this file, and the one an attacker's
- * `overrides/config/foo:bar.txt` would otherwise reach unguarded.
+ * `safeExtract` supports an opt-in `rejectColon` (LB-827), and the call below
+ * deliberately does **not** set it — not because `safeExtract` can't check for a
+ * colon segment in general, but because it doesn't need to here specifically:
+ * this call only extracts into the throwaway stage dir, unconditionally removed
+ * (`rm -rf`, in the `finally` below) once this function returns, so a
+ * colon-bearing entry landing there for a few lines is harmless. **That
+ * reasoning is local to this call site, not a property of `safeExtract`
+ * itself** — a caller that extracts onto a surface that is NOT thrown away
+ * (`store/placement.ts`'s `extract` placement, which unpacks a natives jar
+ * straight onto the build's instance stage) sets `rejectColon: true` and must
+ * keep doing so; do not read this paragraph as license to drop that elsewhere.
+ * The refusal that actually matters HERE is `isUnsafePackPath` below, checked
+ * against `destRel` (the pack-relative, final tracked-copy destination)
+ * **before** the persisted write at {@link importOverrideTree}'s
+ * `writeFile(trackedPath, bytes)` — that write is the one bare `join` (no
+ * `safeJoin`) in this file, and the one an attacker's `overrides/config/foo:bar.txt`
+ * would otherwise reach unguarded.
  *
  * That manifest entry reads from the tracked copy and declares the pack-relative
  * path as its `target`. Both halves matter: the tracked copy is the only place
@@ -43,14 +51,19 @@ import type { ItemKind, LockPackage, ManifestItem, ObjectSink } from "../types/i
  * segment containing `:` (an NTFS alternate-data-stream trigger on Windows —
  * see {@link findColonSegment} — LB-827).
  *
- * This is the gate for pack-declared paths that never went through
+ * This is the gate for declared paths that never went through
  * `declaredPlacementTarget`/`safeJoin`: `mrpack.ts`'s top-level `files[]` loop
  * and `importOverrideTree` below both call this directly on archive-supplied,
- * untrusted path strings before any byte is written. Deliberately a boolean
- * predicate rather than a throw — both call sites skip the one offending file
- * with a warning and continue importing the rest of the pack, matching how a
- * protected-top path is already handled; a single hostile entry must not abort
- * an otherwise-good import.
+ * untrusted path strings before any byte is written. `prism.ts`'s importer calls
+ * it too, on the SAME reasoning even though a Prism instance is trusted content
+ * (not a hostile pack): an unmatched file's pack-relative path still becomes a
+ * manifest `target`, and `declaredPlacementTarget` cannot distinguish that
+ * target from a hand-written manifest's — a colon there is refused unconditionally
+ * at lock time regardless of who wrote it, so the importer must not emit one
+ * (LB-827). Deliberately a boolean predicate rather than a throw — every call
+ * site skips the one offending file with a warning and continues, matching how
+ * a protected-top path is already handled; a single bad entry must not abort an
+ * otherwise-good import.
  */
 export function isUnsafePackPath(path: string): boolean {
   if (path.includes("\0") || path.length === 0) {
