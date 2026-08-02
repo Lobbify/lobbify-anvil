@@ -138,19 +138,33 @@ describe("safeExtract — refuses a ':'-bearing entry only when the caller opts 
     dirs.length = 0;
   });
 
-  it("DEFAULT (no rejectColon): a ':'-named entry extracts verbatim, unchanged from before", async () => {
-    const work = await mkTmp("xtr-colon");
-    dirs.push(work);
-    const zip = await zipFile(
-      work,
-      "colon.zip",
-      makeZip([{ name: "evil:stream.dll", data: "PAYLOAD" }]),
-    );
-    const out = join(work, "out");
-    const written = await safeExtract(zip, out);
-    expect(written).toEqual(["evil:stream.dll"]);
-    expect(await listFiles(out)).toContain("evil:stream.dll");
-  });
+  // POSIX-only: this asserts what the filesystem does with the extracted name,
+  // and NTFS does something different. `evil:stream.dll` is a legal filename on
+  // Linux/macOS; on Windows the write becomes an Alternate Data Stream and the
+  // directory contains a primary file named `evil` instead. Windows CI said so
+  // directly: `expected [ 'evil' ] to include 'evil:stream.dll'`.
+  //
+  // The sibling `rejectColon: true` case below needs no such guard — it refuses
+  // on the entry NAME before anything is written, so it is platform-independent
+  // and must keep running everywhere. That asymmetry is the useful part: the
+  // guard is a string check, and only the assertions about resulting FILES are
+  // platform-bound.
+  posixIt(
+    "DEFAULT (no rejectColon): a ':'-named entry extracts verbatim, unchanged from before",
+    async () => {
+      const work = await mkTmp("xtr-colon");
+      dirs.push(work);
+      const zip = await zipFile(
+        work,
+        "colon.zip",
+        makeZip([{ name: "evil:stream.dll", data: "PAYLOAD" }]),
+      );
+      const out = join(work, "out");
+      const written = await safeExtract(zip, out);
+      expect(written).toEqual(["evil:stream.dll"]);
+      expect(await listFiles(out)).toContain("evil:stream.dll");
+    },
+  );
 
   it("rejectColon: true — refuses a top-level ':'-bearing entry (PathEscape)", async () => {
     const work = await mkTmp("xtr-colon");
