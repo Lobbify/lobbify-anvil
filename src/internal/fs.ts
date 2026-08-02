@@ -28,6 +28,34 @@ export function isProtectedTop(segment: string): boolean {
 }
 
 /**
+ * The first segment in `segments` that contains a `:` (colon), or `undefined`
+ * if none do.
+ *
+ * A colon inside a single path segment is an ordinary, legal filename
+ * character on POSIX — but on Windows/NTFS it introduces an **Alternate Data
+ * Stream**: `name:stream` does not create a file literally called that, it
+ * opens a hidden stream attached to `name` (creating `name` itself first, as
+ * an empty file, if it did not already exist). The same declared string
+ * therefore produces a structurally different filesystem outcome per
+ * platform — an ordinary sibling file on POSIX, a hidden stream grafted onto
+ * a possibly-protected node on Windows — which breaks determinism (same
+ * lock → byte-identical instance) on its own, with no attacker required. It
+ * is also how a path can graft data onto a protected top-level entry
+ * (`saves:level.dat`) without ever spelling `saves` as its own top-level
+ * segment, bypassing {@link isProtectedTop}.
+ *
+ * Checked against **every** segment, not just the top-level one
+ * (`config/D:evil.txt` is exactly as cross-platform-divergent as
+ * `saves:level.dat`), and rejected outright regardless of what the segment
+ * before the colon happens to name — an unprotected `config:foo` diverges by
+ * the same mechanism as a protected one, so narrowing this to "only under a
+ * protected prefix" would still leave the platform-divergence bug live.
+ */
+export function findColonSegment(segments: readonly string[]): string | undefined {
+  return segments.find((s) => s.includes(":"));
+}
+
+/**
  * Canonicalize an instance-relative path: split on either separator, drop empty
  * and `.` segments, rejoin with `/`.
  *
@@ -116,6 +144,13 @@ export function safeJoin(root: string, rel: string, opts?: { allowProtected?: bo
   const segments = rel.split(/[/\\]/).filter((s) => s.length > 0 && s !== ".");
   if (segments.includes("..")) {
     throw new PathEscape(rel, "contains a '..' traversal segment");
+  }
+  const colonSegment = findColonSegment(segments);
+  if (colonSegment !== undefined) {
+    throw new PathEscape(
+      rel,
+      `segment "${colonSegment}" contains a ':' (opens an NTFS alternate data stream on Windows)`,
+    );
   }
   const normalizedRoot = resolve(root);
   const abs = resolve(normalizedRoot, rel);

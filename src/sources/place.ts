@@ -17,7 +17,7 @@
  */
 
 import { posix } from "node:path";
-import { isProtectedTop } from "../internal/fs.js";
+import { findColonSegment, isProtectedTop } from "../internal/fs.js";
 import { PathEscape } from "../types/errors.js";
 import type { ItemKind, Placement } from "../types/index.js";
 import { placementDirForKind } from "./kind.js";
@@ -128,11 +128,14 @@ function normalizeDeclaredSegments(raw: string): string[] | undefined {
  * derives a placement, so silently rewriting a segment would relocate the file,
  * which is the bug this exists to prevent.
  *
- * Throws {@link PathEscape} for the two cases that are genuinely malformed rather
- * than merely external: a NUL byte, and a target under a protected top-level entry
- * (`saves/`, `.anvil/`, `.anvilignore`). Refusing at lock time is deliberate — the
- * kind-directory fallback would quietly place `saves/level.dat` at
- * `config/level.dat`, turning an illegal placement into a silent relocation.
+ * Throws {@link PathEscape} for the cases that are genuinely malformed rather
+ * than merely external: a NUL byte, a target under a protected top-level entry
+ * (`saves/`, `.anvil/`, `.anvilignore`), and any segment containing a `:`
+ * (opens an NTFS Alternate Data Stream on Windows instead of the ordinary file
+ * the same string names on POSIX — see {@link findColonSegment}). Refusing at
+ * lock time is deliberate — the kind-directory fallback would quietly place
+ * `saves/level.dat` at `config/level.dat`, turning an illegal placement into a
+ * silent relocation.
  */
 export function declaredPlacementTarget(rawPath: string): string | undefined {
   if (rawPath.includes("\0")) {
@@ -141,6 +144,13 @@ export function declaredPlacementTarget(rawPath: string): string | undefined {
   const segments = normalizeDeclaredSegments(rawPath);
   if (!segments) {
     return undefined;
+  }
+  const colonSegment = findColonSegment(segments);
+  if (colonSegment !== undefined) {
+    throw new PathEscape(
+      rawPath,
+      `segment "${colonSegment}" contains a ':' (opens an NTFS alternate data stream on Windows)`,
+    );
   }
   const top = segments[0] ?? "";
   if (isProtectedTop(top)) {

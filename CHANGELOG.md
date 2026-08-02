@@ -5,6 +5,22 @@ carry a breaking change, and each one is called out below.
 
 ## Unreleased
 
+### Security
+
+- **A manifest-declared path segment containing `:` is now refused (`PathEscape`)
+  rather than placed.** On Windows/NTFS a colon inside a segment opens an
+  Alternate Data Stream against whatever precedes it (`saves:level.dat` attaches
+  a hidden stream to `saves` — or creates it — without ever naming `saves` as its
+  own top-level segment), instead of creating the ordinary file the identical
+  string names on POSIX. That divergence breaks reproducibility by itself, before
+  any hostile intent, and it let a path bypass the protected-top-level guard by
+  construction. Enforced at both `declaredPlacementTarget` (lock time) and
+  `safeJoin` (build time, the gate every materialize goes through), on every
+  segment — not only a protected top — since an unprotected `config:foo` diverges
+  the identical way. A pack that legitimately shipped a colon in a path was never
+  installable on Windows in the first place, so the practical compatibility cost
+  is close to zero.
+
 ## v0.2.1 — 2026-08-02
 
 **anvil now passes its own test suite on Windows and macOS.** It never had before: the

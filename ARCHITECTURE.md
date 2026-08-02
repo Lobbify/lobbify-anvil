@@ -80,7 +80,16 @@ see [Replay-never-rehosted](#replay-never-rehosted-curseforge), below.
   `src/sources/place.ts`; it folds every `.`/`..`, declines to place anything
   that resolves outside the root (kind-directory fallback), and refuses a
   protected top (`saves/`, `.anvil/`, `.anvilignore`) outright rather than
-  quietly re-homing it into a kind directory.
+  quietly re-homing it into a kind directory. It also refuses any segment —
+  not just the top-level one — that contains a `:`: on Windows/NTFS a colon
+  inside a segment opens an Alternate Data Stream against whatever precedes
+  it instead of naming an ordinary file, which is both a determinism break
+  (the identical path produces a different filesystem outcome on POSIX) and a
+  way to graft hidden data onto a protected node without ever spelling its
+  name as a top-level segment (`saves:level.dat`). `safeJoin` in
+  `src/internal/fs.ts`, the build-time gate every materialize goes through,
+  carries the same check, so a target reaching it by any other route is
+  refused too.
 - **Resolver** (`src/resolver/resolve.ts`) — a single-pass BFS worklist over
   the manifest's roots and their transitive dependencies. For every ref
   reached, `allowSource(ref)` is evaluated **before any network I/O** (the

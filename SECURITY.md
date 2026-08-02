@@ -50,6 +50,14 @@ a defense against the build code of a source you told anvil to build:
   / CurseForge-zip / Prism overrides, installer `/data` entries) rejects `..`,
   absolute paths, drive letters, and symlink/hardlink entries, and enforces entry-count
   and uncompressed-size bounds.
+- **Placement-path guard.** A manifest-declared placement path is refused outright
+  (never silently re-homed) if it targets a protected top-level entry (`saves/`,
+  `.anvil/`, `.anvilignore`), or if **any** segment contains a `:`. A colon inside a
+  path segment is an ordinary POSIX filename character but opens an NTFS Alternate
+  Data Stream on Windows — a different filesystem outcome for the identical declared
+  path, which breaks reproducibility on its own and can graft hidden data onto a
+  protected node (`saves:level.dat`) without ever naming `saves` as a top-level
+  segment.
 - **No telemetry / no phone-home.**
 
 ## The CurseForge replay boundary, and exactly where it ends
