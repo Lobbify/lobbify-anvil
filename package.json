@@ -1,6 +1,6 @@
 {
   "name": "@lobbify/anvil",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Reproducible, content-addressed build system for Minecraft instances — git + docker + uv for .minecraft.",
   "keywords": [
     "minecraft",

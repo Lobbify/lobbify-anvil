@@ -5,7 +5,52 @@ carry a breaking change, and each one is called out below.
 
 ## Unreleased
 
+## v0.2.1 — 2026-08-02
+
+**anvil now passes its own test suite on Windows and macOS.** It never had before: the
+mac jobs had been red since at least 2026-07-23 on a test that hardcoded a Linux path,
+and the Windows jobs died at the lint step on line endings without ever reaching a test.
+Clearing those two uncovered a real Windows defect that had been hiding behind them —
+see the object store entry below.
+
+The other headline is a merge fix that also turned out to affect `rebase` and `revert`:
+a branch's edit to a file the other side never touched was being discarded. If you have
+been merging variant branches, **work may already have been lost silently** — the
+warning that reported it said "changed on both sides", which was not true.
+
+### Added
+
+- **A path-carrying manifest item can declare a separate placement target.** Rendered as
+  `{ path, kind, target }`; emitted only when `target` is present, so an existing
+  `anvil.toml` parses and re-serialises unchanged. It exists because an imported override
+  is tracked under `.anvil/overrides/` while it is *placed* somewhere else in the
+  instance, and one field could not honestly say both.
+
 ### Fixed
+
+- **`merge` no longer discards an edit the other branch made to a file you never touched
+  — and neither do `rebase` and `revert`.** All three share one three-way apply, whose
+  tracked-file half resolved every both-present path ours-wins without consulting the
+  merge base. So branching off, retuning a config and merging back silently threw the
+  retuning away, while the warning claimed the file had "changed on both sides". Only a
+  side whose bytes moved off the base has said anything about a file; if yours did not,
+  theirs is now taken. Genuinely divergent content still resolves ours-wins, and the
+  warning now fires only then and names what it discarded.
+
+  The same function was already propagating theirs' *deletion* when ours equalled the
+  base — deleting a file carried across while editing it did not. anvil's item-set merge
+  one level up has always done the standard three-way; the tracked-file half was the odd
+  one out.
+
+- **The object store could not write a single object on Windows.** `writeTemp` created the
+  temp already-immutable (0444) and then reopened it **read-only** to `fsync` it. On
+  Windows `fsync` is `FlushFileBuffers`, which requires a handle with write access and
+  returns `ERROR_ACCESS_DENIED` → `EPERM` without one, so every `putStream` failed. It now
+  syncs through the same handle the bytes were written with, which keeps all three
+  properties that shaped the original code: the object is never mode-writable for an
+  instant, there is no rename→chmod window, and the fsync still happens unconditionally
+  before the rename. Nothing was downgraded to best-effort. `recordReplayPaths` carried the
+  identical defect on the build and sync paths and is fixed the same way.
 
 - **`merge`, `revert` and `rebase` no longer drop the `[base]` block from `anvil.lock`.**
   On a `game.from` instance all three verbs run the same 3-way apply, whose worktree
