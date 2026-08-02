@@ -8,7 +8,17 @@
  * - reject symlink / non-regular entries (a symlink in the archive could redirect
  *   a later write outside the root);
  * - assert every resolved destination stays under the target root;
- * - bound the entry count and total uncompressed size (decompression-bomb guard).
+ * - bound the entry count and total uncompressed size (decompression-bomb guard);
+ * - **opt-in** (`rejectColon`): refuse an entry with a `:`-bearing segment (an
+ *   NTFS alternate-data-stream trigger on Windows — LB-827). Opt-in, not
+ *   unconditional, because not every caller extracts onto a surface that
+ *   matters: `import/pack-common.ts`'s override-tree import extracts into a
+ *   throwaway stage dir it unconditionally `rm -rf`s and filters colon-bearing
+ *   entries itself before the one persisted write, so it deliberately leaves
+ *   this off. A caller that extracts straight onto a surface that is NOT
+ *   thrown away — `store/placement.ts`'s `extract` placement, which unpacks a
+ *   natives jar directly into the build's instance stage — MUST set it, or a
+ *   colon-named entry lands on disk with nothing downstream to catch it.
  *
  * Uses `yauzl` (never `unzipper`, which eagerly pulls `@aws-sdk`).
  */
@@ -19,7 +29,7 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl";
 import type { Entry, ZipFile } from "yauzl";
-import { ensureDir } from "../internal/fs.js";
+import { ensureDir, findColonSegment } from "../internal/fs.js";
 import { DecompressionBomb, PathEscape } from "../types/errors.js";
 
 const S_IFMT = 0o170000;
@@ -33,6 +43,12 @@ export interface SafeExtractOptions {
   readonly maxEntries?: number;
   /** Maximum total uncompressed bytes before the archive is treated as a bomb. */
   readonly maxTotalBytes?: number;
+  /**
+   * Refuse (`PathEscape`) any entry whose name has a `:`-bearing segment,
+   * mirroring `safeJoin`'s `rejectColon` (LB-827). See the module doc for who
+   * must set this and who deliberately does not.
+   */
+  readonly rejectColon?: boolean;
 }
 
 const DEFAULT_MAX_ENTRIES = 20_000;
@@ -82,7 +98,7 @@ function entryMode(entry: Entry): number {
   return (entry.externalFileAttributes >>> 16) & 0xffff;
 }
 
-function assertSafeName(name: string): void {
+function assertSafeName(name: string, rejectColon: boolean): void {
   if (name.includes("\0")) {
     throw new PathEscape(name, "entry name contains a NUL byte");
   }
@@ -92,6 +108,15 @@ function assertSafeName(name: string): void {
   const segments = name.split(/[/\\]/);
   if (segments.includes("..")) {
     throw new PathEscape(name, "archive entry traverses out of the root");
+  }
+  if (rejectColon) {
+    const colonSegment = findColonSegment(segments);
+    if (colonSegment !== undefined) {
+      throw new PathEscape(
+        name,
+        `entry segment "${colonSegment}" contains a ':' (opens an NTFS alternate data stream on Windows)`,
+      );
+    }
   }
 }
 
@@ -136,7 +161,7 @@ export async function safeExtract(
             return;
           }
 
-          assertSafeName(name);
+          assertSafeName(name, options.rejectColon ?? false);
           const abs = resolve(root, name);
           if (abs !== root && !abs.startsWith(root + sep)) {
             throw new PathEscape(name, "resolved destination escapes the extraction root");

@@ -17,6 +17,10 @@
  *
  * Installer-data extraction still goes through the zip-slip-guarded `safeJoin` (a
  * `..`/absolute entry is a {@link PathEscape}); that guard is genuine and stays.
+ * Every `safeJoin` call in this file passes `rejectColon: true` (LB-827) — every
+ * path here (a library coordinate, an installer `/data/*` entry, a declared
+ * output) is plan-derived, i.e. untrusted external input that has not touched
+ * disk yet, not a file the user's own instance already carries.
  */
 
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -123,7 +127,7 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
   // 2. Materialize every library/processor jar into the scratch libs tree.
   const libScratch = new Map<string, string>();
   for (const [coord, lib] of Object.entries(plan.libraries)) {
-    const dest = safeJoin(libsDir, lib.path);
+    const dest = safeJoin(libsDir, lib.path, { rejectColon: true });
     await ensureDir(dirname(dest));
     await store.materialize(lib.hash, dest, { order: ["copy"] });
     libScratch.set(coord, dest);
@@ -136,7 +140,7 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
     for (const entry of plan.installerEntries) {
       // Validate the destination BEFORE any work: a `..`/absolute installer-data
       // entry is a zip-slip-class escape and is rejected here (PathEscape).
-      const dest = safeJoin(dataDir, entry);
+      const dest = safeJoin(dataDir, entry, { rejectColon: true });
       const bytes = await readZipEntry(installerBytes, entry);
       if (!bytes) {
         throw new ProcessorFailed(entry, `installer has no embedded entry "${entry}"`);
@@ -150,7 +154,7 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
   // 4. Pre-create the output scratch paths (one per declared output).
   const outScratch = new Map<string, string>();
   for (const rel of plan.outputs) {
-    const dest = safeJoin(outDir, rel);
+    const dest = safeJoin(outDir, rel, { rejectColon: true });
     await ensureDir(dirname(dest));
     outScratch.set(rel, dest);
   }
@@ -278,7 +282,7 @@ export async function runForgeProcessors(input: RunForgeProcessorsInput): Promis
     if (!src || !(await pathExists(src))) {
       throw new ProcessorFailed(rel, "declared output was not produced by any processor");
     }
-    const dest = safeJoin(stageRoot, rel);
+    const dest = safeJoin(stageRoot, rel, { rejectColon: true });
     await mkdir(dirname(dest), { recursive: true });
     await copyFile(src, dest);
   }

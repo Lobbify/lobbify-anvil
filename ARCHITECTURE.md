@@ -80,7 +80,40 @@ see [Replay-never-rehosted](#replay-never-rehosted-curseforge), below.
   `src/sources/place.ts`; it folds every `.`/`..`, declines to place anything
   that resolves outside the root (kind-directory fallback), and refuses a
   protected top (`saves/`, `.anvil/`, `.anvilignore`) outright rather than
-  quietly re-homing it into a kind directory.
+  quietly re-homing it into a kind directory. It also refuses any segment —
+  not just the top-level one — that contains a `:`: on Windows/NTFS a colon
+  inside a segment opens an Alternate Data Stream against whatever precedes
+  it instead of naming an ordinary file, which is both a determinism break
+  (the identical path produces a different filesystem outcome on POSIX) and a
+  way to graft hidden data onto a protected node without ever spelling its
+  name as a top-level segment (`saves:level.dat`).
+
+  `safeJoin` in `src/internal/fs.ts`, the build-time gate every materialize
+  goes through, carries the same colon check **behind an opt-in flag**
+  (`{ rejectColon: true }`), not unconditionally. `safeJoin` is not only the
+  placement gate — VC checkout (`src/vc/snapshot.ts`) resolves every tracked
+  and carried path through it too, and those are files the user's own
+  instance already has, not anything a pack declared. A colon is a legal
+  POSIX filename character, so a user-created `config/server:25565.toml`
+  must still commit and check out like any other tracked file; refusing to
+  restore it would make its own commit permanently unreachable, which is
+  worse than restoring it, and the ADS hazard cannot arise on Windows in the
+  first place (such a file could never have been committed there to begin
+  with). Every call on the pack/lock-controlled surface —
+  `src/store/placement.ts`, `src/build/swap.ts`, `src/game/forge-build.ts` —
+  passes `rejectColon: true`; `src/vc/snapshot.ts` does not.
+
+  A third path never reaches `safeJoin` at all: an untrusted `.mrpack` /
+  CurseForge-zip `overrides/` tree is extracted through `safeExtract`
+  (`src/store/safe-extract.ts`) into a throwaway stage dir, then each
+  surviving file is written into `.anvil/overrides/` by
+  `importOverrideTree` (`src/import/pack-common.ts`) via a bare `join`, not
+  `safeJoin`. That write — and the equivalent one for a `.mrpack`'s
+  top-level `files[]` entries — is gated by `isUnsafePackPath`, which also
+  refuses a colon segment, checked before either write happens. Unlike
+  `safeJoin`'s `PathEscape` throw, this gate is a skip-with-warning per file
+  (matching how a protected-top override is already handled), so one
+  hostile entry does not abort an otherwise-good import.
 - **Resolver** (`src/resolver/resolve.ts`) — a single-pass BFS worklist over
   the manifest's roots and their transitive dependencies. For every ref
   reached, `allowSource(ref)` is evaluated **before any network I/O** (the

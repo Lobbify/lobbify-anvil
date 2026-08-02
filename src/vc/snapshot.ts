@@ -338,6 +338,18 @@ export async function replayPinsOfSnapshot(
  *     asymmetry is explained.
  *   - **`safeJoin` throws on a protected top.** A snapshot claiming to write or
  *     delete `saves/level.dat` fails loudly rather than being quietly skipped.
+ *
+ * Every `safeJoin` call below passes NO `rejectColon` option (LB-827, round 2).
+ * `carried`/`tracked` paths here are the user's own working-tree files — a
+ * colon is a legal POSIX filename, so a real file a POSIX user committed
+ * (`config/server:25565.toml`) must round-trip through `switch` exactly like
+ * any other tracked file. Refusing to restore it would make its own commit
+ * permanently unreachable, which is strictly worse than restoring it — and on
+ * Windows the case cannot arise: such a file could never have been committed
+ * there to begin with, so there is no compatibility cost to leaving this path
+ * un-guarded. Rejecting a colon is the pack/lock-controlled surface's job
+ * (`declaredPlacementTarget`, and every `safeJoin` call in `store/placement.ts`,
+ * `build/swap.ts`, `game/forge-build.ts`), not VC checkout's.
  */
 export async function materializeSnapshot(input: MaterializeInput): Promise<void> {
   const { instanceDir, snapshot, vcStore, sharedStore } = input;

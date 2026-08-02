@@ -126,6 +126,29 @@ describe("declaredPlacementTarget — the placement half of the path guard", () 
     expect(() => declaredPlacementTarget("saves\0/x")).toThrow(PathEscape);
   });
 
+  it("REFUSES a segment containing ':' — an NTFS alternate data stream on Windows (LB-827)", () => {
+    for (const colonPath of [
+      // Top-level: one segment, no separator, so it folds to "saves:level.dat"
+      // — !== "saves" — and would otherwise sail past isProtectedTop while
+      // opening an ADS on the real `saves` node on Windows.
+      "saves:level.dat",
+      // Same shape, case-varied — colon detection needs no case-folding, but
+      // this pins that the protected-top escape isn't what's catching it.
+      "SAVES:level.dat",
+      // A colon under an UNPROTECTED top is exactly as platform-divergent —
+      // the ticket is explicit this must not be narrowed to protected names.
+      "config:foo",
+      // Nested: the drive-letter check at the top of normalizeDeclaredSegments
+      // only matches a single letter + ':' at the very START of the whole
+      // string, so this segment reaches the per-segment split untouched.
+      "config/D:evil.txt",
+      // Deeper nesting, and a colon that isn't drive-letter-shaped at all.
+      "config/sub/name:stream.txt",
+    ]) {
+      expect(() => declaredPlacementTarget(colonPath), colonPath).toThrow(PathEscape);
+    }
+  });
+
   it("agrees with safeJoin: every target it returns is placeable, and stays under the root", () => {
     const root = "/tmp/anvil-instance";
     for (const p of ["options.txt", "config/a/b/c.toml", "config/x/../a.toml", "mods/sub/m.jar"]) {
@@ -151,6 +174,71 @@ describe("declaredPlacementTarget — the placement half of the path guard", () 
     expect(isUnderRoot(root, resolve("/tmp/anvil-instance-evil-twin/options.txt"))).toBe(false);
     // A path with no relation to root at all.
     expect(isUnderRoot(root, resolve("/etc/passwd"))).toBe(false);
+  });
+});
+
+describe("safeJoin — refuses a colon segment (NTFS ADS) only when the caller opts in (LB-827 round 2)", () => {
+  // Round 1 made this unconditional and that was WRONG: `safeJoin` is not only
+  // the pack/lock placement gate, VC checkout (src/vc/snapshot.ts) resolves the
+  // user's own already-committed tracked/carried files through it too, and a
+  // colon there is an ordinary POSIX filename that must round-trip like any
+  // other file (see test/vc/colon-path-round-trip.test.ts for the end-to-end
+  // proof). So the guard is now `{ rejectColon: true }`, opt-in, and this block
+  // proves both halves: the callers that pass it still refuse a colon segment,
+  // and the ones that don't (the default) pass one through untouched.
+  const root = "/tmp/anvil-instance";
+
+  it("throws on a top-level colon segment, protected-shaped or not, when rejectColon is set", () => {
+    for (const rel of ["saves:level.dat", "config:foo"]) {
+      expect(() => safeJoin(root, rel, { rejectColon: true }), rel).toThrow(PathEscape);
+    }
+  });
+
+  it("throws on a colon buried in a nested segment, when rejectColon is set", () => {
+    expect(() => safeJoin(root, "config/D:evil.txt", { rejectColon: true })).toThrow(PathEscape);
+    expect(() => safeJoin(root, "config/sub/name:stream.txt", { rejectColon: true })).toThrow(
+      PathEscape,
+    );
+  });
+
+  it("rejectColon is NOT bypassable via allowProtected — the two flags are independent", () => {
+    // allowProtected exists so a handful of internal callers (checkout of the
+    // instance's own protected slots) can target saves/.anvil on purpose. The
+    // colon guard is a determinism guard, not a protected-path guard, so when a
+    // caller asks for BOTH, colon rejection still fires even though the
+    // protected-top check has been opted out of.
+    expect(() =>
+      safeJoin(root, "saves:level.dat", { allowProtected: true, rejectColon: true }),
+    ).toThrow(PathEscape);
+    expect(() => safeJoin(root, "config:foo", { allowProtected: true, rejectColon: true })).toThrow(
+      PathEscape,
+    );
+  });
+
+  it("still accepts an ordinary colon-free nested path (no over-rejection) with rejectColon set", () => {
+    expect(() => safeJoin(root, "config/sub/name-stream.txt", { rejectColon: true })).not.toThrow();
+  });
+
+  it("DEFAULT (no rejectColon): a colon segment passes through untouched — this is the VC-checkout path", () => {
+    // No PathEscape, and the returned path actually contains the colon
+    // verbatim — this is what lets test/vc/colon-path-round-trip.test.ts
+    // restore a user's own colon-bearing file exactly as committed.
+    for (const rel of ["saves:level.dat", "config:foo", "config/D:evil.txt"]) {
+      let result: string | undefined;
+      expect(() => {
+        result = safeJoin(root, rel);
+      }, rel).not.toThrow();
+      expect(result, rel).toBe(resolve(root, rel));
+    }
+  });
+
+  it("omitting rejectColon still enforces every OTHER guard (NUL, traversal, protected-top)", () => {
+    // The opt-in only widens the colon check; it must not have accidentally
+    // widened anything else.
+    expect(() => safeJoin(root, "a\0b")).toThrow(PathEscape);
+    expect(() => safeJoin(root, "../escape")).toThrow(PathEscape);
+    expect(() => safeJoin(root, "saves/level.dat")).toThrow(PathEscape);
+    expect(() => safeJoin(root, "saves/level.dat", { allowProtected: true })).not.toThrow();
   });
 });
 
@@ -196,6 +284,31 @@ describe("resolveManifest — a hostile manifest cannot place bytes outside the 
         store,
       }),
     ).rejects.toBeInstanceOf(PathEscape);
+  });
+
+  it("refuses a manifest item targeting an NTFS-ADS colon segment end to end (LB-827)", async () => {
+    const { instanceDir, store } = await fixture();
+    // A real `saves/` exists on this instance, exactly like the "saves/"
+    // test above — the ADS payload would attach a hidden stream to this
+    // node on Windows rather than naming its own top-level entry, which is
+    // exactly why isProtectedTop alone cannot see it.
+    await mkdir(join(instanceDir, "saves"), { recursive: true });
+    await writeFile(join(instanceDir, "saves", "level.dat"), "PRECIOUS WORLD");
+
+    for (const declared of ["saves:level.dat", "config:foo", "config/D:evil.txt"]) {
+      await expect(
+        resolveManifest({
+          ...resolveOpts,
+          manifest: manifestWith(declared, "config"),
+          baseDir: instanceDir,
+          store,
+        }),
+        declared,
+      ).rejects.toBeInstanceOf(PathEscape);
+    }
+
+    // And the world is untouched.
+    expect(await readFile(join(instanceDir, "saves", "level.dat"), "utf8")).toBe("PRECIOUS WORLD");
   });
 
   it("places a file from OUTSIDE the instance by kind — inside the instance, never at its own path", async () => {

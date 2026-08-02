@@ -25,12 +25,12 @@
  *
  * Everything a hostile pack could try is bounded here or in the machinery this
  * calls: archive size, member count, per-member download size, zip-slip and
- * symlink escapes (`safeExtract`), traversal and protected-path targets
- * (`isUnsafePackPath` + `declaredPlacementTarget`), SSRF and redirect pivots
- * (`allowSource` before any fetch, `guardHop` on every hop), and hash lying
- * (declared sha512/sha1 verified before the sha256 pin is computed). What a pack
- * *cannot* do at all is displace something the instance declared — that is the
- * overlay's rule, not a check here.
+ * symlink escapes (`safeExtract`), traversal, protected-path and colon-segment
+ * targets (`isUnsafePackPath` + `declaredPlacementTarget`, LB-827), SSRF and
+ * redirect pivots (`allowSource` before any fetch, `guardHop` on every hop),
+ * and hash lying (declared sha512/sha1 verified before the sha256 pin is
+ * computed). What a pack *cannot* do at all is displace something the
+ * instance declared — that is the overlay's rule, not a check here.
  */
 
 import { rm, writeFile } from "node:fs/promises";

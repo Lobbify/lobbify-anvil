@@ -50,7 +50,8 @@
  * those is bounded here or in the machinery this calls — archive size,
  * {@link MAX_CF_PACK_FILES}, `allowSource` before any member I/O, a
  * project/file cross-check against the API's own answer, zip-slip and symlink
- * guards in `safeExtract`, and protected-path refusal in `importOverrideTree`.
+ * guards in `safeExtract`, and protected-path / colon-segment refusal
+ * (`isUnsafePackPath`, LB-827) in `importOverrideTree`.
  */
 
 import { rm, writeFile } from "node:fs/promises";
