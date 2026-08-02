@@ -7,15 +7,18 @@ import {
   buildInstance,
   comparePackages,
   currentPlatform,
+  nativesClassifierOf,
+  packageAppliesToPlatform,
   resolveGame,
   serializeLock,
 } from "../../index.js";
-import type { Lockfile } from "../../index.js";
+import type { LockPackage, Lockfile } from "../../index.js";
 import { listFiles, mkTmp, rmTmp, treeManifest } from "../helpers/fixtures.js";
 import {
   COMPONENT,
   FABRIC_LOADER,
   MC,
+  NATIVE_SO_BY_CLASSIFIER,
   loaderMetaBase,
   makeGameFixtures,
   mojangOptions,
@@ -23,6 +26,52 @@ import {
 } from "../helpers/game.js";
 
 const FABRIC_ID = `fabric-loader-${FABRIC_LOADER}-${MC}`;
+
+/**
+ * The single `runtime-tree` (JRE) package this HOST will get, resolved through
+ * the exact `packageAppliesToPlatform` gate `buildInstance` itself uses — never a
+ * hardcoded OS name. See LB-816: a hardcoded `linux/` segment here is what made
+ * this suite fail on every macOS/Windows runner while ubuntu stayed green.
+ */
+function runtimeTargetDir(lock: Lockfile): string {
+  const platform = currentPlatform();
+  const applicable = lock.resolved.filter(
+    (p): p is LockPackage & { placement: { method: "runtime-tree"; targetDir: string } } =>
+      p.placement.method === "runtime-tree" && packageAppliesToPlatform(p, platform),
+  );
+  expect(applicable).toHaveLength(1);
+  const [pkg] = applicable;
+  if (!pkg) {
+    throw new Error("unreachable — length checked above");
+  }
+  return pkg.placement.targetDir;
+}
+
+/**
+ * The single natives library this HOST will get, resolved the same way — then
+ * mapped to the fixture's filename for that classifier (host detection stays
+ * production code; only "what did the fixture name the file" is test-owned).
+ */
+function nativeSoForHost(lock: Lockfile): string {
+  const platform = currentPlatform();
+  const applicable = lock.resolved.filter(
+    (p) =>
+      p.placement.method === "extract" &&
+      nativesClassifierOf(p.name) !== undefined &&
+      packageAppliesToPlatform(p, platform),
+  );
+  expect(applicable).toHaveLength(1);
+  const [pkg] = applicable;
+  if (!pkg) {
+    throw new Error("unreachable — length checked above");
+  }
+  const classifier = nativesClassifierOf(pkg.name);
+  const so = classifier ? NATIVE_SO_BY_CLASSIFIER[classifier] : undefined;
+  if (!so) {
+    throw new Error(`no fixture native filename recorded for classifier "${classifier}"`);
+  }
+  return so;
+}
 
 async function resolveAndBuild(): Promise<{ dir: string; lock: Lockfile }> {
   const storeDir = await mkTmp("store");
@@ -70,33 +119,61 @@ describe("game install — full build gate", () => {
   });
 
   it("materializes a launch-ready instance (client, libs, host natives, assets, JRE)", async () => {
-    const { dir } = track(await resolveAndBuild());
+    const { dir, lock } = track(await resolveAndBuild());
     const files = await listFiles(dir);
+    const runtimeDir = runtimeTargetDir(lock);
+    const nativeSo = nativeSoForHost(lock);
     expect(files).toContain(`versions/${FABRIC_ID}/${FABRIC_ID}.jar`);
     expect(files).toContain(`versions/${FABRIC_ID}/${FABRIC_ID}.json`);
     expect(files).toContain("libraries/com/example/base/1.0/base-1.0.jar");
     expect(files).toContain("libraries/org/ow2/asm/asm/9.10.1/asm-9.10.1.jar");
     expect(files).toContain("libraries/net/fabricmc/fabric-loader/0.19.3/fabric-loader-0.19.3.jar");
     expect(files).toContain("assets/indexes/26.json");
-    expect(files).toContain(`runtime/${COMPONENT}/linux/bin/java`);
-    expect(files).toContain(`runtime/${COMPONENT}/linux/lib/x.txt`);
-    // host = linux/x64 → only linux natives extracted; META-INF excluded.
-    expect(files).toContain("natives/liblwjgl.so");
-    expect(files.some((f) => f.includes("liblwjgl.dylib"))).toBe(false);
+    expect(files).toContain(`${runtimeDir}/bin/java`);
+    expect(files).toContain(`${runtimeDir}/lib/x.txt`);
+    expect(files).toContain(`natives/${nativeSo}`);
     expect(files.some((f) => f.includes("META-INF"))).toBe(false);
-    // A different-OS JRE and an osx-only library are filtered out on this host.
-    expect(files.some((f) => f.startsWith(`runtime/${COMPONENT}/mac-os`))).toBe(false);
-    expect(files.some((f) => f.includes("java-objc-bridge"))).toBe(false);
+    // Only the host's OWN JRE tree is extracted — every other platform's runtime
+    // dir under the same component is absent. Stronger than excluding one other
+    // OS by name: this holds on whichever platform actually runs the suite.
+    const runtimeFiles = files.filter((f) => f.startsWith(`runtime/${COMPONENT}/`));
+    expect(runtimeFiles.every((f) => f.startsWith(`${runtimeDir}/`))).toBe(true);
+    // Likewise: only the host's own native, nothing from another OS/arch.
+    const nativesFiles = files.filter((f) => f.startsWith("natives/"));
+    expect(nativesFiles).toEqual([`natives/${nativeSo}`]);
+    // java-objc-bridge is osx-only per its Mojang rule — assert it against the
+    // SAME production gate the build used, rather than assuming a host OS.
+    const objcApplies = lock.resolved.some(
+      (p) =>
+        p.name === "ca.weblite:java-objc-bridge:1.1" &&
+        packageAppliesToPlatform(p, currentPlatform()),
+    );
+    expect(files.some((f) => f.includes("java-objc-bridge"))).toBe(objcApplies);
   });
 
   it("preserves the JRE executable bit and the mac-bundle-style symlink", async () => {
-    const { dir } = track(await resolveAndBuild());
-    const javaBin = join(dir, `runtime/${COMPONENT}/linux/bin/java`);
-    expect((await stat(javaBin)).mode & 0o111).not.toBe(0); // executable
-    const plain = join(dir, `runtime/${COMPONENT}/linux/lib/x.txt`);
-    expect((await stat(plain)).mode & 0o111).toBe(0); // not executable
-    const link = join(dir, `runtime/${COMPONENT}/linux/bin/java-link`);
-    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    const { dir, lock } = track(await resolveAndBuild());
+    const runtimeDir = runtimeTargetDir(lock);
+    const javaBin = join(dir, runtimeDir, "bin/java");
+    const plain = join(dir, runtimeDir, "lib/x.txt");
+    const link = join(dir, runtimeDir, "bin/java-link");
+
+    if (currentPlatform().os === "windows") {
+      // Windows has no POSIX executable bit. Node/libuv derive `stat().mode`'s
+      // exec bits from the file EXTENSION (.exe/.cmd/.bat/.com), never from
+      // `chmod` — and `fs.chmod` on Windows only ever toggles the read-only
+      // attribute, so RUNTIME_MODE_EXEC vs RUNTIME_MODE_PLAIN are indistinguishable
+      // there. Asserting `mode & 0o111` here would assert a POSIX concept Windows
+      // doesn't have. See LB-816 — flagged unverified locally; CI confirms this.
+      expect((await stat(javaBin)).isFile()).toBe(true);
+      expect((await stat(plain)).isFile()).toBe(true);
+    } else {
+      expect((await stat(javaBin)).mode & 0o111).not.toBe(0); // executable
+      expect((await stat(plain)).mode & 0o111).toBe(0); // not executable
+    }
+
+    const linkStat = await lstat(link);
+    expect(linkStat.isSymbolicLink()).toBe(true);
     expect(await readlink(link)).toBe("java");
   });
 
