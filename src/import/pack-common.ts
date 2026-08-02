@@ -170,11 +170,41 @@ export async function importOverrideTree(input: ImportOverrideTreeInput): Promis
   let count = 0;
   try {
     const keep = new Set(input.prefixes.map((p) => `${p}/`));
-    // safeExtract applies every zip-slip / symlink / bomb guard; we keep only the
-    // requested override subtrees.
+    // A ':'-bearing entry has to be dropped HERE, during extraction, and not by
+    // the isUnsafePackPath check further down (LB-827).
+    //
+    // On NTFS, writing `config/foo:bar.txt` does not create that file — the write
+    // is redirected into an Alternate Data Stream and leaves a PRIMARY file named
+    // `config/foo` behind. The walk below then finds an ordinary name with no
+    // colon in it, isUnsafePackPath has nothing left to match, and the entry is
+    // imported instead of skipped. Windows CI measured exactly that: the skip
+    // assertion got `imported …` where it expected `unsafe`.
+    //
+    // ⚠️ So the later check is POSIX-effective only, which is backwards — ADS is
+    // a Windows mechanism, so a guard that runs after the write protects only the
+    // platform that never needed it. Excluding at extraction is what makes the
+    // guarantee true on the platform the threat exists on.
+    //
+    // `exclude` rather than safeExtract's `rejectColon`: this must skip one entry
+    // with a warning, exactly like a protected top does, not abort a whole pack.
+    const colonSkipped: string[] = [];
     await safeExtract(input.archivePath, stageDir, {
-      exclude: (name) => ![...keep].some((prefix) => name.startsWith(prefix)),
+      exclude: (name) => {
+        if (![...keep].some((prefix) => name.startsWith(prefix))) return true;
+        if (name.split(/[/\\]/).some((seg) => seg.includes(":"))) {
+          colonSkipped.push(name);
+          return true;
+        }
+        return false;
+      },
     });
+    for (const name of colonSkipped) {
+      // Report it as the destRel the caller would have seen, so the message
+      // matches the post-walk skip warning below rather than leaking the prefix.
+      const prefix = input.prefixes.find((p) => name.startsWith(`${p}/`));
+      const destRel = prefix ? name.slice(prefix.length + 1) : name;
+      input.warnings.push(`skipped override targeting a protected/unsafe path: ${destRel}`);
+    }
 
     // Map destRel → absolute staged source; a later prefix overwrites an earlier
     // one for the same path (config precedence).
