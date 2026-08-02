@@ -564,12 +564,19 @@ export class VcRepo {
    * disk** (not the in-memory object), so the pair provably agrees regardless of
    * any serialize→parse normalization — the subsequent `requireLockFresh` snapshot
    * of this same tree can never spuriously trip the stale-lock guard.
+   *
+   * `manifestHash` is the **only** thing this patches, so the re-derived lock is
+   * carried through whole rather than rebuilt field by field. Listing the fields
+   * silently drops whatever the list forgets: it dropped `[base]` on every merge,
+   * revert and rebase of a base-derived instance, leaving a lock whose rows still
+   * claimed `from_base` beside an `anvil.toml` still declaring `game.from`, with
+   * nothing left to say which pack they came from.
    */
   async #writeWorktree(manifest: Manifest, lock: Lockfile): Promise<void> {
     await writeManifest(this.#instanceDir, manifest);
     const disk = await readManifest(this.#instanceDir);
     const manifestHash = hashBuffer(new TextEncoder().encode(canonicalJson(disk)), "sha256");
-    const finalLock: Lockfile = { meta: { ...lock.meta, manifestHash }, resolved: lock.resolved };
+    const finalLock: Lockfile = { ...lock, meta: { ...lock.meta, manifestHash } };
     await writeLock(this.#instanceDir, finalLock);
   }
 
