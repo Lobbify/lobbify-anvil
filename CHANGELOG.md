@@ -7,6 +7,15 @@ carry a breaking change, and each one is called out below.
 
 ### Fixed
 
+- **`merge`, `revert` and `rebase` no longer drop the `[base]` block from `anvil.lock`.**
+  On a `game.from` instance all three verbs run the same 3-way apply, whose worktree
+  write rebuilt the lock from a hand-written list of fields that did not include `base`.
+  What landed on disk was a lock whose rows still carried `from_base = true`, beside an
+  `anvil.toml` still declaring `game.from`, and nothing left to name the pack they came
+  from — so a CurseForge-derived instance stopped identifying as CurseForge to anything
+  reading `base.source`. The re-derived lock is now carried through whole; the worktree
+  write patches `meta.manifest_hash` and nothing else.
+
 - **`import` followed by `lock`, with no `build` in between, no longer crashes.** It
   exited 70 with an internal-error banner and an `ENOENT` on an override path. An
   imported override is tracked under `.anvil/overrides/`, but its manifest entry named
