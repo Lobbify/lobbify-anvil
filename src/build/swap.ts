@@ -117,10 +117,12 @@ export async function journaledSwap(plan: SwapPlan): Promise<void> {
   const installs = plan.installs.filter((t) => !ignore.ignores(t));
   const removes = plan.removes.filter((t) => !ignore.ignores(t));
   // ...and every target must resolve safely under the instance (rejects `..`,
-  // absolute, drive-letter, and protected paths — remove targets come from the
-  // previous built lock, which is otherwise unvalidated).
+  // absolute, drive-letter, protected, and colon-bearing paths — remove targets
+  // come from the previous built lock, which is otherwise unvalidated).
+  // `rejectColon: true` (LB-827): every target here is a lock-derived placement,
+  // never a file that already exists in the user's own instance tree.
   for (const t of [...installs, ...removes]) {
-    safeJoin(instanceDir, t);
+    safeJoin(instanceDir, t, { rejectColon: true });
   }
 
   const stageRoot = stageRootOf(instanceDir, stageId);
@@ -201,10 +203,15 @@ function parseJournal(text: string): { begin: SwapBegin; committed: boolean } | 
   return { begin: first, committed };
 }
 
-/** Resolve a target safely, or `undefined` if it escapes the instance root. */
+/**
+ * Resolve a target safely, or `undefined` if it escapes the instance root (used
+ * only during journal rollback, so `t` is the same lock-derived swap target
+ * `journaledSwap` already validated at build time — `rejectColon: true` for the
+ * same reason, LB-827).
+ */
 function safeTarget(instanceDir: string, t: string): string | undefined {
   try {
-    return safeJoin(instanceDir, t);
+    return safeJoin(instanceDir, t, { rejectColon: true });
   } catch {
     return undefined;
   }

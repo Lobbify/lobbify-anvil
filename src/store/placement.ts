@@ -12,7 +12,11 @@
  *   - `store-only` — assert the object is present; place nothing in the instance.
  *
  * Every target path passes through `safeJoin`, so a placement can never write
- * outside the instance or into a protected path (`saves/`, `.anvil/`).
+ * outside the instance or into a protected path (`saves/`, `.anvil/`). Every
+ * call also passes `rejectColon: true` (LB-827): a target here is always
+ * lock/manifest-derived, never a file already sitting in the user's own
+ * instance, so refusing a `:`-bearing segment (an NTFS alternate-data-stream
+ * trigger on Windows) costs nothing and closes the placement half of that gap.
  */
 
 import { randomUUID } from "node:crypto";
@@ -192,26 +196,26 @@ export async function executePlacement(
     if (!cache) {
       throw new MissingObject(pkg.hash, `${pkg.name} (replay cache not provided to the build)`);
     }
-    const dest = safeJoin(ctx.stageRoot, p.target);
+    const dest = safeJoin(ctx.stageRoot, p.target, { rejectColon: true });
     const strategy = await cache.materialize(pkg.hash, dest);
     return { targets: [p.target], strategy };
   }
 
   switch (p.method) {
     case "link": {
-      const dest = safeJoin(ctx.stageRoot, p.target);
+      const dest = safeJoin(ctx.stageRoot, p.target, { rejectColon: true });
       const strategy = await ctx.store.materialize(pkg.hash, dest);
       return { targets: [p.target], strategy };
     }
     case "extract": {
-      const destDir = safeJoin(ctx.stageRoot, p.targetDir);
+      const destDir = safeJoin(ctx.stageRoot, p.targetDir, { rejectColon: true });
       await safeExtract(ctx.store.objectPath(pkg.hash), destDir, { exclude: excludeMetaInf });
       return { targets: [p.targetDir] };
     }
     case "asset-tree":
       return materializeAssetTree(pkg, p.indexTarget, ctx);
     case "runtime-tree": {
-      const destRoot = safeJoin(ctx.stageRoot, p.targetDir);
+      const destRoot = safeJoin(ctx.stageRoot, p.targetDir, { rejectColon: true });
       await materializeRuntime(pkg, destRoot, ctx);
       return { targets: [p.targetDir] };
     }
@@ -272,7 +276,9 @@ async function materializeAssetTree(
     if (!(await ctx.store.has(hash))) {
       throw new MissingObject(hash, `asset of ${pkg.name}`);
     }
-    const dest = safeJoin(objectsRoot, join(shardOf(hash.value), hash.value));
+    const dest = safeJoin(objectsRoot, join(shardOf(hash.value), hash.value), {
+      rejectColon: true,
+    });
     if (await pathExists(dest)) {
       continue; // idempotent — an object already in the pool is never re-linked
     }
@@ -290,7 +296,7 @@ async function materializeAssetTree(
   }
 
   // The index flips atomically through the stage → swap (its objects are down).
-  const dest = safeJoin(ctx.stageRoot, indexTarget);
+  const dest = safeJoin(ctx.stageRoot, indexTarget, { rejectColon: true });
   const strategy = await ctx.store.materialize(pkg.hash, dest);
   return { targets: [indexTarget], strategy };
 }
@@ -358,7 +364,7 @@ async function materializeRuntime(
 
 /** safeJoin a manifest-relative entry under an absolute runtime root. */
 function safeChild(root: string, rel: string): string {
-  return safeJoin(root, rel, { allowProtected: true });
+  return safeJoin(root, rel, { allowProtected: true, rejectColon: true });
 }
 
 /**

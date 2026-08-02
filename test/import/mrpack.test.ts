@@ -337,4 +337,61 @@ describe("mrpack import (untrusted input) → build", () => {
     expect(lock).toContain("config/ok.txt");
     expect(lock).not.toContain("level.dat");
   });
+
+  it("skips a ':'-segment override (NTFS ADS trigger) rather than writing it (LB-827)", async () => {
+    // MINOR 1 from the LB-827 review: archive extraction never called safeJoin,
+    // so this path was unguarded regardless of the safeJoin fix — safeExtract
+    // extracts it into the throwaway stage dir unchecked, and the persisted
+    // write into `.anvil/overrides/` was a bare `join`, not `safeJoin`. The gate
+    // that actually has to catch it is `isUnsafePackPath`, checked before that
+    // write.
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      overrides: [
+        { path: "config/ok.txt", data: "fine" },
+        { path: "config/foo:bar.txt", data: "ADS-PAYLOAD" },
+      ],
+    });
+    const res = await cli.run(["import", pack]);
+    expect(res.code).toBe(0);
+    // Skipped with a warning, same treatment as a protected-top override — one
+    // hostile entry must not abort the rest of the import.
+    expect(res.stdout.toLowerCase()).toContain("unsafe");
+    expect(res.stdout).toContain("config/foo:bar.txt");
+    const lock = await readFile(join(cwd, "anvil.lock"), "utf8");
+    expect(lock).toContain("config/ok.txt");
+    expect(lock).not.toContain("foo:bar.txt");
+    // The actual landing spot the review flagged: the colon-bearing file must
+    // never have been written into the tracked-copy store at all.
+    const files = await listFiles(cwd);
+    expect(files.some((f) => f.includes(":"))).toBe(false);
+    expect(files).not.toContain(".anvil/overrides/config/foo:bar.txt");
+  });
+
+  it("skips a ':'-segment top-level files[] entry the same way (LB-827)", async () => {
+    // The second call site isUnsafePackPath gates: mrpack.ts's files[] loop,
+    // which derives its placement target directly from file.path and never
+    // goes through declaredPlacementTarget/safeJoin at all.
+    const clientMod = fabricJar("sodium");
+    cli.urlBytes.set(MIRROR("sodium"), clientMod);
+    const pack = await writePack({
+      minecraft: MC,
+      loader: { name: "fabric-loader", version: FABRIC_LOADER },
+      files: [
+        { path: "mods/sodium.jar", bytes: clientMod, mirror: MIRROR("sodium") },
+        {
+          path: "config/D:evil.txt",
+          bytes: fabricJar("evil"),
+          mirror: MIRROR("evil"),
+        },
+      ],
+    });
+    const res = await cli.run(["import", pack]);
+    expect(res.code).toBe(0);
+    expect(res.stdout.toLowerCase()).toContain("unsafe");
+    const lock = await readFile(join(cwd, "anvil.lock"), "utf8");
+    expect(lock).toContain("sodium");
+    expect(lock).not.toContain("D:evil.txt");
+  });
 });

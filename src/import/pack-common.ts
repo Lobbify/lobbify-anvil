@@ -6,12 +6,23 @@
  * The override tree is fully **untrusted**: it is unpacked through the hardened
  * {@link safeExtract} (zip-slip / symlink / decompression-bomb guarded) into a
  * throwaway stage dir, and any file whose destination is a protected/unsafe path
- * is refused, never placed. Each surviving file becomes a tracked **local**
+ * — including a `:`-bearing segment, {@link isUnsafePackPath}, LB-827 — is
+ * refused, never placed. Each surviving file becomes a tracked **local**
  * (copy) entry under `.anvil/overrides/` — placed into the pre-resolved import
  * lock **and** appended to the manifest's `items` (the same shape
  * {@link importPrism} uses for its unmatched-jar case), so a later `anvil lock`
  * (regenerating the lock FROM the manifest, e.g. after a merge or rebase)
  * reproduces the override instead of silently dropping it.
+ *
+ * `safeExtract` itself does **not** check for a colon segment — it only guards
+ * the extraction into the throwaway stage dir (traversal/absolute/symlink/bomb),
+ * and that dir is unconditionally removed once this function returns, so a
+ * colon-bearing entry can pass through it. The refusal that actually matters is
+ * `isUnsafePackPath` below, checked against `destRel` (the pack-relative,
+ * final tracked-copy destination) **before** the persisted write at
+ * {@link importOverrideTree}'s `writeFile(trackedPath, bytes)` — that write is
+ * the one bare `join` (no `safeJoin`) in this file, and the one an attacker's
+ * `overrides/config/foo:bar.txt` would otherwise reach unguarded.
  *
  * That manifest entry reads from the tracked copy and declares the pack-relative
  * path as its `target`. Both halves matter: the tracked copy is the only place
@@ -22,12 +33,25 @@
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ensureDir, isProtectedTop } from "../internal/fs.js";
+import { ensureDir, findColonSegment, isProtectedTop } from "../internal/fs.js";
 import { safeBasename } from "../sources/index.js";
 import { hashBuffer, safeExtract } from "../store/index.js";
 import type { ItemKind, LockPackage, ManifestItem, ObjectSink } from "../types/index.js";
 
-/** Reject an obviously-unsafe pack path (traversal / absolute / drive letter). */
+/**
+ * Reject an obviously-unsafe pack path: traversal, absolute, drive letter, or a
+ * segment containing `:` (an NTFS alternate-data-stream trigger on Windows —
+ * see {@link findColonSegment} — LB-827).
+ *
+ * This is the gate for pack-declared paths that never went through
+ * `declaredPlacementTarget`/`safeJoin`: `mrpack.ts`'s top-level `files[]` loop
+ * and `importOverrideTree` below both call this directly on archive-supplied,
+ * untrusted path strings before any byte is written. Deliberately a boolean
+ * predicate rather than a throw — both call sites skip the one offending file
+ * with a warning and continue importing the rest of the pack, matching how a
+ * protected-top path is already handled; a single hostile entry must not abort
+ * an otherwise-good import.
+ */
 export function isUnsafePackPath(path: string): boolean {
   if (path.includes("\0") || path.length === 0) {
     return true;
@@ -35,7 +59,11 @@ export function isUnsafePackPath(path: string): boolean {
   if (path.startsWith("/") || path.startsWith("\\") || /^[a-zA-Z]:[/\\]?/.test(path)) {
     return true;
   }
-  return path.split(/[/\\]/).includes("..");
+  const segments = path.split(/[/\\]/);
+  if (segments.includes("..")) {
+    return true;
+  }
+  return findColonSegment(segments) !== undefined;
 }
 
 /** Infer a placement kind from a pack-relative path's top-level directory. */
@@ -147,6 +175,10 @@ export async function importOverrideTree(input: ImportOverrideTreeInput): Promis
 
     for (const [destRel, absSrc] of chosen) {
       const top = destRel.split(/[/\\]/)[0] ?? "";
+      // isUnsafePackPath now also refuses a ':'-bearing segment (LB-827): this is
+      // the check standing between an untrusted archive path and the persisted
+      // write below, which is a bare `join` — not `safeJoin` — so this is the
+      // only gate a colon-carrying override would meet before landing on disk.
       if (isProtectedTop(top) || isUnsafePackPath(destRel)) {
         input.warnings.push(`skipped override targeting a protected/unsafe path: ${destRel}`);
         continue;

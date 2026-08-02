@@ -16,7 +16,9 @@
  *   - the `overrides/` tree is unpacked through the hardened {@link safeExtract}
  *     (zip-slip / symlink / decompression-bomb guarded);
  *   - a file/override whose destination is a **protected** top-level entry
- *     (`saves/`, `.anvil/`) is refused, never placed;
+ *     (`saves/`, `.anvil/`), or whose path carries a `:`-bearing segment (an
+ *     NTFS alternate-data-stream trigger on Windows — LB-827), is refused,
+ *     never placed;
  *   - mrpack ships **sha512** (and sha1), not anvil's canonical sha256 — so the
  *     bytes are downloaded, verified against the declared hash, and only then is
  *     the sha256 store key computed;

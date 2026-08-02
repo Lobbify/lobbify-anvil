@@ -7,19 +7,37 @@ carry a breaking change, and each one is called out below.
 
 ### Security
 
-- **A manifest-declared path segment containing `:` is now refused (`PathEscape`)
-  rather than placed.** On Windows/NTFS a colon inside a segment opens an
-  Alternate Data Stream against whatever precedes it (`saves:level.dat` attaches
-  a hidden stream to `saves` — or creates it — without ever naming `saves` as its
-  own top-level segment), instead of creating the ordinary file the identical
-  string names on POSIX. That divergence breaks reproducibility by itself, before
-  any hostile intent, and it let a path bypass the protected-top-level guard by
-  construction. Enforced at both `declaredPlacementTarget` (lock time) and
-  `safeJoin` (build time, the gate every materialize goes through), on every
-  segment — not only a protected top — since an unprotected `config:foo` diverges
-  the identical way. A pack that legitimately shipped a colon in a path was never
-  installable on Windows in the first place, so the practical compatibility cost
-  is close to zero.
+- **A pack- or lock-declared path segment containing `:` is now refused rather
+  than placed or extracted.** On Windows/NTFS a colon inside a segment opens
+  an Alternate Data Stream against whatever precedes it (`saves:level.dat`
+  attaches a hidden stream to `saves` — or creates it — without ever naming
+  `saves` as its own top-level segment), instead of creating the ordinary
+  file the identical string names on POSIX. That divergence breaks
+  reproducibility by itself, before any hostile intent, and it let a path
+  bypass the protected-top-level guard by construction. Enforced, on every
+  segment (not only a protected top, since an unprotected `config:foo`
+  diverges the identical way):
+  - at lock time, in `declaredPlacementTarget` — a manifest item declaring
+    such a path is refused (`PathEscape`);
+  - at build time, in `safeJoin` — every write of a pack- or lock-derived
+    target (the placement executor, the atomic swap, Forge/NeoForge
+    processor replay) is refused (`PathEscape`);
+  - at import time, in `isUnsafePackPath` — a `.mrpack`/CurseForge-zip
+    `overrides/` file or top-level `files[]` entry with such a path is
+    skipped with a warning rather than written, before its bytes reach the
+    tracked-copy store.
+
+  A pack that legitimately shipped a colon in a path was never installable
+  on Windows in the first place, so the practical compatibility cost of all
+  three is close to zero.
+
+  **Deliberately not enforced on `anvil switch`/`branch` (VC checkout).**
+  Those paths are the user's own already-committed working-tree files, not
+  pack input — a colon there is an ordinary POSIX filename, and refusing to
+  restore one would make its own commit permanently unreachable. The
+  compatibility argument above is specific to *newly declared* paths that
+  have never touched disk; it does not hold for a file the user already
+  created and committed, so `safeJoin` calls in VC checkout omit the guard.
 
 ## v0.2.1 — 2026-08-02
 

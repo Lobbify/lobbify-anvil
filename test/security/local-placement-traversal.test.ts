@@ -177,38 +177,68 @@ describe("declaredPlacementTarget — the placement half of the path guard", () 
   });
 });
 
-describe("safeJoin — refuses a colon segment (NTFS ADS) at the build-time gate too (LB-827)", () => {
-  // `declaredPlacementTarget` and `safeJoin` are two independent call sites that
-  // both delegate to `findColonSegment` (see src/internal/fs.ts) — this block
-  // proves the rejection fires here as well, rather than assuming the shared
-  // helper implies it. A ticket that only fixed one of them would still let a
-  // caller who builds a target string some other way (mrpack import,
-  // mrpack-base, prism import) reach the real filesystem write unguarded,
-  // since safeJoin is the last gate before every materialize.
+describe("safeJoin — refuses a colon segment (NTFS ADS) only when the caller opts in (LB-827 round 2)", () => {
+  // Round 1 made this unconditional and that was WRONG: `safeJoin` is not only
+  // the pack/lock placement gate, VC checkout (src/vc/snapshot.ts) resolves the
+  // user's own already-committed tracked/carried files through it too, and a
+  // colon there is an ordinary POSIX filename that must round-trip like any
+  // other file (see test/vc/colon-path-round-trip.test.ts for the end-to-end
+  // proof). So the guard is now `{ rejectColon: true }`, opt-in, and this block
+  // proves both halves: the callers that pass it still refuse a colon segment,
+  // and the ones that don't (the default) pass one through untouched.
   const root = "/tmp/anvil-instance";
 
-  it("throws on a top-level colon segment, protected-shaped or not", () => {
+  it("throws on a top-level colon segment, protected-shaped or not, when rejectColon is set", () => {
     for (const rel of ["saves:level.dat", "config:foo"]) {
-      expect(() => safeJoin(root, rel), rel).toThrow(PathEscape);
+      expect(() => safeJoin(root, rel, { rejectColon: true }), rel).toThrow(PathEscape);
     }
   });
 
-  it("throws on a colon buried in a nested segment", () => {
-    expect(() => safeJoin(root, "config/D:evil.txt")).toThrow(PathEscape);
-    expect(() => safeJoin(root, "config/sub/name:stream.txt")).toThrow(PathEscape);
+  it("throws on a colon buried in a nested segment, when rejectColon is set", () => {
+    expect(() => safeJoin(root, "config/D:evil.txt", { rejectColon: true })).toThrow(PathEscape);
+    expect(() => safeJoin(root, "config/sub/name:stream.txt", { rejectColon: true })).toThrow(
+      PathEscape,
+    );
   });
 
-  it("is NOT bypassable via allowProtected — the colon guard is unconditional", () => {
+  it("rejectColon is NOT bypassable via allowProtected — the two flags are independent", () => {
     // allowProtected exists so a handful of internal callers (checkout of the
     // instance's own protected slots) can target saves/.anvil on purpose. The
-    // colon guard is a determinism guard, not a protected-path guard, so it
-    // must fire even when the caller has explicitly opted out of the other one.
-    expect(() => safeJoin(root, "saves:level.dat", { allowProtected: true })).toThrow(PathEscape);
-    expect(() => safeJoin(root, "config:foo", { allowProtected: true })).toThrow(PathEscape);
+    // colon guard is a determinism guard, not a protected-path guard, so when a
+    // caller asks for BOTH, colon rejection still fires even though the
+    // protected-top check has been opted out of.
+    expect(() =>
+      safeJoin(root, "saves:level.dat", { allowProtected: true, rejectColon: true }),
+    ).toThrow(PathEscape);
+    expect(() => safeJoin(root, "config:foo", { allowProtected: true, rejectColon: true })).toThrow(
+      PathEscape,
+    );
   });
 
-  it("still accepts an ordinary colon-free nested path (no over-rejection)", () => {
-    expect(() => safeJoin(root, "config/sub/name-stream.txt")).not.toThrow();
+  it("still accepts an ordinary colon-free nested path (no over-rejection) with rejectColon set", () => {
+    expect(() => safeJoin(root, "config/sub/name-stream.txt", { rejectColon: true })).not.toThrow();
+  });
+
+  it("DEFAULT (no rejectColon): a colon segment passes through untouched — this is the VC-checkout path", () => {
+    // No PathEscape, and the returned path actually contains the colon
+    // verbatim — this is what lets test/vc/colon-path-round-trip.test.ts
+    // restore a user's own colon-bearing file exactly as committed.
+    for (const rel of ["saves:level.dat", "config:foo", "config/D:evil.txt"]) {
+      let result: string | undefined;
+      expect(() => {
+        result = safeJoin(root, rel);
+      }, rel).not.toThrow();
+      expect(result, rel).toBe(resolve(root, rel));
+    }
+  });
+
+  it("omitting rejectColon still enforces every OTHER guard (NUL, traversal, protected-top)", () => {
+    // The opt-in only widens the colon check; it must not have accidentally
+    // widened anything else.
+    expect(() => safeJoin(root, "a\0b")).toThrow(PathEscape);
+    expect(() => safeJoin(root, "../escape")).toThrow(PathEscape);
+    expect(() => safeJoin(root, "saves/level.dat")).toThrow(PathEscape);
+    expect(() => safeJoin(root, "saves/level.dat", { allowProtected: true })).not.toThrow();
   });
 });
 
