@@ -44,7 +44,7 @@ import {
 import { LockStale, VcStateError } from "../types/errors.js";
 import type { Hash, LockPackage, Lockfile, Manifest } from "../types/index.js";
 import type { CarriedBlob, SnapshotObject, VcObjectStore } from "./objects.js";
-import { hashToString, trackedPathCollision } from "./objects.js";
+import { encodeObject, hashToString, idOfEncoding, trackedPathCollision } from "./objects.js";
 import {
   WorktreeExclusion,
   isExcludeFilePath,
@@ -224,6 +224,39 @@ export async function buildSnapshot(input: BuildSnapshotInput): Promise<BuiltSna
   return { id, snapshot, manifest, lock };
 }
 
+/**
+ * The blob ids the three snapshot slots would take from the working tree as it
+ * stands — `anvil.toml`, `anvil.lock`, `.anvilignore`.
+ *
+ * A **read**, deliberately: it hashes the bytes the way {@link buildSnapshot}
+ * would (an absent file is the empty blob, the same substitution `buildSnapshot`
+ * makes) and admits nothing to the object store, so `status` can use it without
+ * becoming a writer.
+ *
+ * It exists because those three files are the instance's own claim about which
+ * commit it holds, and they are the one part of a snapshot the tracked walk
+ * cannot see: `worktree.ts` lists them in `SNAPSHOT_SLOTS` and excludes them by
+ * construction. Comparing only the tracked set therefore cannot detect a tree
+ * whose source files came from one commit and whose contents came from another
+ * (LB-843).
+ */
+export async function worktreeSlotBlobs(
+  instanceDir: string,
+): Promise<{ manifest: Hash; lock: Hash; ignore: Hash }> {
+  const blobOf = async (name: string): Promise<Hash> =>
+    idOfEncoding(
+      encodeObject({
+        type: "blob",
+        bytes: (await readBytesIfPresent(join(instanceDir, name))) ?? new Uint8Array(),
+      }),
+    );
+  return {
+    manifest: await blobOf(MANIFEST_FILE),
+    lock: await blobOf(LOCK_FILE),
+    ignore: await blobOf(IGNORE_FILE),
+  };
+}
+
 export interface MaterializeInput {
   readonly instanceDir: string;
   readonly snapshot: SnapshotObject;
@@ -385,23 +418,6 @@ export async function materializeSnapshot(input: MaterializeInput): Promise<void
   const refused = input.refusedBlobs ?? new Set<string>();
   const undeletable = (path: string): boolean => exclude.excludes(path) || onDisk.excludes(path);
 
-  await writeIfDiffer(
-    join(instanceDir, MANIFEST_FILE),
-    await vcStore.getBlobBytes(snapshot.manifest),
-  );
-  await writeIfDiffer(join(instanceDir, LOCK_FILE), await vcStore.getBlobBytes(snapshot.lock));
-  const ignoreBytes = await vcStore.getBlobBytes(snapshot.ignore);
-  const ignorePath = join(instanceDir, IGNORE_FILE);
-  if (ignoreBytes.byteLength === 0) {
-    // An empty committed ignore means "no user overrides" — leave any existing one
-    // only if it too is effectively empty; otherwise restore emptiness.
-    if (await pathExists(ignorePath)) {
-      await writeIfDiffer(ignorePath, ignoreBytes);
-    }
-  } else {
-    await writeIfDiffer(ignorePath, ignoreBytes);
-  }
-
   // Deletions run before writes, and a path the target still lists is never
   // deleted — a file that moves between the carried and tracked sets stays put.
   const targetPaths = new Set([
@@ -466,5 +482,43 @@ export async function materializeSnapshot(input: MaterializeInput): Promise<void
       continue;
     }
     await writeIfDiffer(abs, bytes);
+  }
+
+  // The three source files are written LAST, and that ordering is the whole of
+  // LB-843 (do not "tidy" them back to the top).
+  //
+  // They are the instance's own statement of which commit it holds, so writing
+  // them first meant a failure anywhere below left `anvil.toml` / `anvil.lock`
+  // describing the TARGET while HEAD and the tracked tree were still at the
+  // SOURCE — and `switchTo` only moves HEAD after this function returns, so a
+  // throw could not move it back. Nothing reported that: the source files are
+  // snapshot slots, structurally excluded from the tracked walk, so
+  // `status().worktreeDirty` could not see them, and manifest and lock were
+  // rewritten together so they still agreed with each other.
+  //
+  // Writing them last does not make a checkout atomic — a tracked write that
+  // lands before a later one fails still leaves a mixed tree — but it makes the
+  // mixed tree an HONEST one: every partial state is now visible in the tracked
+  // set, which is the thing `status` already compares. In the narrow case that
+  // hid the bug (the failing file is the only tracked difference) nothing was
+  // written at all, so the instance is left exactly at its source commit.
+  //
+  // This is `journaledSwap`'s rule with no journal: put the linearization point
+  // last, so what precedes it is either invisible or self-declaring.
+  await writeIfDiffer(
+    join(instanceDir, MANIFEST_FILE),
+    await vcStore.getBlobBytes(snapshot.manifest),
+  );
+  await writeIfDiffer(join(instanceDir, LOCK_FILE), await vcStore.getBlobBytes(snapshot.lock));
+  const ignoreBytes = await vcStore.getBlobBytes(snapshot.ignore);
+  const ignorePath = join(instanceDir, IGNORE_FILE);
+  if (ignoreBytes.byteLength === 0) {
+    // An empty committed ignore means "no user overrides" — leave any existing one
+    // only if it too is effectively empty; otherwise restore emptiness.
+    if (await pathExists(ignorePath)) {
+      await writeIfDiffer(ignorePath, ignoreBytes);
+    }
+  } else {
+    await writeIfDiffer(ignorePath, ignoreBytes);
   }
 }
