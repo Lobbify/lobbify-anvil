@@ -43,7 +43,7 @@
  * the mixed state that genuinely can still occur (the third test).
  */
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContentStore, type Manifest, type SnapshotObject, VcObjectStore } from "../../index.js";
@@ -288,14 +288,42 @@ describe("LB-843: a switch that fails part-way must not lie about where the inst
     // The rule the walk already follows (`isRacedAway` in worktree.ts: unreadable
     // is not empty) applies here for the same reason, so the slot read sits
     // outside the guard and an unreadable source file propagates.
+    //
+    // THE FAULT IS A DIRECTORY, NOT A `chmod` — and that is portability, not
+    // taste. `chmod 0o000` does not make a file unreadable on Windows: `chmod`
+    // there only toggles the read-only attribute, so the read succeeded, `status`
+    // resolved, and this test failed on both Windows runners while passing on
+    // POSIX. (The sibling tests' `chmod 0o444` is fine and stays: read-only DOES
+    // block a WRITE on Windows, which is why they are green there — the platform
+    // can express "not writable" and cannot express "not readable".)
+    //
+    // Reading a directory fails with a non-ENOENT error everywhere, which is the
+    // only property the code under test cares about: `readBytesIfPresent` maps
+    // ENOENT to "absent" and rethrows everything else. So this exercises the same
+    // branch as an EACCES without depending on POSIX permission semantics.
     const rig = await twoBranchRig(1);
     dirs.push(rig.fx.dir, rig.fx.storeDir);
     const toml = join(rig.fx.dir, "anvil.toml");
+    const saved = await readFile(toml);
 
     expect((await rig.anvil.status()).worktreeDirty).toBe(false);
-    await chmod(toml, 0o000);
+    await rm(toml);
+    await mkdir(toml);
+
+    // Prove the fixture before believing its result: a fault that failed to
+    // inject would leave `status` resolving for a reason that has nothing to do
+    // with the guard under test — which is exactly how this test read on Windows.
+    const readErr = await readFile(toml, "utf8").then(
+      () => undefined,
+      (e: NodeJS.ErrnoException) => e,
+    );
+    expect(readErr).toBeDefined();
+    expect(readErr?.code).not.toBe("ENOENT");
+
     await expect(rig.anvil.status()).rejects.toThrow();
-    await chmod(toml, 0o644);
+
+    await rmdir(toml);
+    await writeFile(toml, saved);
     expect((await rig.anvil.status()).worktreeDirty).toBe(false);
   });
 });
