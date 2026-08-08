@@ -41,7 +41,7 @@ export { describeConflict } from "./conflict.js";
 export type { ResolutionPolicy, ThreeWayInput, ThreeWayResult } from "./merge.js";
 export { threeWayMerge } from "./merge.js";
 export type { BuildSnapshotInput, BuiltSnapshot, MaterializeInput } from "./snapshot.js";
-export { buildSnapshot, materializeSnapshot } from "./snapshot.js";
+export { buildSnapshot, materializeSnapshot, worktreeSlotBlobs } from "./snapshot.js";
 export type {
   BuildOwnedPaths,
   ExcludePattern,

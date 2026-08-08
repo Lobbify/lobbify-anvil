@@ -129,6 +129,7 @@ import {
   snapshotExclusion,
   trackWorktree,
   vcReachability,
+  worktreeSlotBlobs,
 } from "./vc/index.js";
 
 /**
@@ -1200,8 +1201,12 @@ export class Anvil {
   }
 
   /**
-   * Whether the tracked working-tree files differ from the ones HEAD's commit
-   * recorded. **A read, not a write**: it hashes candidates to compare blob ids
+   * Whether the working tree differs from what HEAD's commit recorded — both the
+   * tracked files and the three snapshot slots (`anvil.toml`, `anvil.lock`,
+   * `.anvilignore`), which the tracked walk excludes by construction and which a
+   * tracked-only comparison therefore cannot see (LB-843).
+   *
+   * **A read, not a write**: it hashes candidates to compare blob ids
    * and never admits an object, so `status` cannot mutate history. An unborn HEAD
    * — or no `.anvil/` at all — reports clean, since there is nothing to differ
    * from. Offline; it needs only the VC object store and the refs.
@@ -1215,6 +1220,7 @@ export class Anvil {
     // this guard — a directory it cannot read would otherwise report "clean", which
     // is the same lie as a commit silently recording a deletion.
     let committed: Map<string, string>;
+    let slotsDiffer: boolean;
     try {
       const head = await new Refs(anvilDir).resolveHead();
       if (!head) {
@@ -1222,8 +1228,29 @@ export class Anvil {
       }
       const snapshot = await vcStore.getSnapshot((await vcStore.getCommit(head)).snapshot);
       committed = new Map(snapshot.tracked.map((t) => [t.path, t.blob.value]));
+      // The three snapshot slots are compared as well as the tracked set (LB-843).
+      // They are excluded from the walk by construction, so a tracked-only
+      // comparison is strictly weaker than the one `switchTo`'s own dirty guard
+      // performs twenty lines from here — it builds a FULL snapshot id. Those two
+      // notions of "dirty" disagreeing is what let a half-applied `switch` leave
+      // `anvil.toml` describing one commit and the tree at another while this
+      // method reported clean.
+      //
+      // Comparing the slots closes the whole gap rather than part of it: a
+      // snapshot is its three slots, its carried set and its tracked set, and the
+      // carried set is derived from the lock — identical lock bytes give identical
+      // carried entries. So slots-equal plus tracked-equal implies the full
+      // snapshot ids are equal, which is the property `switchTo` checks.
+      const onDisk = await worktreeSlotBlobs(this.dir);
+      slotsDiffer =
+        onDisk.manifest.value !== snapshot.manifest.value ||
+        onDisk.lock.value !== snapshot.lock.value ||
+        onDisk.ignore.value !== snapshot.ignore.value;
     } catch {
       return false;
+    }
+    if (slotsDiffer) {
+      return true;
     }
     const tracked = await trackWorktree({
       instanceDir: this.dir,
