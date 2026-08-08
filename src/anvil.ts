@@ -1220,7 +1220,7 @@ export class Anvil {
     // this guard — a directory it cannot read would otherwise report "clean", which
     // is the same lie as a commit silently recording a deletion.
     let committed: Map<string, string>;
-    let slotsDiffer: boolean;
+    let slots: { manifest: string; lock: string; ignore: string };
     try {
       const head = await new Refs(anvilDir).resolveHead();
       if (!head) {
@@ -1228,28 +1228,43 @@ export class Anvil {
       }
       const snapshot = await vcStore.getSnapshot((await vcStore.getCommit(head)).snapshot);
       committed = new Map(snapshot.tracked.map((t) => [t.path, t.blob.value]));
-      // The three snapshot slots are compared as well as the tracked set (LB-843).
-      // They are excluded from the walk by construction, so a tracked-only
-      // comparison is strictly weaker than the one `switchTo`'s own dirty guard
-      // performs twenty lines from here — it builds a FULL snapshot id. Those two
-      // notions of "dirty" disagreeing is what let a half-applied `switch` leave
-      // `anvil.toml` describing one commit and the tree at another while this
-      // method reported clean.
-      //
-      // Comparing the slots closes the whole gap rather than part of it: a
-      // snapshot is its three slots, its carried set and its tracked set, and the
-      // carried set is derived from the lock — identical lock bytes give identical
-      // carried entries. So slots-equal plus tracked-equal implies the full
-      // snapshot ids are equal, which is the property `switchTo` checks.
-      const onDisk = await worktreeSlotBlobs(this.dir);
-      slotsDiffer =
-        onDisk.manifest.value !== snapshot.manifest.value ||
-        onDisk.lock.value !== snapshot.lock.value ||
-        onDisk.ignore.value !== snapshot.ignore.value;
+      slots = {
+        manifest: snapshot.manifest.value,
+        lock: snapshot.lock.value,
+        ignore: snapshot.ignore.value,
+      };
     } catch {
       return false;
     }
-    if (slotsDiffer) {
+
+    // The three snapshot slots are compared as well as the tracked set (LB-843).
+    // They are excluded from the walk by construction, so a tracked-only comparison
+    // is strictly weaker than the one `switchTo`'s own dirty guard performs — it
+    // builds a FULL snapshot id. Those two notions of "dirty" disagreeing is what
+    // let a half-applied `switch` leave `anvil.toml` describing one commit and the
+    // tree at another while this method reported clean.
+    //
+    // Read OUTSIDE the guard above, for exactly the reason the walk is: an
+    // `anvil.toml` that cannot be READ is not an `anvil.toml` that matches HEAD,
+    // and letting an `EACCES` fall into a `catch` that returns `false` would
+    // reinstate the same lie this fix exists to remove, one file over.
+    //
+    // SCOPE, stated because the obvious reading is wider than the truth: this
+    // compares the three slots and the tracked set, which together determine the
+    // snapshot ID (the carried set is derived from the lock, so identical lock
+    // bytes give identical carried entries). It does NOT verify the carried files'
+    // BYTES ON DISK — those live at lock-owned paths, which the walk excludes, and
+    // `carryLocals` reads them from the shared store rather than from the instance.
+    // A carried file left holding another commit's bytes is therefore still
+    // invisible here. That is a separate gap with its own detector and its own
+    // over-report risk (an unbuilt instance has no carried files placed at all),
+    // not something to smuggle into this comparison.
+    const onDisk = await worktreeSlotBlobs(this.dir);
+    if (
+      onDisk.manifest.value !== slots.manifest ||
+      onDisk.lock.value !== slots.lock ||
+      onDisk.ignore.value !== slots.ignore
+    ) {
       return true;
     }
     const tracked = await trackWorktree({

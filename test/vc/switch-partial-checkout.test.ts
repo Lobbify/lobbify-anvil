@@ -277,4 +277,25 @@ describe("LB-843: a switch that fails part-way must not lie about where the inst
     await rig.anvil.switch("main");
     expect((await rig.anvil.status()).worktreeDirty).toBe(false);
   });
+
+  it("an UNREADABLE source file fails loudly rather than reporting clean", async () => {
+    // Raised by adversarial review of the first cut of this fix, which read the
+    // slots inside the try/catch that tolerates a missing history — so an EACCES
+    // on `anvil.toml` fell into a `catch` returning `false` and a provably
+    // divergent tree reported clean. That is the same lie the fix exists to
+    // remove, one file over.
+    //
+    // The rule the walk already follows (`isRacedAway` in worktree.ts: unreadable
+    // is not empty) applies here for the same reason, so the slot read sits
+    // outside the guard and an unreadable source file propagates.
+    const rig = await twoBranchRig(1);
+    dirs.push(rig.fx.dir, rig.fx.storeDir);
+    const toml = join(rig.fx.dir, "anvil.toml");
+
+    expect((await rig.anvil.status()).worktreeDirty).toBe(false);
+    await chmod(toml, 0o000);
+    await expect(rig.anvil.status()).rejects.toThrow();
+    await chmod(toml, 0o644);
+    expect((await rig.anvil.status()).worktreeDirty).toBe(false);
+  });
 });
