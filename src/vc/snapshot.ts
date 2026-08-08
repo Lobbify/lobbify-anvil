@@ -319,9 +319,26 @@ export async function carriedBytesDiffer(
     let size: number;
     try {
       // `stat`, not `lstat`: a placement may legitimately be a symlink into the
-      // store (the linking chain falls back to one), and the question is what
-      // bytes are AT the path, not what kind of entry names them.
-      size = (await stat(abs)).size;
+      // store (the linking chain falls back to one when reflink and hardlink are
+      // unavailable), and the question is what bytes are AT the path, not what
+      // kind of entry names them. A dangling symlink raises ENOENT and is skipped
+      // as never-placed, which is what it is.
+      const st = await stat(abs);
+      if (!st.isFile()) {
+        // Not a regular file, so not the recorded bytes — but reading it is worse
+        // than useless: `readFile` on a directory throws EISDIR, and on a FIFO it
+        // **blocks forever**, which would turn every later `status()` call into a
+        // hang. Both measured. `trackOne` skips non-regular entries for the same
+        // reason and this mirrors it.
+        //
+        // Honest limit: unlike an absent file, materialize does NOT repair this —
+        // `writeIfDiffer` would fail on the directory too. Reporting it dirty
+        // would not help either, since no `commit` can clear it (carried entries
+        // come from the lock, never from disk). It needs a repair path rather than
+        // a flag, so it is out of scope here rather than silently owned.
+        continue;
+      }
+      size = st.size;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         continue; // never placed — see the header

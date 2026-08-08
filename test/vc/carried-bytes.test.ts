@@ -24,14 +24,21 @@
  * rather than assumed, because the whole design rests on it.
  */
 
+import { execFile } from "node:child_process";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContentStore, type SnapshotObject, VcObjectStore } from "../../index.js";
 import { pathExists } from "../../src/internal/fs.js";
 import { buildSnapshot } from "../../src/vc/snapshot.js";
 import { mkTmp, rmTmp } from "../helpers/fixtures.js";
 import { makeVcFixture, manifest, modWorld, version } from "../helpers/vc.js";
+
+/** Create a POSIX FIFO. No Node API exists for this, and no Windows equivalent. */
+async function mkfifo(path: string): Promise<void> {
+  await promisify(execFile)("mkfifo", [path]);
+}
 
 function world(): ReturnType<typeof modWorld> {
   return modWorld([
@@ -189,5 +196,41 @@ describe("LB-859: a carried file's bytes on disk are part of being clean", () =>
 
     await writeFile(rig.carriedPath, `${big.slice(0, big.length - 1)}y`);
     expect((await rig.anvil.status()).worktreeDirty).toBe(true);
+  });
+
+  it("a non-regular file at a carried path neither crashes nor hangs status()", async () => {
+    // Raised by adversarial review of the first cut, which stat'd the path and
+    // then read it unconditionally. Both failure modes were measured on this box:
+    // `readFile` on a directory throws EISDIR, and on a FIFO it **blocks
+    // forever** — the second is the bad one, because it would turn every later
+    // `status()` call into a hang rather than an error.
+    //
+    // `trackOne` has skipped non-regular entries all along; this function simply
+    // failed to mirror it. Before the guard, `status()` here threw where it
+    // previously returned — a regression introduced by a detector, on a state it
+    // was never asked to judge.
+    const rig = await localItemRig();
+    dirs.push(rig.fx.dir, rig.fx.storeDir);
+
+    await mkdir(rig.carriedPath, { recursive: true }); // a DIRECTORY where the jar goes
+    expect((await stat(rig.carriedPath)).isDirectory()).toBe(true);
+    await expect(rig.anvil.status()).resolves.toBeDefined();
+
+    await rm(rig.carriedPath, { recursive: true });
+
+    // The FIFO half is POSIX-only, and that is a real platform difference rather
+    // than a fault that fails to inject: Windows has no `mkfifo`, so the state
+    // being guarded against cannot arise there. The distinction matters — the
+    // LB-843 harness bug was a fault that silently did nothing on Windows while
+    // looking like a subject difference — so this asserts the fixture landed
+    // wherever it CAN land, instead of skipping on a failure it never checked.
+    if (process.platform !== "win32") {
+      await mkfifo(rig.carriedPath);
+      expect((await stat(rig.carriedPath)).isFIFO()).toBe(true);
+      // The real assertion is that this RETURNS AT ALL. A hang has no error to
+      // catch, so the test fails by timing out rather than by asserting.
+      await expect(rig.anvil.status()).resolves.toBeDefined();
+      await rm(rig.carriedPath);
+    }
   });
 });
