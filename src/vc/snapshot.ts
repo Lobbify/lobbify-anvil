@@ -23,7 +23,8 @@
  * respectively.
  */
 
-import { readFile, rm, rmdir, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson } from "../build/serialize.js";
@@ -44,7 +45,13 @@ import {
 import { LockStale, VcStateError } from "../types/errors.js";
 import type { Hash, LockPackage, Lockfile, Manifest } from "../types/index.js";
 import type { CarriedBlob, SnapshotObject, VcObjectStore } from "./objects.js";
-import { encodeObject, hashToString, idOfEncoding, trackedPathCollision } from "./objects.js";
+import {
+  blobIdOfStream,
+  encodeObject,
+  hashToString,
+  idOfEncoding,
+  trackedPathCollision,
+} from "./objects.js";
 import {
   WorktreeExclusion,
   isExcludeFilePath,
@@ -255,6 +262,81 @@ export async function worktreeSlotBlobs(
     lock: await blobOf(LOCK_FILE),
     ignore: await blobOf(IGNORE_FILE),
   };
+}
+
+/** Carried files at or above this size are hashed by streaming rather than by full read. */
+const CARRIED_STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Whether any carried file **present on disk** holds bytes other than the ones the
+ * snapshot recorded for it (LB-859).
+ *
+ * A **read**, like {@link worktreeSlotBlobs}: it hashes the same way `carryLocals`
+ * does and admits nothing to the object store.
+ *
+ * It exists because the carried set is the one part of a snapshot that neither of
+ * the other two comparisons can see. Carried paths are lock-owned, so the tracked
+ * walk excludes them by construction; and `carryLocals` derives the recorded entry
+ * from the **lock** — reading the bytes out of the shared store, never from the
+ * instance — so identical lock bytes produce an identical carried array and an
+ * identical snapshot id no matter what is actually sitting at those paths. A
+ * carried file left holding another commit's bytes by a half-applied `switch` was
+ * therefore invisible to `status` AND to `switchTo`'s own full-snapshot guard.
+ *
+ * **An ABSENT carried file is skipped, and that is deliberate rather than a
+ * concession.** The usual objection applies to absence-gated skips — a presence
+ * check that gates skipping a verification trusts whatever crash left the gap. It
+ * does not apply here, and the distinguishing question is not "is this an absence?"
+ * but **"does the skipped state have a routine repair, and is anything lost while
+ * it persists?"**:
+ *
+ *   - A carried file is re-derivable build product, not user data. Its bytes live
+ *     in the VC object store precisely so an old commit stays self-contained, and
+ *     BOTH `build` and `switch`/materialize place it from there. Measured: after
+ *     `init` + `lock` + `commit` with no build and no switch the file is absent;
+ *     after a switch it is present with the recorded bytes. So absence means
+ *     "never placed" on every path, and treating it as a difference would report
+ *     every never-built instance permanently dirty.
+ *   - It costs no coverage of the failure this exists for. A half-applied `switch`
+ *     has just written the file, so it is present by construction. The only residue
+ *     is a carried path that was absent beforehand and whose own write failed —
+ *     which is byte-for-byte the "never placed" state, with nothing overwritten and
+ *     nothing lost.
+ *
+ * Note this gate is NOT conditioned on a build having happened. `readBuiltLock` is
+ * written only by the build pipeline, and an embedder that drives version control
+ * without ever calling `build()` (the Lobbify app does exactly that) would have it
+ * false forever — a gate that is silently inert in production and green in the
+ * test suite. Skipping on per-file absence needs no such signal and behaves
+ * identically on both paths.
+ */
+export async function carriedBytesDiffer(
+  instanceDir: string,
+  carried: readonly CarriedBlob[],
+): Promise<boolean> {
+  for (const c of carried) {
+    const abs = safeJoin(instanceDir, c.path);
+    let size: number;
+    try {
+      // `stat`, not `lstat`: a placement may legitimately be a symlink into the
+      // store (the linking chain falls back to one), and the question is what
+      // bytes are AT the path, not what kind of entry names them.
+      size = (await stat(abs)).size;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        continue; // never placed — see the header
+      }
+      throw err; // unreadable is not absent, and must not read as clean
+    }
+    const blob =
+      size >= CARRIED_STREAM_THRESHOLD_BYTES
+        ? await blobIdOfStream(createReadStream(abs))
+        : idOfEncoding(encodeObject({ type: "blob", bytes: new Uint8Array(await readFile(abs)) }));
+    if (blob.value !== c.blob.value) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export interface MaterializeInput {
