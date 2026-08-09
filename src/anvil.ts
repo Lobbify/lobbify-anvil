@@ -111,6 +111,7 @@ import type {
   ResolvedRef,
 } from "./types/index.js";
 import type {
+  CarriedBlob,
   CommitRef,
   Conflict,
   ConflictStrategy,
@@ -126,6 +127,7 @@ import {
   Refs,
   VcObjectStore,
   VcRepo,
+  carriedBytesDiffer,
   snapshotExclusion,
   trackWorktree,
   vcReachability,
@@ -1221,6 +1223,7 @@ export class Anvil {
     // is the same lie as a commit silently recording a deletion.
     let committed: Map<string, string>;
     let slots: { manifest: string; lock: string; ignore: string };
+    let carried: readonly CarriedBlob[];
     try {
       const head = await new Refs(anvilDir).resolveHead();
       if (!head) {
@@ -1233,6 +1236,7 @@ export class Anvil {
         lock: snapshot.lock.value,
         ignore: snapshot.ignore.value,
       };
+      carried = snapshot.carried;
     } catch {
       return false;
     }
@@ -1249,22 +1253,36 @@ export class Anvil {
     // and letting an `EACCES` fall into a `catch` that returns `false` would
     // reinstate the same lie this fix exists to remove, one file over.
     //
-    // SCOPE, stated because the obvious reading is wider than the truth: this
-    // compares the three slots and the tracked set, which together determine the
-    // snapshot ID (the carried set is derived from the lock, so identical lock
-    // bytes give identical carried entries). It does NOT verify the carried files'
-    // BYTES ON DISK — those live at lock-owned paths, which the walk excludes, and
-    // `carryLocals` reads them from the shared store rather than from the instance.
-    // A carried file left holding another commit's bytes is therefore still
-    // invisible here. That is a separate gap with its own detector and its own
-    // over-report risk (an unbuilt instance has no carried files placed at all),
-    // not something to smuggle into this comparison.
+    // SCOPE, stated because the obvious reading is wider than the truth. Three
+    // comparisons run here, and they are three because a snapshot has three parts
+    // that fail independently:
+    //
+    //   1. the source-file slots, below — invisible to the walk (LB-843);
+    //   2. the carried bytes on disk, below — invisible to BOTH the walk and the
+    //      snapshot id, because `carryLocals` derives the recorded entry from the
+    //      lock rather than from the instance (LB-859);
+    //   3. the tracked set, at the end.
+    //
+    // Slots-equal plus tracked-equal is enough to prove the snapshot IDs match. It
+    // is NOT enough to prove the working tree matches HEAD — that is what 2 adds,
+    // and why "the ids are equal" must not be read as "the instance is intact".
+    //
+    // Still outside this method: the lock-owned build product that is not carried.
+    // An embedder whose items are all remote-sourced (`url` / `curseforge`, as the
+    // Lobbify app's are) has an empty carried set, so ITS mod files are covered by
+    // none of the three — lock-owned, hence excluded from the walk, and not
+    // `local`, hence absent from the object store. Nothing here regresses on that;
+    // materialize does not touch those paths either. But `worktreeDirty === false`
+    // means "the versioned state matches HEAD", never "every file is as it was".
     const onDisk = await worktreeSlotBlobs(this.dir);
     if (
       onDisk.manifest.value !== slots.manifest ||
       onDisk.lock.value !== slots.lock ||
       onDisk.ignore.value !== slots.ignore
     ) {
+      return true;
+    }
+    if (await carriedBytesDiffer(this.dir, carried)) {
       return true;
     }
     const tracked = await trackWorktree({
