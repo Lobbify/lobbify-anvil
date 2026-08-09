@@ -26,7 +26,7 @@
 
 import { execFile } from "node:child_process";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContentStore, type SnapshotObject, VcObjectStore } from "../../index.js";
@@ -79,6 +79,8 @@ interface Rig {
   readonly anvil: ReturnType<Awaited<ReturnType<typeof makeVcFixture>>["anvil"]>;
   /** Absolute path of the carried file this instance's lock names. */
   readonly carriedPath: string;
+  /** The out-of-instance dir holding the local source jar, so it gets cleaned up. */
+  readonly srcDir: string;
   readonly snapshot: SnapshotObject;
 }
 
@@ -89,7 +91,17 @@ async function localItemRig(bytes = "LOCAL-BYTES-V1"): Promise<Rig> {
   const src = await mkTmp("lb859-src");
   const jar = join(src, "mine.jar");
   await writeFile(jar, bytes);
-  await fx.writeLockFor(manifest({ minecraft: "26.2", items: [`local:${jar}`] }));
+  // A `../`-relative ref with forward slashes, NOT `join(src, …)`. The manifest
+  // round-trips through `formatRef`, which renders a local ref as its bare id —
+  // so the written form has to be one `parseRef` accepts, and it accepts only
+  // `./`, `../` and `/`. A Windows absolute path (`C:\…`) matches none of them,
+  // and a POSIX one parsed here purely by accident of `startsWith("/")`.
+  // (`path.relative` is no good either: it emits backslashes on Windows.)
+  // The source stays OUTSIDE the instance dir on purpose — a jar sitting inside
+  // it would join the tracked walk, and then the tracked comparison, not the
+  // carried one, would be what catches the corruption below.
+  const ref = `../${basename(src)}/mine.jar`;
+  await fx.writeLockFor(manifest({ minecraft: "26.2", items: [`local:${ref}`] }));
   const c1 = await anvil.commit("c1: baseline");
 
   const objects = objectsOf(fx.dir);
@@ -99,7 +111,7 @@ async function localItemRig(bytes = "LOCAL-BYTES-V1"): Promise<Rig> {
   if (!entry) {
     throw new Error("no carried entry");
   }
-  return { fx, anvil, carriedPath: join(fx.dir, entry.path), snapshot };
+  return { fx, anvil, carriedPath: join(fx.dir, entry.path), srcDir: src, snapshot };
 }
 
 describe("LB-859: a carried file's bytes on disk are part of being clean", () => {
@@ -113,7 +125,7 @@ describe("LB-859: a carried file's bytes on disk are part of being clean", () =>
 
   it("GATE: a carried file holding the wrong bytes reports dirty", async () => {
     const rig = await localItemRig();
-    dirs.push(rig.fx.dir, rig.fx.storeDir);
+    dirs.push(rig.fx.dir, rig.fx.storeDir, rig.srcDir);
 
     // Place it the way a switch does, then corrupt it. Placing first matters: the
     // absent case is a different state with a different (correct) answer, and a
@@ -137,7 +149,7 @@ describe("LB-859: a carried file's bytes on disk are part of being clean", () =>
     // build and no switch, nothing has placed the file — treating that as a
     // difference would report every unbuilt instance permanently dirty.
     const rig = await localItemRig();
-    dirs.push(rig.fx.dir, rig.fx.storeDir);
+    dirs.push(rig.fx.dir, rig.fx.storeDir, rig.srcDir);
 
     expect(await pathExists(rig.carriedPath)).toBe(false);
     expect((await rig.anvil.status()).worktreeDirty).toBe(false);
@@ -151,7 +163,7 @@ describe("LB-859: a carried file's bytes on disk are part of being clean", () =>
     // a verification trusts whatever crash left the gap) applies when the skipped
     // state is user data with no repair path. This is re-derivable build product.
     const rig = await localItemRig();
-    dirs.push(rig.fx.dir, rig.fx.storeDir);
+    dirs.push(rig.fx.dir, rig.fx.storeDir, rig.srcDir);
 
     await mkdir(join(rig.carriedPath, ".."), { recursive: true });
     await writeFile(rig.carriedPath, "LOCAL-BYTES-V1");
@@ -167,7 +179,7 @@ describe("LB-859: a carried file's bytes on disk are part of being clean", () =>
     // asserts the half that the app's path actually uses — and it is the half that
     // matters, since an embedder that never calls build() still switches.
     const rig = await localItemRig();
-    dirs.push(rig.fx.dir, rig.fx.storeDir);
+    dirs.push(rig.fx.dir, rig.fx.storeDir, rig.srcDir);
     const anvil = rig.anvil;
 
     expect(await pathExists(rig.carriedPath)).toBe(false);
@@ -187,7 +199,7 @@ describe("LB-859: a carried file's bytes on disk are part of being clean", () =>
     // case — an unexercised branch is where a hash mismatch hides.
     const big = "x".repeat(9 * 1024 * 1024);
     const rig = await localItemRig(big);
-    dirs.push(rig.fx.dir, rig.fx.storeDir);
+    dirs.push(rig.fx.dir, rig.fx.storeDir, rig.srcDir);
 
     await mkdir(join(rig.carriedPath, ".."), { recursive: true });
     await writeFile(rig.carriedPath, big);
@@ -210,7 +222,7 @@ describe("LB-859: a carried file's bytes on disk are part of being clean", () =>
     // previously returned — a regression introduced by a detector, on a state it
     // was never asked to judge.
     const rig = await localItemRig();
-    dirs.push(rig.fx.dir, rig.fx.storeDir);
+    dirs.push(rig.fx.dir, rig.fx.storeDir, rig.srcDir);
 
     await mkdir(rig.carriedPath, { recursive: true }); // a DIRECTORY where the jar goes
     expect((await stat(rig.carriedPath)).isDirectory()).toBe(true);
