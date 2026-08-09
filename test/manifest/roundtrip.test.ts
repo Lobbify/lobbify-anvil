@@ -21,10 +21,28 @@
  * something unreadable, and it fails if the parser stops accepting a form we
  * documented.
  *
- * Adding a source kind is therefore expected to require a line here. That is the
- * point, not friction to be optimised away.
+ * ## And why docs alone are not enough either
+ *
+ * Docs-sourced **undercounts**. The `{ ref, kind }` table is accepted by the
+ * parser and was named in neither the README nor the rejection message, so it
+ * had no case here — and a `kind` silently dropped from a local/url ref on
+ * rewrite went unguarded until adversarial review found it. That is the same
+ * defect as the headline bug, one field over, and it is the failure mode that
+ * looks most rigorous from outside.
+ *
+ * Neither source of truth is sufficient alone, and **the difference between them
+ * is itself a finding**:
+ *
+ *   - accepted by the code, named in no doc → **undocumented grammar**
+ *   - named in a doc, rejected by the code  → **an unimplemented promise**
+ *
+ * The list stays docs-sourced, and a separate case measures the gap against the
+ * parser's own source kinds rather than trusting it to be empty. Adding a source
+ * kind is therefore expected to require a line here. That is the point, not
+ * friction to be optimised away.
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ManifestError, parseManifest, parseRef, serializeManifest } from "../../index.js";
 
@@ -123,6 +141,40 @@ describe("LB-862: every manifest anvil writes, anvil can read back", () => {
         expect(serializeManifest(twice)).toBe(written);
       });
     }
+  });
+
+  it("the input set covers every source the parser accepts", () => {
+    // Neither source of truth is sufficient on its own, and the DIFFERENCE
+    // between them is the finding rather than noise:
+    //
+    //   in the code but not the docs  → undocumented grammar (this test)
+    //   in the docs but not the code  → an unimplemented promise (every case
+    //                                   above fails at its first parse)
+    //
+    // The list above is docs-sourced on purpose — enumerating the parser's own
+    // branches would pass by construction. But docs-sourced UNDERCOUNTS: the
+    // `{ ref, kind }` table is accepted by the parser and was named in neither
+    // the README nor the rejection message, so it had no case here and no
+    // mutation of the writer could be caught for it. That is LB-862's second
+    // instance, and it is the failure mode that looks most rigorous from
+    // outside. This closes the loop by measuring the gap instead of trusting
+    // that it is empty.
+    const kinds = new Set(
+      readFileSync(new URL("../../src/manifest/ref.ts", import.meta.url), "utf8")
+        .split("const SOURCE_KINDS")[1]
+        ?.split("]")[0]
+        ?.match(/"([a-z]+)"/g)
+        ?.map((q) => q.slice(1, -1)) ?? [],
+    );
+    expect(kinds.size).toBeGreaterThan(1); // the extraction landed
+
+    const covered = new Set(
+      DOCUMENTED_ITEM_FORMS.flatMap(({ form }) => {
+        const item = parseManifest(manifestWith(form)).items[0];
+        return item?.ref ? [item.ref.source] : ["local"]; // a `path` item is local
+      }),
+    );
+    expect([...kinds].filter((k) => !covered.has(k))).toEqual([]);
   });
 
   describe("the authored form survives a rewrite unchanged", () => {

@@ -1,7 +1,15 @@
 /**
  * The reference grammar: `source:id@version` | a URL | a `./local/path` | a
- * `{ path, kind }` table. Every manifest item parses into a {@link ResolvedRef}
- * the resolver can act on.
+ * `{ path, kind }` table | a `{ ref, kind }` table — a kind OVERRIDE on any ref,
+ * the opaque `url:` and `local:` sources included. Every manifest item parses
+ * into a {@link ResolvedRef} the resolver can act on.
+ *
+ * Every form named here is a promise to users, and this list plus `parse.ts`'s
+ * rejection message are where anyone looks to learn the grammar. A form the
+ * parser accepts but neither one names is undocumented grammar — which is not a
+ * documentation nit: a test enumerating "what we promise" then cannot contain a
+ * case for it, so nothing guards it. That is how LB-862's second instance
+ * (a `kind` silently dropped from a local/url ref on rewrite) stayed invisible.
  *
  * Version-spec grammar (resolved under the frozen `ctx.now` clock at lock time):
  *   - **pin**   — an exact version (`@1.4.0`, `@mc1.21-0.5.2`).
