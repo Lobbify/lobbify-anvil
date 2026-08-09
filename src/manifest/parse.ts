@@ -16,7 +16,7 @@
  * # remove = ["modrinth:unwanted-mod"]  # drop items the base ships
  *
  * # unified, flat item list — each entry is "source:id@ver", a URL, a
- * # "./local/path", or a { path, kind } table.
+ * # "./local/path", a { path, kind } table, or a { ref, kind } table.
  * items = [
  *   "modrinth:fabric-api",
  *   "modrinth:sodium@^0.5",
@@ -148,8 +148,13 @@ function parseItemValue(v: unknown, i: number): ManifestItem {
       return { ref: kind ? { ...ref, kind } : ref };
     }
   }
+  // Enumerates every form the parser accepts, `{ ref, kind }` included. This
+  // string gets read as the grammar's definition — it is the first place anyone
+  // looks after a rejection — so a form omitted here is undocumented grammar.
+  // That omission is what hid LB-862's second instance: a test list sourced from
+  // this message could not contain a case the message never mentioned.
   throw new ManifestError(
-    `items[${i}]: expected a "source:id@ver" string, a URL, a "./path", or a { path, kind } table`,
+    `items[${i}]: expected a "source:id@ver" string, a URL, a "./path", a { path, kind } table, or a { ref, kind } table`,
   );
 }
 
