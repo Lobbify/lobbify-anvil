@@ -66,6 +66,17 @@ const DOCUMENTED_ITEM_FORMS: ReadonlyArray<{
   { form: '{ path = "./config/mymod.toml", kind = "config" }', where: "parse.ts error string" },
   { form: '{ path = "./config/mymod.toml" }', where: "parse.ts:129 — kind is optional" },
   { form: '{ path = "mods/mine.jar" }', where: "parse.ts:129 — no prefix required" },
+  // parse.ts:136-148 — a `{ ref, kind }` table, i.e. a kind OVERRIDE on a ref
+  // that would otherwise be placed by its own rules. Accepted for every source,
+  // including the opaque ones; the writer used to exempt exactly those and drop
+  // the kind. Added after adversarial review found the gap in this list — which
+  // is the whole argument for sourcing it from what the parser accepts.
+  { form: '{ ref = "modrinth:sodium", kind = "config" }', where: "parse.ts:147 — kind override" },
+  { form: '{ ref = "./mods/mine.jar", kind = "config" }', where: "parse.ts:147 — on a local ref" },
+  {
+    form: '{ ref = "https://e.com/a.jar", kind = "shaderpack" }',
+    where: "parse.ts:147 — on a url ref",
+  },
 ];
 
 const HEAD = `[project]
@@ -142,8 +153,15 @@ describe("LB-862: every manifest anvil writes, anvil can read back", () => {
         // String items come back byte-identical; table items keep being tables
         // with the same path, rather than being flattened to a string.
         if (form.startsWith("{")) {
-          const path = /path = ("[^"]*")/.exec(form)?.[1];
-          expect(items).toContain(`{ path = ${path}`);
+          const key = form.includes("path = ") ? "path" : "ref";
+          const value = new RegExp(`${key} = ("[^"]*")`).exec(form)?.[1];
+          expect(value).toBeDefined(); // the assertion below is empty without it
+          expect(items).toContain(`{ ${key} = ${value}`);
+          // A kind override is part of the authored form and must survive too.
+          const kind = /kind = ("[^"]*")/.exec(form)?.[1];
+          if (kind) {
+            expect(items).toContain(`kind = ${kind}`);
+          }
         } else {
           expect(items).toContain(form);
         }

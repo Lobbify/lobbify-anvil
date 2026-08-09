@@ -81,7 +81,14 @@ function renderItem(item: ManifestItem): string {
   if (item.ref) {
     const s = formatRef(item.ref);
     // A ref that carried an explicit kind override round-trips as a table.
-    if (item.ref.kind && item.ref.source !== "url" && item.ref.source !== "local") {
+    //
+    // The `url`/`local` exemption this used to carry dropped the kind on the
+    // floor: `{ ref = "./mods/mine.jar", kind = "config" }` is a form the parser
+    // accepts (parse.ts:136) and the writer emitted as a bare string, so the
+    // override vanished on the next rewrite. Same defect as the rest of LB-862 —
+    // the writer discarding something the reader accepts — and found by
+    // adversarial review, because this file's input set had not enumerated it.
+    if (item.ref.kind) {
       return inlineTable([
         ["ref", tomlString(s)],
         ["kind", tomlString(item.ref.kind)],
