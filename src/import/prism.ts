@@ -45,7 +45,7 @@ import { pathToFileURL } from "node:url";
 import { writeGraph } from "../build/graph.js";
 import { canonicalJson } from "../build/serialize.js";
 import type { AnvilEvent } from "../events.js";
-import { ensureDir, isProtectedTop, pathExists } from "../internal/fs.js";
+import { ensureDir, findColonSegment, isProtectedTop, pathExists } from "../internal/fs.js";
 import { writeLock } from "../lock/index.js";
 import { comparePackages } from "../lock/serialize.js";
 import { writeManifest } from "../manifest/index.js";
@@ -325,7 +325,21 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
       // gives a hostile `.mrpack`/CurseForge-zip override for the identical
       // reason: the user still has the file in Prism, only this import doesn't.
       if (isUnsafePackPath(packRel)) {
-        warnings.push(`skipped file with an unplaceable path: ${packRel}`);
+        // Name the mechanism, not just the verdict (LB-844). This is the one
+        // import surface whose input is the user's OWN instance, so the warning
+        // lands on a file they can see and rename — "unplaceable" alone gives
+        // them nothing to act on. A ':' segment is the only trigger reachable
+        // here: `packRel` is `posix.join(<PLACEABLE_DIRS entry>, rel)` from a
+        // real directory walk, so it can be neither absolute nor
+        // drive-letter-shaped, and `posix.join` has already folded any `..`.
+        // The second branch stays anyway so the message can never outlive the
+        // reason it names.
+        const colonSegment = findColonSegment(packRel.split("/"));
+        warnings.push(
+          colonSegment !== undefined
+            ? `skipped file with an unplaceable path: ${packRel} — the segment "${colonSegment}" contains a ':', which opens an NTFS alternate data stream on Windows rather than naming a file, so it cannot be a placement target. Rename it in Prism and re-import to carry the file over.`
+            : `skipped file with an unplaceable path: ${packRel} — it is absolute, traverses out of the instance, or is empty, so it cannot be a placement target.`,
+        );
         continue;
       }
       const trackedPath = join(trackedRoot, packRel);
