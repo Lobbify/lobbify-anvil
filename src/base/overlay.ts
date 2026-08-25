@@ -109,6 +109,13 @@ export interface OverlayResult {
  * `"local:x"`) can name a path; a `modrinth:`/`curseforge:`/`url:` entry never
  * does, so `modrinth:sodium` can never accidentally match a file called
  * `sodium`.
+ *
+ * Reaching an imported `overrides/` file **by its placement path** is intended
+ * behavior, not an accident of the target axis existing (LB-726). A pack's loose
+ * override has no upstream `(source, id)` to be named by — it is registered as a
+ * `local`/`copy` row whose identity *is* where it lands — so the path is the only
+ * handle a `game.remove` entry could ever use for one. Removing the target axis,
+ * or narrowing it to lock-declared items, would leave overrides unremovable.
  */
 function removeTargetOf(ref: ResolvedRef): string | undefined {
   if (ref.source !== "local") {

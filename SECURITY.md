@@ -50,27 +50,53 @@ a defense against the build code of a source you told anvil to build:
   / CurseForge-zip / Prism overrides, installer `/data` entries) rejects `..`,
   absolute paths, drive letters, and symlink/hardlink entries, and enforces entry-count
   and uncompressed-size bounds.
-- **Placement-path guard.** A manifest-declared placement path is refused outright
-  (never silently re-homed) if it targets a protected top-level entry (`saves/`,
-  `.anvil/`, `.anvilignore`), or if **any** segment contains a `:`. A colon inside a
-  path segment is an ordinary POSIX filename character but opens an NTFS Alternate
-  Data Stream on Windows — a different filesystem outcome for the identical declared
-  path, which breaks reproducibility on its own and can graft hidden data onto a
-  protected node (`saves:level.dat`) without ever naming `saves` as a top-level
-  segment. This is enforced unconditionally at lock time
-  (`declaredPlacementTarget`) and at every build-time write of a pack- or
-  lock-derived target (`safeJoin` with `rejectColon: true`, in the placement
-  executor, the atomic swap, and Forge/NeoForge processor replay). It is
-  **not** enforced on VC checkout (`anvil switch`/`branch`): those paths are
-  the user's own already-committed working-tree files, not pack input, and a
-  colon there is an ordinary POSIX filename that must round-trip like any
-  other tracked file — an NTFS user could never have committed one, so there
-  is nothing to defend against on the platform the guard exists for.
-- **Import-time colon guard.** A `.mrpack`/CurseForge-zip `overrides/` file, or
-  a `.mrpack` top-level `files[]` entry, whose path contains a `:` segment is
-  skipped with a warning rather than written — the same treatment a
-  protected-top path already gets — before the byte that would create the ADS
-  is ever written to the tracked-copy store.
+- **Placement-path guard.** A manifest-declared placement path is refused outright —
+  a typed `PathEscape`, not a silent relocation — if it targets a protected top-level
+  entry (`saves/`, `.anvil/`, `.anvilignore`), or if a segment contains a `:`. A colon
+  inside a path segment is an ordinary POSIX filename character but opens an NTFS
+  Alternate Data Stream on Windows — a different filesystem outcome for the identical
+  declared path, which breaks reproducibility on its own and can graft hidden data onto
+  a protected node (`saves:level.dat`) without ever naming `saves` as a top-level
+  segment.
+
+  **One shape is re-homed instead of refused**, and it is stated here rather than left
+  for a reader to discover. A path whose *first* segment is a single ASCII letter
+  followed by a colon (`a:b.jar`, `C:evil.txt`) is drive-letter-shaped, and an older
+  rule classifies it as naming somewhere outside the instance before the colon check
+  runs at all (`normalizeDeclaredSegments`, `src/sources/place.ts:99-102`, ahead of
+  `findColonSegment` at `place.ts:148`). Such a path is not refused; it falls back to
+  kind placement like any other external path. **The fallback does not produce an ADS**:
+  the filename is rebuilt by `safeBasename` (`place.ts:63-77`), which replaces `:` with
+  `_`, so `a:b.jar` is placed at `mods/a_b.jar`. A colon anywhere else in the path
+  (`config/a:b.jar`), or behind more than one leading letter (`ab:c.jar`), is refused as
+  described above — `saves:level.dat` included. Only a *derived* target falls back at
+  all: an **explicit** manifest `target` naming nothing inside the instance is a hard
+  `PathEscape` (`src/resolver/resolve.ts:145-150`), and a base pack's member is skipped
+  with a warning rather than re-homed (`src/base/mrpack-base.ts:299-314`).
+
+  The guard is enforced at lock time (`declaredPlacementTarget`) and at every
+  build-time write of a pack- or lock-derived target (`safeJoin` with
+  `rejectColon: true`, in the placement executor, the atomic swap, and
+  Forge/NeoForge processor replay). It is **not** enforced on VC checkout
+  (`anvil switch`/`branch`): those paths are the user's own already-committed
+  working-tree files, not pack input, and a colon there is an ordinary POSIX
+  filename that must round-trip like any other tracked file — an NTFS user could
+  never have committed one, so there is nothing to defend against on the platform
+  the guard exists for.
+- **Import-time colon guard.** A `.mrpack`/CurseForge-zip `overrides/` file, a
+  `.mrpack` top-level `files[]` entry, or a file the Prism/MultiMC importer picks
+  up, whose path contains a `:` segment is skipped with a warning rather than
+  written — the same treatment a protected-top path already gets — before the byte
+  that would create the ADS is ever written to the tracked-copy store.
+
+  The Prism case (`src/import/prism.ts:327`) is defending something different from
+  the other two, which is why it is named separately: its input is the user's **own**
+  instance rather than untrusted pack content. An unmatched file's pack-relative path
+  becomes a manifest `target`, and `declaredPlacementTarget` refuses a `:` segment at
+  lock time — so importing the file anyway would report success and leave an instance
+  that can never lock or build again. Skipping the one file is the smaller loss, and
+  the warning names the colon so the fix is actionable: the file is still in Prism,
+  and renaming it and re-importing carries it over.
 - **No telemetry / no phone-home.**
 
 ## The CurseForge replay boundary, and exactly where it ends
