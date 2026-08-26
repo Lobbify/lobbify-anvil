@@ -46,6 +46,12 @@ export interface CfMemberSpec {
    * `(modId, id)` than was asked for.
    */
   readonly identitySwap?: { readonly modId?: number; readonly id?: number };
+  /**
+   * `GET .../files/{fileID}` throws an `HttpError` carrying this status instead
+   * of answering — a 429/5xx from the file-metadata endpoint, distinct from
+   * `unpublished` (a real 404: the catalogue never had this member).
+   */
+  readonly getFileStatus?: number;
 }
 
 export interface CfPackWorld {
@@ -147,6 +153,7 @@ export function cfPackWorld(spec: CfPackSpec): CfPackWorld {
       bytes: fabricJar(m.body ?? `${m.projectID}-${m.fileID}`),
       ...(m.noSha1 ? { badSha1: "" } : {}),
       ...(m.identitySwap ? { lieAboutIdentity: m.identitySwap } : {}),
+      ...(m.getFileStatus !== undefined ? { getFileStatus: m.getFileStatus } : {}),
     }));
     http.add({
       modId: projectID,

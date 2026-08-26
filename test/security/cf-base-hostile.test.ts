@@ -220,6 +220,47 @@ describe("a hostile CurseForge base pack", () => {
     expect(warnings.join("\n")).toMatch(/424242/);
   });
 
+  // --- LB-895: a retryable failure is not a 404 ------------------------------
+  //
+  // `gatherMemberFacts` used to `.catch(() => undefined)` around every
+  // `getModFile` call, so ANY failure — a genuine 404, a 429, a 5xx left over
+  // after the transport's own retries were exhausted, a bare network error —
+  // was treated as "this member does not exist" and silently dropped. That
+  // reasoning only holds for a 404. Dropping a member on anything else resolves
+  // the same immutable pin to a different member set and a different
+  // `base.set` digest on a retry, with nothing said about why.
+
+  it("a 404 for one member resolves to EXACTLY the surviving set, not just 'no throw' (LB-895)", async () => {
+    // A bare "it didn't throw" assertion would also pass a bug that dropped
+    // the WRONG member, or dropped a member some other way — comparing the
+    // member count and the base digest against an independent resolve of the
+    // same surviving set would not.
+    const survivorsOnly = await lockIt({ members: HONEST });
+    const withA404 = await lockIt({
+      members: [...HONEST, { projectID: 424242, fileID: 8888, unpublished: true }],
+    });
+    expect(withA404.lock.base?.members).toBe(survivorsOnly.lock.base?.members);
+    expect(withA404.lock.base?.set.value).toBe(survivorsOnly.lock.base?.set.value);
+  });
+
+  it.each([429, 500, 503])(
+    "a %i from CurseForge for one member fails the resolve — never a silent skip (LB-895)",
+    async (status) => {
+      // Before the fix this resolved SUCCESSFULLY with "flaky" quietly missing
+      // — a smaller member set and a different base.set digest, indistinguishable
+      // from a legitimate pack. After the fix it must reject, and the rejection
+      // must name the status, not vanish into an unrelated generic message.
+      await expect(
+        lockIt({
+          members: [
+            ...HONEST,
+            { projectID: 555555, fileID: 7777, slug: "flaky", getFileStatus: status },
+          ],
+        }),
+      ).rejects.toThrow(new RegExp(String(status)));
+    },
+  );
+
   // --- bounds ---------------------------------------------------------------
 
   it("cannot declare an unbounded member list", async () => {
