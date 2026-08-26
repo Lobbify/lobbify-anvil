@@ -27,6 +27,14 @@ export interface FakeCfFileSpec {
   readonly downloadDisabled?: boolean;
   /** The CDN GET answers `403`. */
   readonly cdn403?: boolean;
+  /**
+   * `GET /v1/mods/{modId}/files/{fileId}` throws an {@link HttpError} carrying
+   * this status instead of answering — models a transient 429/5xx from the
+   * file-metadata endpoint itself (distinct from `cdn403`, which is the
+   * download/CDN leg). Mirrors what `RateLimitedHttp` actually does after its
+   * own retries are exhausted: throw, never return the status silently.
+   */
+  readonly getFileStatus?: number;
   /** Omit `fileFingerprint` from the file JSON. */
   readonly omitFingerprint?: boolean;
   /** Force a wrong `fileFingerprint` (to exercise the cross-check). */
@@ -156,7 +164,17 @@ export class FakeCurseForge implements Http {
     if (oneFile) {
       const entry = this.#files.get(`${oneFile[1]}:${oneFile[2]}`);
       if (!entry) {
-        return { status: 404, headers: {}, url, body: encode({ error: "not found" }) };
+        // Mirrors RateLimitedHttp: a real not-found is thrown, not handed back
+        // as a raw status — every caller (including this fake's own callers)
+        // reads the status off a thrown HttpError, never off HttpResult.status.
+        throw new HttpError(url, "unexpected status 404", 404);
+      }
+      if (entry.file.getFileStatus !== undefined) {
+        throw new HttpError(
+          url,
+          `unexpected status ${entry.file.getFileStatus}`,
+          entry.file.getFileStatus,
+        );
       }
       return reply({ data: fileJson(entry.modId, entry.file) });
     }

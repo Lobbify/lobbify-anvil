@@ -69,6 +69,7 @@ import { guardHop } from "../sources/ssrf.js";
 import { hashBuffer } from "../store/hash.js";
 import {
   DecompressionBomb,
+  HttpError,
   ManifestError,
   ReplayUnavailable,
   ShaMismatch,
@@ -433,10 +434,25 @@ async function gatherMemberFacts(
     // A member the catalogue does not publish (delisted, withdrawn, or simply
     // invented by the pack) leaves no facts, and `memberRowFor` turns that into
     // a warned skip. A 404 here is a property of one member, not a reason to
-    // fail the pack — but it must not be a crash either, so the response shape
-    // is checked rather than trusted.
-    const file = await api.getModFile(entry.projectID, entry.fileID).catch(() => undefined);
-    if (!file || typeof file.id !== "number" || typeof file.modId !== "number") {
+    // fail the pack. But that reasoning is about the 404 specifically, not
+    // about "getModFile threw" in general: a 429 or 5xx (the `Http` client's
+    // own retries already exhausted, see `RateLimitedHttp`) or a transport
+    // failure says nothing about whether the member exists, and swallowing one
+    // would resolve the same immutable pin to a different member set and a
+    // different base digest on a retry — the exact loss of determinism the
+    // `getMod` call below already refuses to accept. So only a confirmed 404
+    // is treated as absence; anything else is not a member-shaped fact and
+    // must fail the resolve rather than silently shrink the set.
+    let file: CfFileMetadata;
+    try {
+      file = await api.getModFile(entry.projectID, entry.fileID);
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 404) {
+        continue;
+      }
+      throw err;
+    }
+    if (typeof file.id !== "number" || typeof file.modId !== "number") {
       continue;
     }
     // The pack does not get to decide what a file is: cross-check that the API
