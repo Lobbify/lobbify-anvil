@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Anvil } from "../../index.js";
+import { Anvil, readManifest, writeManifest } from "../../index.js";
 import type { AnvilEnv } from "../../index.js";
 import { EXIT_CODES, EXIT_ERROR } from "../../src/cli/errors.js";
 import { runCli } from "../../src/cli/run.js";
@@ -183,6 +183,83 @@ describe("CLI error UX (typed, actionable failures)", () => {
     expect(r.stderr).not.toContain("this is a bug");
     // The reported reason is a single clean line, not a multi-line dump.
     expect(r.stdout.split("\n")[0]).not.toContain("^");
+  });
+
+  // --- item 4: `remove` never exits 0 without changing something (LB-725) ---
+
+  it("GATE: remove of a spec that matches nothing → non-zero, names it, changes nothing", async () => {
+    await cli.run(["init", "--name", "pack", "--mc", MC]);
+    const manifestPath = join(cwd, "anvil.toml");
+    const before = await readFile(manifestPath, "utf8");
+
+    // The exact invocation from the ticket: a plausible-looking local path
+    // that happens to match no item in the manifest.
+    const r = await cli.run(["remove", "./config/sodium.json"]);
+
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("./config/sodium.json");
+    expect(r.stderr).toContain("matched nothing");
+    expect(r.stderr).not.toContain("this is a bug");
+    // Never exit 0 without having changed something — and here, nothing did.
+    expect(await readFile(manifestPath, "utf8")).toBe(before);
+  });
+
+  it("remove by the placement path of a tracked-copy item → refused, not silently ignored", async () => {
+    // A tracked-copy item's identity is its `path` (where anvil reads the
+    // bytes from — `.anvil/overrides/...`), not its `target` (where the file
+    // is placed in the instance — the path a user actually sees and would
+    // naturally type to remove it). This is the concrete, documented shape
+    // (`ManifestItem.target`, CHANGELOG v0.2.1) most likely behind LB-725.
+    await cli.run(["init", "--name", "pack", "--mc", MC]);
+    const manifest = await readManifest(cwd);
+    await writeManifest(cwd, {
+      ...manifest,
+      items: [
+        {
+          path: ".anvil/overrides/config/sodium.json",
+          target: "config/sodium.json",
+        },
+      ],
+    });
+
+    const r = await cli.run(["remove", "./config/sodium.json"]);
+
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("./config/sodium.json");
+    // The item is still there — a plausible, ticket-accurate typed path did
+    // not silently drop it.
+    const after = await readManifest(cwd);
+    expect(after.items).toHaveLength(1);
+  });
+
+  it("remove of a spec that DOES match → removes it and exits 0", async () => {
+    await cli.run(["init", "--name", "pack", "--mc", MC]);
+    await cli.run(["add", "modrinth:sodium"]);
+    expect(await readFile(join(cwd, "anvil.toml"), "utf8")).toContain("modrinth:sodium");
+
+    const r = await cli.run(["remove", "modrinth:sodium"]);
+
+    expect(r.code).toBe(0);
+    expect(await readFile(join(cwd, "anvil.toml"), "utf8")).not.toContain("modrinth:sodium");
+  });
+
+  it("remote remove of a name that isn't configured → non-zero, not the old silent 0 (LB-725 sibling)", async () => {
+    await cli.run(["init", "--name", "pack", "--mc", MC]);
+
+    const r = await cli.run(["remote", "remove", "nope"]);
+
+    expect(r.code).not.toBe(0);
+    expect(r.stdout).toContain("no such remote");
+  });
+
+  it("remote remove of a name that IS configured → removes it and exits 0", async () => {
+    await cli.run(["init", "--name", "pack", "--mc", MC]);
+    await cli.run(["remote", "add", "origin", "https://example.com/pack.git"]);
+
+    const r = await cli.run(["remote", "remove", "origin"]);
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('removed remote "origin"');
   });
 });
 

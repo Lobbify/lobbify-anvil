@@ -5,6 +5,27 @@ carry a breaking change, and each one is called out below.
 
 ## Unreleased
 
+### Fixed
+
+- **`anvil remove` no longer exits 0 when it removed nothing.** A spec that
+  parsed fine but matched no manifest item (a typo, or a stale path — most
+  concretely, a `{ path, target }` tracked-copy item is keyed by its `path`,
+  not the `target` it is placed at, so removing by the path you see in the
+  instance silently missed it) was dropped with no error, and the CLI still
+  reported `manifest now lists N item(s)` — a user believing a file was gone
+  would find it reinstalled on the next `anvil build`. The CLI now passes
+  `{ strict: true }` to `Anvil.removeItems`, which refuses the whole call and
+  names every unmatched spec (plus the ref it parsed to) rather than
+  silently ignoring it, mirroring `game.remove`'s existing precedent. The
+  library's default (`removeItems(specs)`, no options) is unchanged — this
+  is additive, not a breaking change to `@lobbify/anvil`'s public API.
+
+  `anvil remote remove` had the identical shape: `Anvil.removeRemote`
+  already reported whether it matched anything, but the command never read
+  the result, so removing a name that was not configured printed
+  "no such remote" and still exited 0. It now exits non-zero for that case
+  too.
+
 ### Security
 
 - **A pack- or lock-declared path segment containing `:` is now refused rather

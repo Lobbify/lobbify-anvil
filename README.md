@@ -182,7 +182,7 @@ lobbify-anvil import cobblemon.mrpack && lobbify-anvil build
 |---|---|
 | `init` | Scaffold `anvil.toml` (+ documented `.anvilignore` and `.anvilexclude` files). Flags: `--name`, `--minecraft/--mc`, `--loader`, `--summary`, `--force`. |
 | `add <ref>…` | Append item references (`source:id@ver`, a URL, or a `./path`) to the manifest. |
-| `remove <ref>…` | Drop item references from the manifest. |
+| `remove <ref>…` | Drop item references from the manifest, by identity. A ref matching nothing is refused, naming it and the ref it parsed to, rather than exiting 0 having removed nothing. |
 | `lock` | Resolve the manifest → a fully-pinned `anvil.lock`. `--upgrade` re-resolves everything; `--upgrade=<item>` just one. |
 | `build` | Install a launch-ready instance from the lock, atomically. `--offline` builds only from the populated store. |
 | `verify` | Re-hash the materialized instance against the lock. `--strict` also fails on drift from the current lock. |
