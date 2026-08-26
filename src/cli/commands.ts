@@ -224,7 +224,9 @@ export class RemoveCommand extends AnvilCommand {
   items = Option.Rest({ required: 1 });
 
   override async execute(): Promise<number> {
-    return this.run((anvil) => anvil.removeItems(this.items), {
+    // strict: a spec matching nothing is refused rather than silently ignored —
+    // the CLI never reports success for a remove that removed nothing (LB-725).
+    return this.run((anvil) => anvil.removeItems(this.items, { strict: true }), {
       plain: (m) => [`manifest now lists ${m.items.length} item(s)`],
       json: (m) => ({ items: m.items.length }),
     });
@@ -745,6 +747,10 @@ export class RemoteRemoveCommand extends AnvilCommand {
     return this.run((anvil) => anvil.removeRemote(this.remoteName), {
       plain: (removed) => [removed ? `removed remote "${this.remoteName}"` : "no such remote"],
       json: (removed) => ({ removed }),
+      // Same silent-no-op shape as `remove` (LB-725): `removeRemote` already
+      // reports whether it matched anything — the command just wasn't reading
+      // it. "no such remote" must not exit 0.
+      exitCode: (removed) => (removed ? EXIT_OK : EXIT_ERROR),
     });
   }
 }

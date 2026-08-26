@@ -48,6 +48,7 @@ import { instanceLockPath, storeLockPath, withLock } from "./internal/lock.js";
 import { comparePackages, readInputLock, readLockIfPresent, writeLock } from "./lock/index.js";
 import {
   MANIFEST_FILENAME,
+  formatRef,
   parseRef,
   readManifest,
   refForItem,
@@ -402,6 +403,19 @@ export interface ImportSummary {
   readonly warnings: readonly string[];
 }
 
+/**
+ * Options for {@link Anvil.removeItems}.
+ *
+ * `strict` mirrors `game.remove`'s own precedent (see `resolver/resolve.ts`): a
+ * spec matching no manifest item is refused rather than silently ignored, so a
+ * typo cannot leave an item behind that the caller believes is gone. Default
+ * `false` preserves the historical lenient behavior for existing callers.
+ */
+export interface RemoveItemsOptions {
+  /** Throw when a spec matches nothing, instead of ignoring it (default `false`). */
+  readonly strict?: boolean;
+}
+
 /** The scaffold spec for {@link Anvil.init}. */
 export interface InitSpec {
   readonly name: string;
@@ -690,11 +704,27 @@ export class Anvil {
 
   /**
    * `anvil remove` — drop item references matching the given specs (by identity).
-   * Unmatched specs are ignored. A following `anvil lock` re-resolves.
+   * By default unmatched specs are ignored, preserving the historical contract
+   * for existing callers. Pass `{ strict: true }` to refuse instead — mirroring
+   * `game.remove`'s own precedent (`resolver/resolve.ts`) — naming every spec
+   * that matched nothing and the ref it parsed to, so a typo or a stale path
+   * cannot look like a successful removal. A following `anvil lock` re-resolves.
    */
-  async removeItems(specs: readonly string[]): Promise<Manifest> {
+  async removeItems(specs: readonly string[], options?: RemoveItemsOptions): Promise<Manifest> {
     const manifest = await readManifest(this.dir);
-    const drop = new Set(specs.map((s) => refKey(parseRef(s))));
+    const parsed = specs.map((spec) => ({ spec, ref: parseRef(spec) }));
+    const present = new Set(manifest.items.map((it) => refKey(refForItem(it))));
+    if (options?.strict) {
+      const unmatched = parsed.filter((p) => !present.has(refKey(p.ref)));
+      if (unmatched.length > 0) {
+        const subject = unmatched.length === 1 ? "reference" : "references";
+        const list = unmatched.map((p) => `"${p.spec}" (parsed as ${formatRef(p.ref)})`).join(", ");
+        throw new ManifestError(
+          `anvil remove: ${unmatched.length} ${subject} matched nothing in the manifest: ${list}. A remove that matches nothing is refused, so a typo cannot leave an item you believed was gone. Check the exact form anvil.toml records — run \`anvil status\` or open anvil.toml directly; a tracked local file (a { path, target } table) is keyed by its "path", not the "target" it is placed at.`,
+        );
+      }
+    }
+    const drop = new Set(parsed.map((p) => refKey(p.ref)));
     const items = manifest.items.filter((it) => !drop.has(refKey(refForItem(it))));
     const next: Manifest = { ...manifest, items };
     await writeManifest(this.dir, next);
