@@ -70,6 +70,9 @@ const REPLAY_CACHE_FILES: Record<string, string> = {
   "remote/transport.ts": "comment: no layout path here names the replay cache",
   "sources/curseforge.ts": "comment: CF bytes go to the cache, never the shared store",
   "anvil.ts": "constructs the per-instance cache and hands it to build/commit",
+  "import/pack-common.ts":
+    "names it only in a doc comment, explaining why trackedSubdir is a closed " +
+    "allowlist (LB-922) that refuses it — never creates or reads it",
 };
 
 const NAMES_CACHE = /replay-cache|REPLAY_CACHE_DIRNAME|ReplayCache|replayCache/;

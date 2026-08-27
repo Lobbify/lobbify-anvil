@@ -36,6 +36,11 @@
  * path as its `target`. Both halves matter: the tracked copy is the only place
  * the bytes exist before a build has run, and the target is where they belong in
  * the built tree.
+ *
+ * The same bare `join` has a second input: `trackedRoot = join(instanceDir,
+ * ".anvil", subdir)`. `destRel` is `isUnsafePackPath`'s job; `subdir` is
+ * {@link ALLOWED_TRACKED_SUBDIRS}'s (LB-922) — a caller-chosen, not
+ * archive-chosen, value, but unguarded before LB-922 all the same.
  */
 
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -44,6 +49,7 @@ import { pathToFileURL } from "node:url";
 import { ensureDir, findColonSegment, isPlacementRefusedTop } from "../internal/fs.js";
 import { safeBasename } from "../sources/index.js";
 import { hashBuffer, safeExtract } from "../store/index.js";
+import { PathEscape } from "../types/errors.js";
 import type { ItemKind, LockPackage, ManifestItem, ObjectSink } from "../types/index.js";
 
 /**
@@ -146,8 +152,48 @@ export interface ImportOverrideTreeInput {
    * The `.anvil/` subdirectory the tracked bytes are written under. Defaults to
    * `"overrides"` (import); base resolution passes `"base"` so a re-resolved
    * base cannot clobber an imported override that happens to share a path.
+   *
+   * Checked against {@link ALLOWED_TRACKED_SUBDIRS} (LB-922) — every value
+   * that reaches here is a literal chosen by one of this file's own callers,
+   * never archive-derived, but the write it drives (`join(instanceDir,
+   * ".anvil", subdir)`) is a bare `join`, so a third, unreviewed value would
+   * land unguarded.
    */
   readonly trackedSubdir?: string;
+}
+
+/**
+ * The `.anvil/` subdirectory names {@link importOverrideTree} is allowed to
+ * write tracked-copy bytes under (LB-922).
+ *
+ * This is a CLOSED allowlist, not a blocklist, and deliberately so. `destRel`
+ * — the pack-relative path *inside* the tree — comes from an untrusted
+ * archive, so it is checked against a refusal set ({@link isPlacementRefusedTop},
+ * {@link isUnsafePackPath}): the space of legal values is unbounded and only
+ * the bad ones are enumerable. `subdir` is the opposite shape: it is never
+ * archive-controlled, every value that reaches {@link importOverrideTree} is a
+ * literal one of *our own* callers chose, and the legal set is small and
+ * closed. A blocklist here would have to anticipate every `.anvil/`
+ * subdirectory that must never hold override bytes — most pressingly
+ * `.anvil/replay-cache/`, whose mere *existence* flips `ReplayVeto`'s
+ * ledger-vs-content switch (LB-879) and turns a refused CurseForge jar into an
+ * ordinary tracked, pushable file — and stays wrong until the next dangerous
+ * name is filed as its own ticket. An allowlist instead makes "this is a safe
+ * destination" the thing a future caller must state, the same forcing
+ * function LB-879's `REPLAY_CACHE_FILES` uses for the source-naming half of
+ * the same invariant.
+ *
+ * `"base"` is a literal rather than an import of `BASE_TRACKED_SUBDIR` from
+ * `../base/mrpack-base.js`: that module already imports `importOverrideTree`
+ * from this one, so importing back would cycle. `test/import/pack-common.test.ts`
+ * pins the literal against the constant so a rename of either drifts loudly
+ * instead of silently.
+ */
+const ALLOWED_TRACKED_SUBDIRS: ReadonlySet<string> = new Set(["overrides", "base"]);
+
+/** True if `subdir` is not one of {@link ALLOWED_TRACKED_SUBDIRS}. */
+function isUnsafeTrackedSubdir(subdir: string): boolean {
+  return !ALLOWED_TRACKED_SUBDIRS.has(subdir);
 }
 
 /**
@@ -157,9 +203,18 @@ export interface ImportOverrideTreeInput {
  * `manifestItems` (so the entry survives a later re-resolve of the manifest). A
  * later prefix wins a path collision (e.g. `client-overrides/`); a file whose
  * top segment is protected/unsafe is refused.
+ *
+ * `trackedSubdir` itself is validated against {@link ALLOWED_TRACKED_SUBDIRS}
+ * before anything is written (LB-922) — the per-file refusal below guards
+ * `destRel`, the pack-relative half of the join that lands at
+ * `.anvil/<subdir>/<destRel>`, but nothing previously checked the `subdir`
+ * half, even though the persisted write is a bare `join`, not `safeJoin`.
  */
 export async function importOverrideTree(input: ImportOverrideTreeInput): Promise<number> {
   const subdir = input.trackedSubdir ?? "overrides";
+  if (isUnsafeTrackedSubdir(subdir)) {
+    throw new PathEscape(subdir, "not an allowed .anvil/ tracked-copy subdirectory");
+  }
   // Namespaced by subdir as well as pid: an import and a base resolve in one
   // process must not stage into the same throwaway directory.
   const stageDir = join(input.instanceDir, ".anvil", `import-stage-${subdir}-${process.pid}`);
