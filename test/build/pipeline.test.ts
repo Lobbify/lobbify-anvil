@@ -10,9 +10,12 @@ import {
   StoreOnlyAcquirer,
   buildInstance,
   currentPlatform,
+  resolveManifest,
   writeInputLock,
 } from "../../index.js";
+import { baseManifest, baseResolverFor, baseWorld } from "../helpers/base-pack.js";
 import { listFiles, mkTmp, rmTmp } from "../helpers/fixtures.js";
+import { registryWith } from "../helpers/net.js";
 import { makeScenario } from "../helpers/scenario.js";
 
 describe("build pipeline", () => {
@@ -92,6 +95,53 @@ describe("build pipeline", () => {
     expect((await anvil.fsck()).ok).toBe(true);
     // Every stored object is rooted by the built lock → nothing to collect.
     expect((await anvil.gc()).removed).toBe(0);
+  });
+
+  it("LB-813: a built lock keeps the input lock's [base] block", async () => {
+    // The platform-effective lock the build engine writes to `.anvil/refs/built`
+    // was reconstructed as `{ meta, resolved }` — a hand-written field list that
+    // does not mention `base`, the same shape LB-801 fixed at the 3-way-apply
+    // call site. On any `game.from` instance this silently dropped `[base]` from
+    // the built ref on every ordinary build, merge or not, leaving rows that
+    // still carry `fromBase: true` beside a ref with nothing to name the pack
+    // they came from.
+    const NOW = Date.parse("2026-07-01T00:00:00Z");
+    const world = baseWorld({
+      mods: [
+        { slug: "alpha", projectId: "ALPHA", version: "1.0.0" },
+        { slug: "beta", projectId: "BETA", version: "2.0.0" },
+      ],
+    });
+    const instanceDir = await mkTmp("base-resolve");
+    const storeDir = await mkTmp("base-store");
+    const builtDir = await mkTmp("base-built");
+    dirs.push(instanceDir, storeDir, builtDir);
+    const store = new ContentStore({ root: storeDir });
+
+    const lock = await resolveManifest({
+      manifest: baseManifest(world.from),
+      registry: registryWith({ modrinth: world.http }),
+      allowSource: () => true,
+      now: NOW,
+      baseDir: instanceDir,
+      store,
+      resolveBase: baseResolverFor(world, instanceDir, { now: NOW, store }),
+    });
+    // Guard against a vacuous pass: the fixture must actually be base-derived.
+    expect(lock.base, "fixture is not base-derived — the test proves nothing").toBeDefined();
+    expect(lock.resolved.some((p) => p.fromBase === true)).toBe(true);
+
+    await buildInstance({
+      instanceDir: builtDir,
+      lock,
+      store,
+      acquire: new StoreOnlyAcquirer(store),
+      platform: currentPlatform(),
+    });
+
+    const built = JSON.parse(await readFile(join(builtDir, ".anvil", "refs", "built"), "utf8"));
+    expect(built.base, "the [base] block did not survive the build").toEqual(lock.base);
+    expect(built.resolved.some((p: { fromBase?: true }) => p.fromBase === true)).toBe(true);
   });
 
   it("emits an error event and rejects when Anvil.build has no objects", async () => {
