@@ -252,23 +252,50 @@ export function overlayBase(input: OverlayInput): OverlayResult {
 }
 
 /**
+ * A portable substitute for {@link canonicalKeyOf}, used only inside the base-set
+ * digest (LB-723).
+ *
+ * `canonicalKeyOf` is correct for its own job — deduping and pinning within one
+ * resolve — but for a `local` package it keys on the **absolute** tracked-copy
+ * path (`resolver/identity.ts`'s `localPathOf`, via `fileURLToPath(pkg.url)`).
+ * An overlay member's `url` is `<instanceDir>/.anvil/base/<destRel>`
+ * (`base/mrpack-base.ts` / `pack-common.ts`'s `importOverrideTree`), and
+ * `instanceDir` is wherever THIS machine happened to clone the instance — so a
+ * pack with an `overrides/` tree produced a different digest on every machine
+ * (and every re-clone) for byte-identical content, defeating the entire point of
+ * `LockBase.set`: two instances sharing a base are supposed to be known
+ * identical without comparing a single row.
+ *
+ * A `local` override's real, portable identity is exactly its placement target
+ * (`destRel`) — already carried as the row's own `target` column below, and
+ * unique within one base (two members at the same target would already be a
+ * placement collision). Every other source kind keeps `canonicalKeyOf` as-is:
+ * a Modrinth slug, a CurseForge project id, and a `url` source's URL are already
+ * machine-independent.
+ */
+function digestKeyOf(pkg: LockPackage): string {
+  return pkg.source === "local" ? `local:${linkTargetOf(pkg) ?? pkg.name}` : canonicalKeyOf(pkg);
+}
+
+/**
  * The digest of a base's resolved member set — {@link LockBase.set}.
  *
  * Computed over the members **as the base resolved them**, before any removal or
  * override, so it is a property of the base reference alone. Two locks carrying
  * the same digest started from the same bytes in the same places, which is what
  * lets a base-sharing pair collapse the entire base partition to one line
- * instead of comparing it member by member.
+ * instead of comparing it member by member — a property that depends on the
+ * digest itself being machine-independent; see {@link digestKeyOf}.
  *
- * The tuple per member is `[canonical key, name, version, hash, target]`: enough
+ * The tuple per member is `[digest key, name, version, hash, target]`: enough
  * that any difference a build could observe moves the digest, and nothing that
  * varies between two faithful resolutions of the same pack. The list is sorted
- * by canonical key so member order out of the pack index cannot leak in.
+ * by digest key so member order out of the pack index cannot leak in.
  */
 export function baseSetDigest(members: readonly LockPackage[]): Hash {
   const rows = members
     .map((m) => [
-      canonicalKeyOf(m),
+      digestKeyOf(m),
       m.name,
       m.version ?? "",
       hashToString(m.hash),

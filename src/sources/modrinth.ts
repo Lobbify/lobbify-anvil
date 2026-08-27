@@ -25,6 +25,7 @@ import type {
   FetchPlan,
   Http,
   LockPackage,
+  Placement,
   ResolveResult,
   ResolvedRef,
   Source,
@@ -332,6 +333,12 @@ export class ModrinthSource implements Source {
       typeof declared === "number" && Number.isSafeInteger(declared) && declared >= 0
         ? declared
         : bytes.byteLength;
+    // A declared target (LB-720) wins over kind+basename — the same precedence
+    // `local.ts` gives one, so a re-identified jar can name its own placement.
+    const placement: Placement =
+      ref.target !== undefined
+        ? { method: "link", target: ref.target }
+        : singleFilePlacement(itemKind, filename);
     const pkg: LockPackage = {
       name: project.slug,
       kind: itemKind,
@@ -339,7 +346,7 @@ export class ModrinthSource implements Source {
       version: version.version_number,
       hash,
       provenance: "copy",
-      placement: singleFilePlacement(itemKind, filename),
+      placement,
       size,
       url: file.url,
     };

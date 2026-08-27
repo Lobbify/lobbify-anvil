@@ -109,7 +109,11 @@ export function parseRef(spec: string): ResolvedRef {
 export function refForItem(item: ManifestItem): ResolvedRef {
   if (item.ref) {
     const kind: ItemKind | undefined = item.ref.kind ?? item.kind;
-    return kind ? { ...item.ref, kind } : item.ref;
+    const withKind = kind ? { ...item.ref, kind } : item.ref;
+    // An explicit item-level target (LB-720) — a ref carries no path of its
+    // own, so this is the only way one names a placement. Carried as-authored;
+    // the resolver validates it the same way it validates a derived one.
+    return item.target !== undefined ? { ...withKind, target: item.target } : withKind;
   }
   if (item.path !== undefined) {
     return {

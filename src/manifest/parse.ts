@@ -16,7 +16,8 @@
  * # remove = ["modrinth:unwanted-mod"]  # drop items the base ships
  *
  * # unified, flat item list — each entry is "source:id@ver", a URL, a
- * # "./local/path", a { path, kind } table, or a { ref, kind } table.
+ * # "./local/path", a { path, kind, target } table, or a { ref, kind, target }
+ * # table.
  * items = [
  *   "modrinth:fabric-api",
  *   "modrinth:sodium@^0.5",
@@ -25,6 +26,8 @@
  *   { path = "./options.txt", kind = "config" },
  *   # a tracked copy: read from .anvil/, placed where it belongs
  *   { path = ".anvil/overrides/config/sodium.json", target = "config/sodium.json" },
+ *   # a re-identified jar (LB-720): identity from ref, placement from target
+ *   { ref = "modrinth:sodium", target = "mods/26.2/sodium.jar" },
  * ]
  *
  * [sources]                       # optional per-source base-URL overrides
@@ -41,13 +44,20 @@
  * names no placement of its own; such an item is placed by its kind, like any
  * Modrinth/CurseForge/URL item.
  *
- * An explicit `target` splits those two halves apart: `path` stays the read
- * location and `target` becomes the placement. That is how a **tracked copy**
- * (an imported override, whose bytes live under `.anvil/overrides/` before any
- * build has run) names a manifest that is self-consistent from the moment
- * `import` writes it. Either way, `saves/`, `.anvil/`, and `.anvilignore` are
- * refused as a *placement* — a target is checked by the same guards a derived
- * one is, so the field cannot be used to write where a path could not.
+ * An explicit `target` splits identity from placement. On a `path` item it
+ * separates the two halves a path normally names at once: `path` stays the
+ * read location and `target` becomes the placement. That is how a **tracked
+ * copy** (an imported override, whose bytes live under `.anvil/overrides/`
+ * before any build has run) names a manifest that is self-consistent from the
+ * moment `import` writes it. On a `ref` item (LB-720) it does the analogous job
+ * for something that names no path at all: `ref` stays the identity Modrinth/
+ * CurseForge/URL resolve against, and `target` is where the resolved bytes
+ * land — the only way a re-identified jar (a Prism import matched against
+ * Modrinth/CurseForge) can keep a subdirectory across every later re-lock,
+ * since its ref alone carries nothing to derive a placement from. Either way,
+ * `saves/`, `.anvil/`, and `.anvilignore` are refused as a *placement* — a
+ * target is checked by the same guards a derived one is, so the field cannot
+ * be used to write where a path could not.
  */
 
 import { readFile } from "node:fs/promises";
@@ -134,18 +144,15 @@ function parseItemValue(v: unknown, i: number): ManifestItem {
       };
     }
     if (typeof t.ref === "string") {
-      // Refused, not ignored. A `ref` item carries no path to place from, so
-      // honoring `target` here means teaching every source to honor it — see
-      // LB-720. Until then, accepting the field and dropping it would put the
-      // file somewhere other than where the manifest plainly says.
-      if (t.target !== undefined) {
-        throw new ManifestError(
-          `items[${i}]: a "ref" item cannot declare a "target" — only a "path" item can name a placement separate from where its bytes are read. Reference it as a path, or drop the target and let it be placed by kind.`,
-        );
-      }
+      // A `ref` item carries no path to place from, so declaring `target` is
+      // how it names a placement separately from its identity (LB-720) — every
+      // `Source` honors it the same way `local` honors a derived one.
       const kind = asOptionalKind(t.kind, `items[${i}].kind`);
       const ref = parseRef(t.ref);
-      return { ref: kind ? { ...ref, kind } : ref };
+      return {
+        ref: kind ? { ...ref, kind } : ref,
+        ...(t.target !== undefined ? { target: asString(t.target, `items[${i}].target`) } : {}),
+      };
     }
   }
   // Enumerates every form the parser accepts, `{ ref, kind }` included. This

@@ -71,10 +71,13 @@ see [Replay-never-rehosted](#replay-never-rehosted-curseforge), below.
   every item (mod, resourcepack, shader, datapack, local file, whatever) is
   the same `ManifestItem`, either a `source:id@version` ref or a local path;
   its `ItemKind` is inferred, not hand-categorized. **Where an item lands** has
-  two rules, in precedence order: an item listed by an in-instance path is
-  placed at that path verbatim (`"./config/sodium/mixins.json"` nests,
-  `"./options.txt"` stays at the root), and everything else — every remote
-  source, plus a local file outside the instance — is placed by its kind, into
+  three rules, in precedence order: an item may declare an explicit `target`,
+  separate from its identity, and that always wins (LB-720 — the only way a
+  `ref` item, which names no path at all, can land somewhere other than its
+  kind directory); otherwise an item listed by an in-instance path is placed at
+  that path verbatim (`"./config/sodium/mixins.json"` nests, `"./options.txt"`
+  stays at the root); and everything else — a remote item with no declared
+  target, plus a local file outside the instance — is placed by its kind, into
   `mods/`, `resourcepacks/`, `shaderpacks/`, `datapacks/`, or `config/`. The
   path→placement derivation is `declaredPlacementTarget` in
   `src/sources/place.ts`; it folds every `.`/`..`, declines to place anything
@@ -239,6 +242,15 @@ partition — several hundred rows — is known equal without comparing a single
 entry, and only the unflagged overlay has to be reconciled. Where the digests
 differ, the rows themselves are still a usable diff primitive: a Modrinth member
 carries slug + version, a CurseForge member carries `(project, file)`.
+
+That property requires `set` to be **machine-independent**, which took a fix
+(LB-723): a pack's `overrides/` tree becomes `local` members, and
+`canonicalKeyOf` keys a `local` package on its absolute tracked-copy path
+(`<instanceDir>/.anvil/base/<destRel>`) — correct for dedup within one resolve,
+but different on every machine the same pack is imported onto. `baseSetDigest`
+keys those rows on their placement `target` instead (a `local` override's real,
+portable identity), so a pack with overrides now digests identically wherever
+it's cloned.
 
 ### Base resolution happens once, at lock time
 

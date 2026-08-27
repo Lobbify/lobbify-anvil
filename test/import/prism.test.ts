@@ -170,7 +170,7 @@ describe("Prism import", () => {
     });
   });
 
-  it("LB-706: a RE-IDENTIFIED jar in a subdirectory is placed by kind, and says so", async () => {
+  it("LB-720: a RE-IDENTIFIED jar in a subdirectory KEEPS its path across a re-lock", async () => {
     const prismDir = await mkTmp("prism");
     const instanceDir = await mkTmp("prism-inst");
     const storeDir = await mkTmp("prism-store");
@@ -209,18 +209,122 @@ describe("Prism import", () => {
       },
     });
 
-    // A matched item is recorded as a bare `modrinth:alpha` ref, which carries no
-    // path — so every `anvil lock` re-derives `mods/alpha.jar`. Preserving the
-    // subdirectory only in the import lock would put the lock and every re-lock
-    // into silent disagreement, which is the bug LB-706 is about. It is flattened
-    // once, at import, and REPORTED rather than moved quietly.
+    // A matched item is now recorded as a `{ ref, target }` item (LB-720): the
+    // ref carries the re-identification, the target carries the placement — so
+    // the subdirectory survives, no flattening, no warning.
     expect(result.lock.resolved.find((p) => p.source === "modrinth")?.placement).toEqual({
       method: "link",
-      target: "mods/alpha.jar",
+      target: "mods/26.2/alpha.jar",
     });
-    expect(result.warnings.join("\n")).toContain("mods/26.2/alpha.jar");
-    expect(result.warnings.join("\n")).toContain("mods/alpha.jar");
+    expect(result.manifest.items).toContainEqual({
+      ref: {
+        source: "modrinth",
+        id: "alpha",
+        versionSpec: { kind: "pin", version: "1.2.3" },
+      },
+      target: "mods/26.2/alpha.jar",
+    });
+    expect(result.warnings).toHaveLength(0);
+
+    // The round trip: re-resolving the manifest must reproduce the SAME target.
+    // Before LB-720 a `ref` item had no way to carry `target` at all, so this
+    // would have come back as "mods/alpha.jar" and the next build moved the file.
+    const relocked = await resolveManifest({
+      manifest: result.manifest,
+      registry: registryWith({}),
+      allowSource: () => true,
+      now: Date.now(),
+      baseDir: instanceDir,
+      store,
+      lockedPins: pinsFromLock(result.lock),
+    });
+    expect(relocked.resolved.find((p) => p.source === "modrinth")?.placement).toEqual({
+      method: "link",
+      target: "mods/26.2/alpha.jar",
+    });
   });
+
+  // POSIX-only: a colon is a legal POSIX filename/directory-name character but
+  // opens an NTFS Alternate Data Stream, so this scenario cannot arise on
+  // Windows the way it does here (mirrors the LB-827 unmatched-file test below).
+  it.skipIf(process.platform === "win32")(
+    "LB-720 + LB-827: a RE-IDENTIFIED jar whose path is unplaceable falls back to kind, and says so",
+    async () => {
+      const prismDir = await mkTmp("prism");
+      const instanceDir = await mkTmp("prism-inst");
+      const storeDir = await mkTmp("prism-store");
+      dirs.push(prismDir, instanceDir, storeDir);
+      const store = new ContentStore({ root: storeDir });
+
+      await writeFile(
+        join(prismDir, "mmc-pack.json"),
+        JSON.stringify({
+          formatVersion: 1,
+          components: [
+            { uid: "net.minecraft", version: "26.2" },
+            { uid: "net.fabricmc.fabric-loader", version: "0.19.1" },
+          ],
+        }),
+      );
+      // A colon in the subdirectory name — legal on POSIX, an ADS trigger on
+      // Windows. `declaredPlacementTarget` refuses it unconditionally at lock
+      // time, so this importer must never write it as a manifest `target`.
+      await mkdir(join(prismDir, ".minecraft", "mods", "26:2"), { recursive: true });
+      const alpha = fabricJar("alpha");
+      await writeFile(join(prismDir, ".minecraft", "mods", "26:2", "alpha.jar"), alpha);
+      const alphaSha1 = sha1hex(alpha);
+
+      const result = await importPrism({
+        prismDir,
+        instanceDir,
+        store,
+        resolveGame: async () => ({ packages: [], java: "runtime-j", loader: "fabric 0.19.1" }),
+        identify: {
+          async matchModrinth(sha1) {
+            return sha1 === alphaSha1
+              ? { slug: "alpha", versionNumber: "1.2.3", url: "https://cdn.modrinth.com/a.jar" }
+              : undefined;
+          },
+          async matchCurseForge() {
+            return undefined;
+          },
+        },
+      });
+
+      // Falls back to the pre-LB-720 kind+basename placement, exactly as every
+      // re-identified jar used to, and reports the fallback rather than writing
+      // a target its own lock-time gate would later refuse.
+      expect(result.lock.resolved.find((p) => p.source === "modrinth")?.placement).toEqual({
+        method: "link",
+        target: "mods/alpha.jar",
+      });
+      expect(result.manifest.items).toContainEqual({
+        ref: {
+          source: "modrinth",
+          id: "alpha",
+          versionSpec: { kind: "pin", version: "1.2.3" },
+        },
+      });
+      expect(result.warnings.join("\n")).toContain("mods/alpha.jar");
+      expect(result.warnings.join("\n")).toContain("':'");
+
+      // And the manifest this wrote must itself be lockable — the whole point
+      // of not writing the refused target.
+      const relocked = await resolveManifest({
+        manifest: result.manifest,
+        registry: registryWith({}),
+        allowSource: () => true,
+        now: Date.now(),
+        baseDir: instanceDir,
+        store,
+        lockedPins: pinsFromLock(result.lock),
+      });
+      expect(relocked.resolved.find((p) => p.source === "modrinth")?.placement).toEqual({
+        method: "link",
+        target: "mods/alpha.jar",
+      });
+    },
+  );
 
   // POSIX-only: the fixture writes a real `mypack:v2.zip` on disk, which is a
   // legal filename on Linux/macOS and is not a filename at all on NTFS. There

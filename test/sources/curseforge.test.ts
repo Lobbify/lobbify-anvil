@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ContentStore,
+  CurseForgeApi,
   CurseForgeSource,
   ReplayUnavailable,
   ShaMismatch,
@@ -266,5 +267,74 @@ describe("CurseForgeSource.resolve", () => {
     expect(() => new CurseForgeSource().plan(pkg, ctx(new FakeCurseForge(), { key: "k" }))).toThrow(
       UnsatisfiableTarget,
     );
+  });
+});
+
+describe("CurseForgeApi.getModFiles — pagination (LB-723)", () => {
+  /** A mod with `count` files, oldest (lowest id) first, all on Minecraft 26.2. */
+  function modWithFiles(count: number) {
+    const files = Array.from({ length: count }, (_, i) => {
+      const n = i + 1;
+      return {
+        id: 9_000 + n,
+        displayName: `v1.${n}`,
+        fileName: `mod-1.${n}.jar`,
+        fileDate: `2026-01-01T00:00:${String(n).padStart(2, "0")}Z`,
+        gameVersions: ["26.2", "Fabric"],
+        bytes: fabricJar(`mod-1.${n}`),
+      };
+    });
+    const fake = new FakeCurseForge().add({
+      modId: 900_000,
+      slug: "big-mod",
+      classId: 6,
+      files,
+    });
+    return { fake, files };
+  }
+
+  it("a listing under the 50-file page size is unaffected (one page, unchanged behavior)", async () => {
+    const { fake } = modWithFiles(10);
+    const api = new CurseForgeApi(fake, "k");
+    const files = await api.getModFiles(900_000, { gameVersion: "26.2" });
+    expect(files).toHaveLength(10);
+    expect(fake.calls.filter((u) => u.includes("/files")).length).toBe(1);
+  });
+
+  // The regression case: a project with more files than a single page holds.
+  // Before LB-723, getModFiles requested pageSize=50 and returned exactly that
+  // page — file 60 (the newest) was never in the response at all.
+  it("GATE LB-723: pages through a listing LARGER than one page and returns every file", async () => {
+    const { fake, files } = modWithFiles(60);
+    const api = new CurseForgeApi(fake, "k");
+    const result = await api.getModFiles(900_000, { gameVersion: "26.2" });
+    expect(result).toHaveLength(60);
+    expect(result.map((f) => f.id).sort((a, b) => a - b)).toEqual(
+      files.map((f) => f.id).sort((a, b) => a - b),
+    );
+    // More than one request went out — this is the paging itself, not just the
+    // final count (which a client that silently truncated could also get right
+    // by accident on a differently-shaped fixture).
+    expect(fake.calls.filter((u) => u.includes("/files?")).length).toBe(2);
+  });
+
+  it("GATE LB-723: a version pinned past page 1 resolves — unreachable before this fix", async () => {
+    const { fake } = modWithFiles(60);
+    // File #55 sits on the second page (files 51-60); a client that stops after
+    // the first 50 can never find it, and selectFile throws UnsatisfiableTarget.
+    const { pkg } = await new CurseForgeSource().resolve(
+      { source: "curseforge", id: "900000", versionSpec: { kind: "pin", version: "9055" } },
+      ctx(fake, { key: "k" }),
+    );
+    expect(pkg.file).toBe(9055);
+    expect(pkg.version).toBe("v1.55");
+  });
+
+  it("stops paging once the endpoint's own totalCount is reached (exact multiple of the page size)", async () => {
+    const { fake } = modWithFiles(100);
+    const api = new CurseForgeApi(fake, "k");
+    const result = await api.getModFiles(900_000, { gameVersion: "26.2" });
+    expect(result).toHaveLength(100);
+    expect(fake.calls.filter((u) => u.includes("/files")).length).toBe(2);
   });
 });

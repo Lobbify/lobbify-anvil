@@ -364,4 +364,94 @@ describe("resolver", () => {
     // would delete the file from the instance without a word.
     await expect(resolveWithTarget("config/settings.txt", dir)).rejects.toThrow(/ENOENT|tracked/);
   });
+
+  // --- LB-720: an explicit target on a REF item, not just a local path item --
+  //
+  // A `ref` item carries no path of its own — nothing to derive a placement
+  // from — so an explicit `target` is the ONLY way one can name a placement
+  // separate from its identity. It runs through the identical guards LB-719's
+  // path-item target does (same `declaredPlacementTarget` call, same refusal
+  // for a protected top or an escape), so LB-734's reserved-top refusal is not
+  // weakened by extending the mechanism onto this new surface.
+
+  function manifestWithRefTarget(target: string): Manifest {
+    return {
+      project: { name: "p", version: "1" },
+      game: { minecraft: "26.2", loader: "fabric 0.19.1" },
+      items: [
+        {
+          ref: { source: "modrinth", id: "alpha", versionSpec: { kind: "latest" } },
+          target,
+        },
+      ],
+    };
+  }
+
+  async function resolveWithRefTarget(target: string) {
+    return resolveManifest({
+      manifest: manifestWithRefTarget(target),
+      registry: registryWith({ modrinth: twoModWorld() }),
+      allowSource: () => true,
+      now: NOW,
+      baseDir: "/tmp",
+      store: await freshStore(),
+    });
+  }
+
+  it("LB-720: a ref item's explicit target places it there, not by kind", async () => {
+    const lock = await resolveWithRefTarget("mods/26.2/alpha.jar");
+    expect(lock.resolved.find((p) => p.name === "alpha")?.placement).toEqual({
+      method: "link",
+      target: "mods/26.2/alpha.jar",
+    });
+  });
+
+  it("LB-720: a ref item declaring no target is still placed by kind (unchanged default)", async () => {
+    const lock = await resolveManifest({
+      manifest: twoModManifest(),
+      registry: registryWith({ modrinth: twoModWorld() }),
+      allowSource: () => true,
+      now: NOW,
+      baseDir: "/tmp",
+      store: await freshStore(),
+    });
+    expect(lock.resolved.find((p) => p.name === "alpha")?.placement).toEqual({
+      method: "link",
+      target: "mods/ALPHA-1.0.0.jar",
+    });
+  });
+
+  it("LB-720: a ref item's target under a protected top is REFUSED (LB-734 still holds)", async () => {
+    for (const evil of [
+      "saves/world/level.dat",
+      ".anvil/objects/x",
+      ".anvilignore",
+      "anvil.toml",
+    ]) {
+      await expect(resolveWithRefTarget(evil)).rejects.toBeInstanceOf(PathEscape);
+    }
+  });
+
+  it("LB-720: a ref item's target escaping the instance is REFUSED, not placed by kind", async () => {
+    for (const evil of ["../../etc/passwd", "/etc/passwd", "..", "./"]) {
+      await expect(resolveWithRefTarget(evil)).rejects.toBeInstanceOf(PathEscape);
+    }
+  });
+
+  it("LB-720: a ref item's target round-trips across a re-lock (the property Prism import needs)", async () => {
+    const first = await resolveWithRefTarget("mods/26.2/alpha.jar");
+    const relocked = await resolveManifest({
+      manifest: manifestWithRefTarget("mods/26.2/alpha.jar"),
+      registry: registryWith({ modrinth: twoModWorld() }),
+      allowSource: () => true,
+      now: NOW,
+      baseDir: "/tmp",
+      store: await freshStore(),
+      lockedPins: pinsFromLock(first),
+    });
+    expect(relocked.resolved.find((p) => p.name === "alpha")?.placement).toEqual({
+      method: "link",
+      target: "mods/26.2/alpha.jar",
+    });
+  });
 });

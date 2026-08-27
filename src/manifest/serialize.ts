@@ -80,7 +80,9 @@ function renderItem(item: ManifestItem): string {
   }
   if (item.ref) {
     const s = formatRef(item.ref);
-    // A ref that carried an explicit kind override round-trips as a table.
+    // A ref that carried an explicit kind override, or an explicit placement
+    // target (LB-720), round-trips as a table — either one is lost if flattened
+    // to the bare string form.
     //
     // The `url`/`local` exemption this used to carry dropped the kind on the
     // floor: `{ ref = "./mods/mine.jar", kind = "config" }` is a form the parser
@@ -88,10 +90,11 @@ function renderItem(item: ManifestItem): string {
     // override vanished on the next rewrite. Same defect as the rest of LB-862 —
     // the writer discarding something the reader accepts — and found by
     // adversarial review, because this file's input set had not enumerated it.
-    if (item.ref.kind) {
+    if (item.ref.kind || item.target !== undefined) {
       return inlineTable([
         ["ref", tomlString(s)],
-        ["kind", tomlString(item.ref.kind)],
+        ...(item.ref.kind ? [["kind", tomlString(item.ref.kind)] as const] : []),
+        ...(item.target !== undefined ? [["target", tomlString(item.target)] as const] : []),
       ]);
     }
     return tomlString(s);

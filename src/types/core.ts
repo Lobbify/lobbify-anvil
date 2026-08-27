@@ -94,15 +94,24 @@ export interface ResolvedRef {
    * same currency as {@link Placement}'s `target` — not to be confused with
    * {@link LockPackage.targets}, which are platforms).
    *
-   * A path-authored item names both where its bytes come from and where they
-   * belong: `"config/sodium/mixins.json"` is read from there and placed back
-   * there. The resolver derives this from the manifest path (via
-   * `declaredPlacementTarget`) and the local source honors it, so nested paths
-   * round-trip and a root-level override is not swept into a kind directory.
+   * Two ways this gets set, both validated by the same
+   * `declaredPlacementTarget` guards:
    *
-   * Absent when the item declares no placement of its own — every non-local
-   * source, and a local path that resolves outside the instance. Those fall back
-   * to `<kind-dir>/<basename>`.
+   *   - **Derived**, for a `local` ref only: a path-authored item names both
+   *     where its bytes come from and where they belong —
+   *     `"config/sodium/mixins.json"` is read from there and placed back
+   *     there. The resolver derives this from the manifest path so nested
+   *     paths round-trip and a root-level override is not swept into a kind
+   *     directory.
+   *   - **Explicit** (`ManifestItem.target`, any source — LB-720): a ref that
+   *     carries no path of its own (every Modrinth/CurseForge/URL item, and a
+   *     re-identified local jar) can still declare where it lands, separately
+   *     from the id/version that names *what* it is. Every source honors it
+   *     the same way `local` honors a derived one.
+   *
+   * Absent when the item declares no placement of its own: a non-local ref
+   * with no explicit target, or a local path that resolves outside the
+   * instance. Those fall back to `<kind-dir>/<basename>`.
    */
   readonly target?: string;
 }
@@ -133,9 +142,13 @@ export interface ManifestItem {
    * guards a derived target passes — an explicit field is attacker-controlled
    * independently of the read path, so it gets the stricter, not the looser, check.
    *
-   * Only a `path` item may declare it today. A `ref` item that carries one is
-   * refused by the parser rather than ignored: silently dropping it would place the
-   * file somewhere other than where the manifest says.
+   * A `ref` item may declare it too (LB-720): a Modrinth/CurseForge/URL item, or
+   * a re-identified local jar, carries no path of its own for the resolver to
+   * derive a placement from, so without this field it is always placed by kind —
+   * a re-identified jar imported from a subdirectory (Fabric's
+   * `mods/<mc-version>/` convention, for one) would flatten on every re-lock.
+   * `refForItem` carries this onto the resolved ref's own `target`, and every
+   * `Source` honors it exactly as `local` honors a derived one.
    */
   readonly target?: string;
 }
