@@ -40,10 +40,21 @@
  * So {@link ReplayVeto.verdict} reads:
  *
  *   - bytes in the cache → veto, silently. The real case.
- *   - cache present, bytes not in it → **track**, even at a claimed path. The
+ *   - cache established, bytes not in it → **track**, even at a claimed path. The
  *     bytes demonstrably did not come from a replay item this instance holds.
- *   - cache absent, path claimed → veto, and **warn**. Fail safe, out loud.
+ *   - cache not established, path claimed → veto, and **warn**. Fail safe, out loud.
  *   - otherwise → track.
+ *
+ * ## The switch between them is a coupling worth naming
+ *
+ * Exactly one boolean picks which instrument runs — {@link ReplayCache.established}
+ * — and it is load-bearing in a direction that is easy to miss: making it true
+ * **retires the ledger for the whole instance**. Every other file in this
+ * subsystem can therefore change the admission rule everywhere just by causing a
+ * replay cache to come into existence, which is why the question lives on the
+ * type that owns the directory rather than as a `pathExists` here, and why
+ * `test/security/replay-ledger-coupling.test.ts` fails when a new file starts
+ * touching the cache. That test is the guard; this paragraph is only the map.
  *
  * ## What this does NOT cover
  *
@@ -51,8 +62,8 @@
  * "either one catches it" is wrong. They share a blind spot: **replay cache
  * deleted AND the jar renamed**. The content check cannot run and the ledger has
  * never seen the new path, so the file is tracked and can be pushed. `build`
- * warns when it finds a non-empty ledger with no cache root, which is the only
- * signal available before the fact. Do not describe the pair as exhaustive.
+ * warns when it finds a non-empty ledger and no established cache, which is the
+ * only signal available before the fact. Do not describe the pair as exhaustive.
  *
  * The receive side does not rely on either: {@link replayPinsOf} reads the pins
  * out of the incoming history's own locks, which needs no local state at all.
@@ -60,7 +71,7 @@
 
 import { open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ensureDir, foldPath, pathExists } from "../internal/fs.js";
+import { ensureDir, foldPath } from "../internal/fs.js";
 import type { Hash, HashAlgo, Lockfile } from "../types/index.js";
 import { hashBuffer, hashKey } from "./hash.js";
 import { targetsOf } from "./placement.js";
@@ -85,7 +96,7 @@ export const REPLAY_PATHS_REF = join(".anvil", "refs", "replay-paths");
  */
 export const REPLAY_PIN_ALGOS: readonly HashAlgo[] = ["sha256", "sha1"];
 
-/** No digests wanted — what {@link ReplayVeto.algos} returns with no cache. */
+/** No digests wanted — what {@link ReplayVeto.algos} returns with no established cache. */
 const NO_ALGOS: readonly HashAlgo[] = [];
 
 /** The placement targets every `provenance: "replay"` row across `locks` claims. */
@@ -246,18 +257,27 @@ export type ReplayVerdict =
 export class ReplayVeto {
   readonly #cache: ReplayCache;
   readonly #paths: ReadonlySet<string>;
-  readonly #cachePresent: boolean;
+  readonly #established: boolean;
 
-  private constructor(cache: ReplayCache, paths: ReadonlySet<string>, cachePresent: boolean) {
+  private constructor(cache: ReplayCache, paths: ReadonlySet<string>, established: boolean) {
     this.#cache = cache;
     this.#paths = paths;
-    this.#cachePresent = cachePresent;
+    this.#established = established;
   }
 
-  /** Read the ledger and probe the cache root once, up front. */
+  /**
+   * Read the ledger and ask the cache whether it is established, once, up front.
+   *
+   * The switch is {@link ReplayCache.established} and deliberately not a
+   * `pathExists` on {@link ReplayCache.root}: the cache root is created by
+   * `writeTemp` before any admission has been verified, so probing it let a
+   * failed admission retire the ledger. Keep this question on the type that owns
+   * the directory — that is the only place a contributor adding a producer will
+   * meet the constraint.
+   */
   static async load(instanceDir: string): Promise<ReplayVeto> {
     const cache = new ReplayCache({ instanceDir });
-    return new ReplayVeto(cache, await readReplayPaths(instanceDir), await pathExists(cache.root));
+    return new ReplayVeto(cache, await readReplayPaths(instanceDir), await cache.established());
   }
 
   /** A veto that can never fire — for a caller with no instance (unit tests). */
@@ -271,12 +291,12 @@ export class ReplayVeto {
    * item pays nothing beyond the one probe `load` already did.
    */
   get algos(): readonly HashAlgo[] {
-    return this.#cachePresent ? REPLAY_PIN_ALGOS : NO_ALGOS;
+    return this.#established ? REPLAY_PIN_ALGOS : NO_ALGOS;
   }
 
-  /** True when a ledger exists but the cache does not — the degraded state. */
+  /** True when a ledger exists but the cache is not established — the degraded state. */
   get degraded(): boolean {
-    return !this.#cachePresent && this.#paths.size > 0;
+    return !this.#established && this.#paths.size > 0;
   }
 
   /** The recorded paths, for a caller that needs the ledger itself. */
@@ -296,7 +316,7 @@ export class ReplayVeto {
 
   /** The admission rule (see this module's header for why it is shaped this way). */
   async verdict(relPath: string, digests: ReadonlyMap<HashAlgo, Hash>): Promise<ReplayVerdict> {
-    if (this.#cachePresent) {
+    if (this.#established) {
       return (await this.isCached(digests)) ? "veto" : "track";
     }
     return this.#paths.has(foldPath(relPath)) ? "veto-unverified" : "track";

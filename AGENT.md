@@ -183,6 +183,14 @@ Every stage is gated on these. A PR that could violate one must prove it cannot.
      replacement file. The two do **not** compose into a complete guard; the shared blind
      spot (cache deleted *and* the jar renamed) is documented in `replay-provenance.ts`
      and warned about at build time. Do not describe them as exhaustive.
+   - **Which of the two runs is decided by `ReplayCache.established()` alone, and making
+     it true retires the ledger for the whole instance.** So causing a replay cache to
+     come into existence is a change to replay admission, not a layout detail — a cache
+     that exists while holding nothing turns a refused CurseForge jar into a tracked,
+     pushable file. `established()` therefore probes the object domain directories, never
+     the cache root (`writeTemp` creates `<root>/tmp/` before it has hashed anything, so a
+     failed admission used to flip the switch). Any new `src/` file that touches the cache
+     has to say so in `test/security/replay-ledger-coupling.test.ts` (LB-879).
 
 ## Security must-dos (later stages — do not regress)
 

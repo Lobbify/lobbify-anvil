@@ -54,7 +54,7 @@ import { rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import type { LinkStrategy } from "../events.js";
-import { ensureDir, statDevOf } from "../internal/fs.js";
+import { ensureDir, pathExists, statDevOf } from "../internal/fs.js";
 import { ShaMismatch } from "../types/errors.js";
 import type { Hash } from "../types/index.js";
 import { fsyncDir, writeTemp } from "./atomic.js";
@@ -64,6 +64,13 @@ import { linkOrCopy } from "./linking.js";
 
 /** The instance-relative directory the replay cache occupies (under `.anvil/`). */
 export const REPLAY_CACHE_DIRNAME = "replay-cache";
+
+/**
+ * The hash domains this cache can hold objects in — exactly the directories
+ * {@link ReplayCache.domainDir} yields, and what {@link ReplayCache.established}
+ * probes.
+ */
+const CACHE_DOMAIN_ALGOS: readonly Hash["algo"][] = ["sha256", "sha1"];
 
 export interface ReplayCacheOptions {
   /** The instance root — the cache lives at `<instanceDir>/.anvil/replay-cache/`. */
@@ -81,7 +88,12 @@ export interface ReplayCacheOptions {
  * that walks the shared store can ever reach a replay object through it.
  */
 export class ReplayCache {
-  /** The absolute cache root: `<instanceDir>/.anvil/replay-cache`. */
+  /**
+   * The absolute cache root: `<instanceDir>/.anvil/replay-cache`.
+   *
+   * ⚠️ Creating this directory is not a neutral act — see
+   * {@link ReplayCache.established}. Do not `mkdir` it to "prepare" an instance.
+   */
   readonly root: string;
   readonly #statDev: (path: string) => Promise<number>;
   readonly #onWarn?: (message: string) => void;
@@ -119,6 +131,46 @@ export class ReplayCache {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * True once this cache has actually admitted an object and still holds the
+   * domain directory it landed in.
+   *
+   * ## ⚠️ This is the replay path-ledger switch. Read this before making it true.
+   *
+   * {@link ReplayVeto} (`replay-provenance.ts`) uses this one boolean to choose
+   * which of its two instruments answers "are these bytes CurseForge content":
+   *
+   *   - `true`  → the **content check** decides, alone. The path ledger at
+   *     `.anvil/refs/replay-paths` is not consulted at all.
+   *   - `false` → the **ledger** decides, and a claimed path is refused
+   *     (`veto-unverified`) with a warning.
+   *
+   * So whatever makes this answer `true` retires the ledger for the whole
+   * instance, silently — and the ledger is the only instrument that still works
+   * once the cache has been deleted. Making it true **without actually holding
+   * the bytes** is therefore a ToS hole rather than a tidy-up: a superseded
+   * CurseForge jar at a claimed path stops being refused and becomes an ordinary
+   * tracked file, which `commit` records and `push` ships.
+   *
+   * That is why this probes the **object domain directories** and not
+   * {@link root}. `writeTemp` creates `<root>/tmp/` before it has hashed
+   * anything, so a failed admission — `ShaMismatch`, i.e. the tamper case — used
+   * to flip the switch while admitting nothing, and no sweep ever removes that
+   * temp dir again. A domain directory exists only where an object has landed.
+   *
+   * Two `stat`s, never a walk. This cache is deliberately non-enumerable (see the
+   * module doc); answering this by counting objects would hand every caller the
+   * enumeration capability the whole design exists to withhold.
+   */
+  async established(): Promise<boolean> {
+    for (const algo of CACHE_DOMAIN_ALGOS) {
+      if (await pathExists(this.domainDir(algo))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
