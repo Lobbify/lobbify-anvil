@@ -186,10 +186,28 @@ export class FakeCurseForge implements Http {
         return { status: 404, headers: {}, url, body: encode({ error: "not found" }) };
       }
       const gameVersion = u.searchParams.get("gameVersion");
-      const list = mod.files
-        .filter((f) => gameVersion === null || (f.gameVersions ?? []).includes(gameVersion))
-        .map((f) => fileJson(mod.modId, f));
-      return reply({ data: list });
+      const filtered = mod.files.filter(
+        (f) => gameVersion === null || (f.gameVersions ?? []).includes(gameVersion),
+      );
+      // Real CurseForge pagination: `pageSize` (capped at 50 upstream, but this
+      // fake honors whatever the caller asks — the client under test is what
+      // enforces 50) and `index` (offset), with a `pagination` envelope
+      // describing the slice. Ignoring these — as this fake used to — hides
+      // the exact bug LB-723 is about: a client that never sends `index` and
+      // never reads `pagination` cannot tell a truncated listing from a
+      // complete one.
+      const pageSize = Number(u.searchParams.get("pageSize") ?? filtered.length);
+      const index = Number(u.searchParams.get("index") ?? 0);
+      const page = filtered.slice(index, index + pageSize);
+      return reply({
+        data: page.map((f) => fileJson(mod.modId, f)),
+        pagination: {
+          index,
+          pageSize,
+          resultCount: page.length,
+          totalCount: filtered.length,
+        },
+      });
     }
 
     const modMatch = path.match(/^\/v1\/mods\/(\d+)$/);

@@ -112,8 +112,8 @@ export interface ResolveManifestInput {
 /**
  * Absolutize a local ref's path against the base dir (other sources unchanged),
  * and settle the placement target: an explicitly declared one when the item has
- * one, otherwise the one derived from the path **as authored**, before it is
- * absolutized.
+ * one, otherwise — for a `local` ref only — the one derived from the path **as
+ * authored**, before it is absolutized.
  *
  * The manifest is instance-relative by construction (`baseDir` is the instance
  * dir), so an authored `"config/a/b.toml"` is both the read location and the
@@ -121,25 +121,24 @@ export interface ResolveManifestInput {
  * that a manifest stores byte-identical — so this change does not perturb any
  * existing `meta.manifestHash`.
  *
- * A declared `target` separates the two: the bytes are read from `id` and placed
- * at `target`. That is how a tracked copy (`.anvil/overrides/<path>`, written by
- * `import` before any build) names a placement its read path could not — the read
- * path is inside `.anvil/`, which is never a legal placement. Derivation is
- * skipped entirely in that case, since running it on the read path is exactly the
- * `PathEscape` this exists to avoid.
+ * A declared `target` separates identity from placement, for ANY source (LB-720
+ * lifted this off `local`-only): the bytes/identity come from `id`, the file is
+ * placed at `target`. That is how a tracked copy (`.anvil/overrides/<path>`,
+ * written by `import` before any build) names a placement its read path could
+ * not — the read path is inside `.anvil/`, which is never a legal placement —
+ * and how a re-identified Modrinth/CurseForge jar keeps a subdirectory a bare
+ * `source:id` ref has no way to carry. Derivation from `id` is local-only and is
+ * skipped entirely when `target` is declared, since running it on the read path
+ * is exactly the `PathEscape` this exists to avoid.
  *
  * The declared target runs the **same** {@link declaredPlacementTarget} guards a
  * derived one does, and a target naming nothing inside the instance is a hard
  * failure rather than a fall back to kind placement: for a derived target the
  * fallback is right (the path was never a placement claim), but silently ignoring
  * a placement the manifest states outright would relocate the file — the failure
- * class LB-704/LB-706 exist to eliminate.
+ * class LB-704/LB-706/LB-720 exist to eliminate.
  */
 function localizeRef(ref: ResolvedRef, baseDir: string): ResolvedRef {
-  if (ref.source !== "local") {
-    return ref;
-  }
-  const id = isAbsolute(ref.id) ? ref.id : resolvePath(baseDir, ref.id);
   if (ref.target !== undefined) {
     const declared = declaredPlacementTarget(ref.target);
     if (declared === undefined) {
@@ -148,8 +147,15 @@ function localizeRef(ref: ResolvedRef, baseDir: string): ResolvedRef {
         "an explicit target must name a path inside the instance — it cannot be absolute, nor walk out with `..`",
       );
     }
-    return { ...ref, id, target: declared };
+    const withTarget = { ...ref, target: declared };
+    return ref.source === "local"
+      ? { ...withTarget, id: isAbsolute(ref.id) ? ref.id : resolvePath(baseDir, ref.id) }
+      : withTarget;
   }
+  if (ref.source !== "local") {
+    return ref;
+  }
+  const id = isAbsolute(ref.id) ? ref.id : resolvePath(baseDir, ref.id);
   const target = declaredPlacementTarget(ref.id);
   return {
     ...ref,

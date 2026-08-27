@@ -101,6 +101,22 @@ function manifestWith(path: string, kind?: "mod" | "config"): Manifest {
   };
 }
 
+/**
+ * A manifest whose one item is a `ref` (not a `path`) declaring an explicit
+ * `target` — the LB-720 surface. `declaredPlacementTarget` guards it through
+ * the identical code path a `path` item's target runs through, so every
+ * refusal above must hold here too; no registry entry is needed because
+ * `localizeRef` validates (and can throw on) the target before the resolver
+ * ever looks a source up.
+ */
+function refManifestWith(target: string): Manifest {
+  return {
+    project: { name: "p", version: "1.0.0" },
+    game: { minecraft: "26.2", loader: "fabric 0.19.1" },
+    items: [{ ref: { source: "modrinth", id: "sodium", versionSpec: { kind: "latest" } }, target }],
+  };
+}
+
 describe("declaredPlacementTarget — the placement half of the path guard", () => {
   it("keeps an in-instance path verbatim, normalizing separators and no-op segments", () => {
     expect(declaredPlacementTarget("options.txt")).toBe("options.txt");
@@ -407,6 +423,37 @@ describe("resolveManifest — a hostile manifest cannot place bytes outside the 
     expect(await readFile(join(instanceDir, MANIFEST_FILENAME), "utf8")).toBe(original);
     expect(await readFile(join(instanceDir, LOCK_FILENAME), "utf8")).toBe("# lock\n");
     expect(await readFile(join(instanceDir, EXCLUDE_FILE), "utf8")).toBe("logs/\n");
+  });
+
+  it("REFUSES the same reserved/protected targets on a REF item, not just a path item (LB-720 + LB-734)", async () => {
+    // LB-720 lets a `ref` item declare `target` too — this proves that surface
+    // is not a bypass of LB-734's refusal, by running the identical case list
+    // through a `ref` item instead of a `path` item.
+    const { instanceDir, store } = await fixture();
+    for (const name of RESERVED_NAME_SOURCES) {
+      for (const declared of [name, `./${name}`]) {
+        await expect(
+          resolveManifest({
+            ...resolveOpts,
+            manifest: refManifestWith(declared),
+            baseDir: instanceDir,
+            store,
+          }),
+          declared,
+        ).rejects.toBeInstanceOf(PathEscape);
+      }
+    }
+    for (const declared of [".anvil/objects/x", "saves/world/level.dat", ".anvilignore"]) {
+      await expect(
+        resolveManifest({
+          ...resolveOpts,
+          manifest: refManifestWith(declared),
+          baseDir: instanceDir,
+          store,
+        }),
+        declared,
+      ).rejects.toBeInstanceOf(PathEscape);
+    }
   });
 
   it("refuses a manifest item targeting an NTFS-ADS colon segment end to end (LB-827)", async () => {

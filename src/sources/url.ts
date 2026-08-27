@@ -12,6 +12,7 @@ import { HttpError } from "../types/errors.js";
 import type {
   FetchPlan,
   LockPackage,
+  Placement,
   ResolveResult,
   ResolvedRef,
   Source,
@@ -61,13 +62,19 @@ export class UrlSource implements Source {
     if (ctx.store) {
       await ctx.store.putBuffer(bytes, "sha256", hash);
     }
+    // A declared target (LB-720) wins over kind+basename — same precedence
+    // `local.ts` gives one.
+    const placement: Placement =
+      ref.target !== undefined
+        ? { method: "link", target: ref.target }
+        : singleFilePlacement(itemKind, filename);
     const pkg: LockPackage = {
       name: filename,
       kind: itemKind,
       source: "url",
       hash,
       provenance: "copy",
-      placement: singleFilePlacement(itemKind, filename),
+      placement,
       size: bytes.byteLength,
       url: res.url,
     };

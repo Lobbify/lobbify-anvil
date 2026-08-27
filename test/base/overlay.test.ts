@@ -189,4 +189,39 @@ describe("base set digest", () => {
     overlayBase({ base, instance: [modrinthPkg("b", "2")], removes: [] });
     expect(baseSetDigest(base).value).toBe(digest.value);
   });
+
+  // --- LB-723: machine-independence for a base with an overrides/ tree -------
+  //
+  // A base pack's overrides/ files become `local` members. `canonicalKeyOf`
+  // keys a `local` package on the ABSOLUTE tracked-copy path (resolver/
+  // identity.ts's `localPathOf`), which is `<instanceDir>/.anvil/base/<target>`
+  // — different on every machine the same pack is imported onto, even though
+  // the content and the placement target are byte-identical. `baseSetDigest`
+  // used to feed that straight into the digest, so two machines sharing the
+  // SAME base pack at the SAME version computed DIFFERENT `set` digests the
+  // moment the pack shipped any overrides/ file at all — defeating the whole
+  // cheap-diff property `LockBase.set` exists for (ARCHITECTURE.md → "Base
+  // packs"). This is the property that whole story rests on: it must hold for
+  // the base pack's OWN name/version, not just for two arbitrary members.
+
+  it("GATE LB-723: is machine-independent for a base carrying override files (same pack, two absolute instance dirs)", () => {
+    const onMachineA = [
+      modrinthPkg("sodium", "0.6.0"),
+      localPkg("config/tuning.json", "shared-content", "/home/alice/packs/atm10/.anvil/base"),
+    ];
+    const onMachineB = [
+      modrinthPkg("sodium", "0.6.0"),
+      localPkg("config/tuning.json", "shared-content", "/Users/bob/Instances/atm10/.anvil/base"),
+    ];
+    expect(baseSetDigest(onMachineA).value).toBe(baseSetDigest(onMachineB).value);
+  });
+
+  it("still moves when an override's CONTENT differs — the fix narrows the key, it doesn't blind the digest", () => {
+    // `localPkg`'s hash is keyed off `body`'s first character (see `hash()`
+    // above) — "Alpha"/"Zulu" differ there, unlike the "content-A"/"content-B"
+    // shape used elsewhere in this file, which would defeat this assertion.
+    const a = [localPkg("config/tuning.json", "Alpha", "/instance-1/.anvil/base")];
+    const b = [localPkg("config/tuning.json", "Zulu", "/instance-2/.anvil/base")];
+    expect(baseSetDigest(a).value).not.toBe(baseSetDigest(b).value);
+  });
 });

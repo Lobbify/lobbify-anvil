@@ -40,6 +40,7 @@ import type {
   Http,
   ItemKind,
   LockPackage,
+  Placement,
   ResolveResult,
   ResolvedRef,
   Source,
@@ -54,6 +55,17 @@ const DEFAULT_BASE_URL = "https://api.curseforge.com";
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
 /** CurseForge's Minecraft game id (used by the fingerprint-match endpoint). */
 export const CF_MINECRAFT_GAME_ID = 432;
+/** `GET /v1/mods/{modId}/files`'s own maximum `pageSize`. */
+const CF_FILES_PAGE_SIZE = 50;
+/**
+ * A bomb bound on how many files {@link CurseForgeApi.getModFiles} will page
+ * through for one mod — generous for any real project (the API caps a single
+ * page at 50, so this is 200 pages), and a guard against an unbounded request
+ * loop should the endpoint's own pagination metadata ever be malformed, lie
+ * about a `totalCount` that never arrives, or the walk otherwise never see a
+ * short page.
+ */
+const MAX_CF_MOD_FILES = 10_000;
 
 // --- classId → ItemKind ----------------------------------------------------
 
@@ -278,33 +290,78 @@ export class CurseForgeApi {
     return normalizeCfMod(doc?.data, `curseforge:${modId}`);
   }
 
-  /** `GET /v1/mods/{modId}/files` filtered by game version + loader. */
+  /**
+   * `GET /v1/mods/{modId}/files` filtered by game version + loader — the
+   * **complete** listing, paged through in full.
+   *
+   * The endpoint caps a single page at {@link CF_FILES_PAGE_SIZE} (50) files and
+   * both callers (`CurseForgeSource.resolve`'s `selectFile`, and
+   * `base/cf-base.ts`'s `selectPackFile`) select among the result by version —
+   * a pinned `displayName`/`fileName` that isn't on the first page, or a
+   * "latest eligible" whose actual latest happens to sit past it, was silently
+   * unreachable or wrong before this paged. A project with more than 50 files
+   * for the filtered game version + loader is not exotic (a long-lived mod
+   * across several Minecraft versions easily clears it), so this was a real gap,
+   * not a theoretical one.
+   *
+   * Paging follows the response's own `pagination.resultCount`/`totalCount`
+   * when present, and falls back to "stop once a page comes back short" when it
+   * is not — the same signal the API uses internally, and one that still
+   * terminates correctly against a mangled/absent `pagination` block. Either
+   * way, {@link MAX_CF_MOD_FILES} bounds the walk against a pathological or
+   * hostile upstream that never returns a short page.
+   */
   async getModFiles(
     modId: number,
     filters: { gameVersion?: string; modLoaderType?: number },
   ): Promise<CfFile[]> {
-    const params = new URLSearchParams();
-    if (filters.gameVersion) {
-      params.set("gameVersion", filters.gameVersion);
-    }
-    if (filters.modLoaderType !== undefined) {
-      params.set("modLoaderType", String(filters.modLoaderType));
-    }
-    params.set("pageSize", "50");
-    const doc = await this.#getJson<{ data: unknown }>(`/v1/mods/${modId}/files`, params);
-    // A non-array `data` passes a `?? []` fallback and then explodes on
-    // `.filter`. Anything that is not an array is "no files", not a crash.
-    if (!Array.isArray(doc?.data)) {
-      return [];
-    }
-    // Drop malformed entries rather than failing the whole listing: one bad
-    // record in a page should not make a project unresolvable.
     const out: CfFile[] = [];
-    for (const raw of doc.data) {
-      try {
-        out.push(normalizeCfFile(raw, `curseforge:${modId}`));
-      } catch {
-        // skipped — an unusable record is not a selectable file
+    let index = 0;
+    for (;;) {
+      const params = new URLSearchParams();
+      if (filters.gameVersion) {
+        params.set("gameVersion", filters.gameVersion);
+      }
+      if (filters.modLoaderType !== undefined) {
+        params.set("modLoaderType", String(filters.modLoaderType));
+      }
+      params.set("pageSize", String(CF_FILES_PAGE_SIZE));
+      params.set("index", String(index));
+      const doc = await this.#getJson<{ data: unknown; pagination?: unknown }>(
+        `/v1/mods/${modId}/files`,
+        params,
+      );
+      // A non-array `data` passes a `?? []` fallback and then explodes on
+      // `.filter`. Anything that is not an array is "no files", not a crash.
+      if (!Array.isArray(doc?.data)) {
+        break;
+      }
+      // Drop malformed entries rather than failing the whole listing: one bad
+      // record in a page should not make a project unresolvable.
+      let pageCount = 0;
+      for (const raw of doc.data) {
+        pageCount += 1;
+        try {
+          out.push(normalizeCfFile(raw, `curseforge:${modId}`));
+        } catch {
+          // skipped — an unusable record is not a selectable file
+        }
+      }
+      const pagination = isRecord(doc.pagination) ? doc.pagination : undefined;
+      const totalCount = Number.isSafeInteger(pagination?.totalCount)
+        ? (pagination?.totalCount as number)
+        : undefined;
+      index += pageCount;
+      // Stop once this page came back short of a full page (the API's own
+      // end-of-list signal — true whether or not `pagination` is usable), once
+      // the endpoint's own total says there is nothing left, or once the bomb
+      // bound is hit.
+      if (
+        pageCount < CF_FILES_PAGE_SIZE ||
+        (totalCount !== undefined && index >= totalCount) ||
+        index >= MAX_CF_MOD_FILES
+      ) {
+        break;
       }
     }
     return out;
@@ -614,6 +671,12 @@ export class CurseForgeSource implements Source {
       typeof declared === "number" && Number.isSafeInteger(declared) && declared >= 0
         ? declared
         : bytes.byteLength;
+    // A declared target (LB-720) wins over kind+basename — same precedence
+    // `local.ts` gives one.
+    const placement: Placement =
+      ref.target !== undefined
+        ? { method: "link", target: ref.target }
+        : singleFilePlacement(kind, filename);
     const pkg: LockPackage = {
       name: mod.slug || String(projectId),
       kind,
@@ -621,7 +684,7 @@ export class CurseForgeSource implements Source {
       version: file.displayName || file.fileName,
       hash,
       provenance: "replay",
-      placement: singleFilePlacement(kind, filename),
+      placement,
       size,
       project: projectId,
       file: file.id,

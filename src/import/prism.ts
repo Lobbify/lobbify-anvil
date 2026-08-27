@@ -16,11 +16,14 @@
  * item that reads from its tracked copy and declares the pack-relative path as its
  * `target`, so it keeps that path, subdirectories and all, across every later
  * re-lock — and resolves before a build has run. A re-identified one becomes a
- * bare `source:id` ref,
- * which carries no path, so it is placed by kind — the same thing a re-lock would
- * derive. Preserving a subdirectory only in the import lock would put the lock and
- * every later re-lock into silent disagreement, so a jar that does move is
- * reported in `warnings` instead.
+ * `{ ref, target }` item (LB-720): `ref` is the bare `source:id` re-identification
+ * carries no path of its own, and `target` is the pack-relative path, declared
+ * explicitly the same way an unmatched file's is — so it round-trips a
+ * subdirectory (Fabric's `mods/<mc-version>/` convention, for one) across every
+ * later re-lock exactly like an unmatched file does, instead of flattening to
+ * kind + basename. Before LB-720 a `ref` item had no way to carry a placement at
+ * all, so this importer flattened every re-identified jar and only reported the
+ * move in `warnings`; see git history for that version if you need it.
  *
  * Re-identification runs through the injected {@link IdentityResolver} seam, so the
  * importer is fully offline-testable and the (network) Modrinth/CurseForge lookups
@@ -28,15 +31,17 @@
  * a replay item; matched CurseForge jars are `provenance: "replay"` from the start.
  *
  * The user's own Prism instance is trusted content — the same category as a VC
- * checkout, not a hostile pack — but an **unmatched** file's `target` is still the
- * one thing here that later meets a hostile-manifest gate: `declaredPlacementTarget`
- * refuses any `:`-bearing segment unconditionally at lock time (an NTFS
- * alternate-data-stream trigger on Windows — LB-827), and it cannot tell an import's
- * own output from a hand-written manifest. So an unmatched file whose pack-relative
- * path would be refused is skipped with a warning ({@link isUnsafePackPath}) rather
- * than recorded — this importer must never write a `target` its own lock-time gate
- * will later reject, or the import "succeeds" today and the instance can never lock
- * or build again.
+ * checkout, not a hostile pack — but a `target` this importer writes, matched or
+ * unmatched, is still the one thing here that later meets a hostile-manifest gate:
+ * `declaredPlacementTarget` refuses any `:`-bearing segment unconditionally at
+ * lock time (an NTFS alternate-data-stream trigger on Windows — LB-827), and it
+ * cannot tell an import's own output from a hand-written manifest. So a file
+ * whose pack-relative path would be refused there is never given that `target` —
+ * an unmatched one is skipped entirely with a warning
+ * ({@link isUnsafePackPath}), and a re-identified one falls back to its
+ * pre-LB-720 kind+basename placement, also with a warning — this importer must
+ * never write a `target` its own lock-time gate will later reject, or the import
+ * "succeeds" today and the instance can never lock or build again.
  */
 
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
@@ -53,6 +58,7 @@ import type { DependencyEdge } from "../resolver/index.js";
 import { canonicalKeyOf } from "../resolver/index.js";
 import { safeBasename, singleFilePlacement } from "../sources/index.js";
 import { curseforgeFingerprint } from "../sources/index.js";
+import type { LinkPlacement } from "../sources/index.js";
 import { hashBuffer } from "../store/index.js";
 import { ManifestError } from "../types/errors.js";
 import type {
@@ -239,18 +245,31 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
       const kind: ItemKind = kindForPackPath(packRel);
       const filename = safeBasename(rel, dir === "mods" ? ".jar" : ".zip");
 
-      // A re-identified jar is recorded in the manifest as a bare `source:id`
-      // ref, which carries no path — so every later `anvil lock` re-derives its
-      // placement from kind + basename. Placing it that way here keeps the
-      // import lock and every re-lock in agreement, which is the whole point of
-      // LB-706; the cost is that a jar sitting in a subdirectory does move, so
-      // say so instead of relocating it silently. (An UNMATCHED file keeps its
-      // path: it is tracked as a `{ path, kind }` item the manifest reproduces.)
-      const matched = singleFilePlacement(kind, filename);
-      const warnIfMoved = (): void => {
-        if (matched.target !== packRel) {
+      // A re-identified jar is recorded as a `{ ref, target }` item (LB-720):
+      // `ref` carries the re-identification, `target` carries the placement —
+      // packRel itself, the same pack-relative path an unmatched file's `target`
+      // names — so it round-trips a subdirectory (Fabric's `mods/<mc-version>/`
+      // convention, for one) across every later re-lock instead of flattening.
+      //
+      // packRel still has to clear the same unsafe-path gate an unmatched
+      // file's target does (LB-827): a ':'-bearing segment can never become a
+      // manifest target, matched or not, since `declaredPlacementTarget`
+      // refuses it unconditionally at lock time regardless of who wrote it. In
+      // that one edge case this falls back to the pre-LB-720 kind+basename
+      // placement and says so, rather than writing a target its own lock-time
+      // gate will later reject.
+      const unsafeTarget = isUnsafePackPath(packRel);
+      const matched: LinkPlacement = unsafeTarget
+        ? singleFilePlacement(kind, filename)
+        : { method: "link", target: packRel };
+      const itemTarget = unsafeTarget ? {} : { target: packRel };
+      // Only relevant — and only warned about — for a file that turns out to be
+      // RE-IDENTIFIED below; an unmatched file's own unsafe-path handling
+      // (step 3) is independent and must not be duplicated here.
+      const warnIfUnsafeTarget = (): void => {
+        if (unsafeTarget) {
           warnings.push(
-            `re-identified "${packRel}" is placed at "${matched.target}" — an item referenced by id carries no path of its own`,
+            `re-identified "${packRel}" cannot keep its own path — a segment contains ':', which is unplaceable (LB-827) — and is placed at "${matched.target}" instead`,
           );
         }
       };
@@ -258,7 +277,7 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
       // 1. Modrinth match (by sha1) → a copy item.
       const mr = await input.identify.matchModrinth(sha1);
       if (mr) {
-        warnIfMoved();
+        warnIfUnsafeTarget();
         await input.store.putBuffer(bytes, "sha256", sha256);
         const pkg: LockPackage = {
           name: mr.slug,
@@ -278,6 +297,7 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
             id: mr.slug,
             versionSpec: { kind: "pin", version: mr.versionNumber },
           },
+          ...itemTarget,
         });
         modrinthCount += 1;
         emit({ type: "object:store", hash: sha256, deduped: false });
@@ -287,7 +307,7 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
       // 2. CurseForge match (by Murmur2 fingerprint) → a replay item (no bytes stored).
       const cf = await input.identify.matchCurseForge(curseforgeFingerprint(bytes));
       if (cf) {
-        warnIfMoved();
+        warnIfUnsafeTarget();
         const pkg: LockPackage = {
           name: cf.slug || String(cf.projectId),
           kind,
@@ -308,6 +328,7 @@ export async function importPrism(input: ImportPrismInput): Promise<ImportPrismR
             id: String(cf.projectId),
             versionSpec: { kind: "pin", version: String(cf.fileId) },
           },
+          ...itemTarget,
         });
         cfCount += 1;
         continue;

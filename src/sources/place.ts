@@ -1,19 +1,32 @@
 /**
  * Where an item lands in the instance tree.
  *
- * Two rules, in precedence order:
+ * Three rules, in precedence order:
  *
- *  1. **A path-carrying item keeps its path.** An item authored as a path
- *     (`"config/sodium/mixins.json"`, `"options.txt"`) names both where its bytes
- *     come from and where they belong. {@link declaredPlacementTarget} normalizes
- *     that path into the placement target verbatim, so a nested config
- *     round-trips and a root-level override stays at the root.
- *  2. **Everything else is placed by kind.** A Modrinth/CurseForge/URL item — or
- *     a local file that lives outside the instance — carries no path of its own,
- *     so {@link singleFilePlacement} puts it in the folder its {@link ItemKind}
- *     implies (mods/, resourcepacks/, shaderpacks/, datapacks/, config/).
+ *  1. **An explicit target wins, for any source (LB-720).** A `ManifestItem`
+ *     may declare `target` separately from identity — the read location for a
+ *     `path` item, or the `source:id` for a `ref` item. Either way it is
+ *     honored verbatim, run through {@link declaredPlacementTarget}'s guards.
+ *     This is the only way a Modrinth/CurseForge/URL item, or a local file
+ *     re-identified against one of them, can name a placement of its own — a
+ *     bare ref carries nothing a placement could be derived from.
+ *  2. **A path-carrying item with no explicit target keeps its own path.** An
+ *     item authored as a path (`"config/sodium/mixins.json"`, `"options.txt"`)
+ *     names both where its bytes come from and where they belong.
+ *     {@link declaredPlacementTarget} normalizes that path into the placement
+ *     target verbatim, so a nested config round-trips and a root-level
+ *     override stays at the root.
+ *  3. **Everything else is placed by kind.** A Modrinth/CurseForge/URL item
+ *     with no declared target — or a local file that lives outside the
+ *     instance — carries no path of its own, so {@link singleFilePlacement}
+ *     puts it in the folder its {@link ItemKind} implies (mods/,
+ *     resourcepacks/, shaderpacks/, datapacks/, config/).
  *
- * The complete placement table lives here so every source places consistently.
+ * The complete placement table lives here so every source places consistently;
+ * rule 1 is applied by each `Source.resolve` (it is the one rule not run
+ * through {@link singleFilePlacement}/`declaredPlacementTarget`'s derivation —
+ * the target already IS the placement, verbatim, once
+ * `resolver/resolve.ts`'s `localizeRef` has validated it).
  */
 
 import { posix } from "node:path";

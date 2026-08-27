@@ -5,7 +5,53 @@ carry a breaking change, and each one is called out below.
 
 ## Unreleased
 
+### Added
+
+- **A `ref` item can declare a placement `target` too, not just a `path` item
+  (LB-720).** Rendered as `{ ref, kind, target }`; emitted only when `target`
+  is present, so an existing `anvil.toml` parses and re-serialises unchanged.
+  It is the other half of the tracked-copy target added in v0.2.1: a `ref`
+  item (every Modrinth/CurseForge/URL item) names no path of its own for a
+  placement to be derived from, so before this the field could only ever be
+  declared on a `path` item and a bare ref-carrying item was always placed by
+  kind. `anvil import` of a Prism/MultiMC instance uses this for a
+  re-identified jar (see Fixed, below); it is equally usable by hand.
+
 ### Fixed
+
+- **A Prism-imported jar re-identified against Modrinth or CurseForge no
+  longer loses its subdirectory (LB-720).** It is recorded as a `{ ref,
+  target }` item instead of a bare `source:id` ref, so the pack-relative path
+  (Fabric's `mods/<mc-version>/` convention, for one) round-trips across
+  every later `anvil lock` the same way an unmatched file's `{ path, target }`
+  already did. Superseded text, kept for the record: a v0.2.0 fix reported the
+  flattening in `warnings` rather than doing it silently; that warning is now
+  gone for the ordinary case, and fires only for the one path a placement
+  target can never carry safely (a `:`-bearing segment — LB-827), where the
+  jar still falls back to its pre-LB-720 kind+basename placement.
+
+- **A base pack's `set` digest is now machine-independent when the pack ships
+  an `overrides/` tree (LB-723).** Those files become `local` lock rows keyed,
+  for dedup purposes, on the *absolute* tracked-copy path
+  (`<instanceDir>/.anvil/base/<path>`) — different on every machine the same
+  pack is cloned onto. The digest fed that straight in, so two instances
+  sharing a base pack with any overrides computed *different* `set` values for
+  byte-identical content, defeating the cheap-diff property `set` exists for
+  (two instances are supposed to be known to share their base without
+  comparing a single row). The digest now keys a `local` row on its placement
+  target instead — portable, and already unique within one base. A pack with
+  no `overrides/` tree is unaffected; this was previously called out as a
+  "known limitation" of the v0.2.0 CurseForge-base feature.
+
+- **`getModFiles` now pages through a project's complete file listing
+  (LB-723)**, instead of requesting one page of 50 and stopping. A `game.from`
+  or a direct `curseforge:` item pinned to an older file, or resolved as
+  `latest` against a project whose true latest sits past the first page, was
+  silently unreachable or wrong for any project with more than 50 files
+  matching the filtered game version + loader — not exotic for a long-lived
+  mod spanning several Minecraft versions. Also previously called out as a
+  "known limitation" of the v0.2.0 CurseForge-base feature; it affected a
+  direct `curseforge:` item reference the same way.
 
 - **`anvil remove` no longer exits 0 when it removed nothing.** A spec that
   parsed fine but matched no manifest item (a typo, or a stale path — most

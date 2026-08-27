@@ -74,6 +74,12 @@ own — every `modrinth:` / `curseforge:` / URL item, and a local file that live
 the instance — is placed by its kind, into `mods/`, `resourcepacks/`, `shaderpacks/`,
 `datapacks/`, or `config/`. Paths under `saves/`, `.anvil/`, or `.anvilignore` are refused.
 
+Any item may also declare an explicit `target` — the placement, kept separate from
+identity — which is how a Modrinth/CurseForge/URL item (which names no path at all) can
+still land somewhere other than its kind directory: `{ ref = "modrinth:sodium", target =
+"mods/26.2/sodium.jar" }` keeps a jar's subdirectory across every re-lock, the way a Prism
+import of a re-identified mod does.
+
 ## Starting from an existing pack
 
 An instance can start from a published modpack and describe itself as a diff

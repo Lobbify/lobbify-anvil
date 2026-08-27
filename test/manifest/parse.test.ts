@@ -75,12 +75,11 @@ items = [
     expect(parseManifest(serializeManifest(m)).items).toEqual(m.items);
   });
 
-  it("LB-719: a ref item declaring a target is REFUSED, not silently ignored", () => {
-    // Honoring it needs every source to place by a declared target (LB-720).
-    // Accepting and dropping the field would put the file somewhere other than
-    // where the manifest plainly says — the silent-misplacement class.
-    expect(() =>
-      parseManifest(`
+  it("LB-720: a ref item may declare a target, and it round-trips", () => {
+    // Every source now places by a declared target (LB-720), so a `ref` item
+    // no longer has to drop its subdirectory — it names identity via `ref` and
+    // placement via `target`, the same split a tracked-copy `path` item uses.
+    const m = parseManifest(`
 [project]
 name = "x"
 version = "1"
@@ -92,8 +91,12 @@ loader = "vanilla"
 items = [
   { ref = "modrinth:sodium", target = "mods/nested/sodium.jar" },
 ]
-`),
-    ).toThrow(ManifestError);
+`);
+    expect(m.items[0]).toEqual({
+      ref: { source: "modrinth", id: "sodium", versionSpec: { kind: "latest" } },
+      target: "mods/nested/sodium.jar",
+    });
+    expect(parseManifest(serializeManifest(m)).items).toEqual(m.items);
   });
 
   it("rejects a missing [game] table and a malformed item", () => {
