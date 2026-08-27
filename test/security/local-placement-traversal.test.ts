@@ -22,14 +22,44 @@ import { basename, join, resolve, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ContentStore,
+  IgnoreSet,
   type Manifest,
   PathEscape,
   declaredPlacementTarget,
   resolveManifest,
 } from "../../index.js";
-import { safeJoin } from "../../src/internal/fs.js";
+import { ANVIL_RESERVED_TOP, safeJoin } from "../../src/internal/fs.js";
+import { LOCK_FILENAME } from "../../src/lock/lock-io.js";
+import { MANIFEST_FILENAME } from "../../src/manifest/parse.js";
+import { EXCLUDE_FILE } from "../../src/vc/worktree.js";
 import { mkTmp, rmTmp } from "../helpers/fixtures.js";
 import { fabricJar, registryWith } from "../helpers/net.js";
+
+/**
+ * The names anvil reserves at an instance root, enumerated from the constants that
+ * DEFINE them — not from the protection set that is supposed to cover them.
+ *
+ * This is the point of LB-734 and it is a rule about the test, not the code. The
+ * previous version of the refusal test listed exactly the three names that were in
+ * `PROTECTED_TOP`, because both lists were written from each other. A set and a
+ * check derived from the same list cannot disagree, so the check could not fail for
+ * the case it existed to catch, and three missing names sat there invisibly.
+ *
+ * So: never build these cases by iterating `PROTECTED_TOP` or `ANVIL_RESERVED_TOP`.
+ * `MANIFEST_FILENAME`, `LOCK_FILENAME` and `EXCLUDE_FILE` are where the filenames
+ * are really decided (`manifest/parse.ts`, `lock/lock-io.ts`, `vc/worktree.ts`), so
+ * a name that exists there and is missing from the protection set now shows up as a
+ * red test rather than as nothing at all.
+ */
+const RESERVED_NAME_SOURCES = [MANIFEST_FILENAME, LOCK_FILENAME, EXCLUDE_FILE] as const;
+
+/**
+ * The always-protected names, written out literally for the same reason. These
+ * three have no filename constant to derive from — `.anvil/` is a directory the
+ * store builds by hand and `saves/` is Minecraft's — so a literal list is the only
+ * independent statement available.
+ */
+const PROTECTED_NAME_LITERALS = [".anvil", ".anvilignore", "saves"] as const;
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -119,6 +149,68 @@ describe("declaredPlacementTarget — the placement half of the path guard", () 
     ]) {
       expect(() => declaredPlacementTarget(protectedPath), protectedPath).toThrow(PathEscape);
     }
+  });
+
+  it("REFUSES anvil's own reserved root files — manifest, lock, exclude (LB-734)", () => {
+    // Every case below is spelled from RESERVED_NAME_SOURCES, which is built from
+    // the filename constants themselves — never from `ANVIL_RESERVED_TOP`. See the
+    // note above that constant for why that distinction is the whole ticket.
+    for (const name of RESERVED_NAME_SOURCES) {
+      for (const spelling of [
+        name, // the bare root file
+        `./${name}`, // a `./` prefix normalizes away to the same top
+        `config/../${name}`, // folds back INTO the reserved name
+        `${name}/nested.txt`, // used as a DIRECTORY prefix
+        name.toUpperCase(), // NTFS/APFS fold — `ANVIL.TOML` is the same file
+      ]) {
+        expect(() => declaredPlacementTarget(spelling), spelling).toThrow(PathEscape);
+      }
+    }
+  });
+
+  it("does NOT over-refuse names that merely resemble the reserved ones (LB-734)", () => {
+    // The rule is an exact, case-folded match on the TOP-LEVEL segment. A pack that
+    // ships its own `config/anvil.toml`, or a backup beside the real one, is
+    // ordinary content — refusing it would break real packs to fix nothing.
+    for (const ok of [
+      "anvil.toml.bak",
+      "myanvil.toml",
+      "anvil.tom",
+      "anvil.lockfile",
+      ".anvilexclude.bak",
+      "config/anvil.toml", // NOT the root manifest — anvil only owns the root one
+      "config/anvil.lock",
+      "mods/.anvilexclude",
+    ]) {
+      expect(() => declaredPlacementTarget(ok), ok).not.toThrow();
+    }
+  });
+
+  it("the reserved set has not drifted from the filenames anvil actually uses (LB-734)", () => {
+    // The drift detector. `ANVIL_RESERVED_TOP` holds literals because
+    // `src/internal/fs.ts` sits underneath the manifest/lock/VC layers and cannot
+    // import their constants without a cycle. This is the compensating check: rename
+    // `anvil.toml` at its source and this goes red, instead of the set silently
+    // narrowing and the refusals above quietly passing on a name nothing uses.
+    expect([...ANVIL_RESERVED_TOP].sort()).toEqual([...RESERVED_NAME_SOURCES].sort());
+  });
+
+  it("the swap's IgnoreSet refuses the same names, so a lock is not the only gate (LB-734)", () => {
+    // `declaredPlacementTarget` guards paths a MANIFEST declares. `journaledSwap`'s
+    // `removes` come from the previous built lock, which is never re-validated — so
+    // the second gate has to hold the same line independently.
+    const ignore = new IgnoreSet([]);
+    for (const name of RESERVED_NAME_SOURCES) {
+      expect(ignore.ignores(name), name).toBe(true);
+      expect(ignore.ignores(name.toUpperCase()), name).toBe(true);
+      expect(ignore.ignores(`${name}/nested`), name).toBe(true);
+    }
+    // Unchanged for the names it already protected, and for ordinary content.
+    for (const name of PROTECTED_NAME_LITERALS) {
+      expect(ignore.ignores(name), name).toBe(true);
+    }
+    expect(ignore.ignores("mods/a.jar")).toBe(false);
+    expect(ignore.ignores("config/anvil.toml")).toBe(false);
   });
 
   it("refuses a NUL byte (the classic truncation trick)", () => {
@@ -284,6 +376,37 @@ describe("resolveManifest — a hostile manifest cannot place bytes outside the 
         store,
       }),
     ).rejects.toBeInstanceOf(PathEscape);
+  });
+
+  it("refuses a manifest item that targets anvil's own manifest/lock/exclude (LB-734)", async () => {
+    const { instanceDir, store } = await fixture();
+    // The real files exist, and the refusal must happen with them intact. Before
+    // LB-734 a declared `./anvil.toml` passed `declaredPlacementTarget` as an
+    // ordinary link target and reached `journaledSwap`, which would have renamed
+    // the instance's own manifest aside and moved package content in over it.
+    const original = '[project]\nname = "p"\n';
+    await writeFile(join(instanceDir, MANIFEST_FILENAME), original);
+    await writeFile(join(instanceDir, LOCK_FILENAME), "# lock\n");
+    await writeFile(join(instanceDir, EXCLUDE_FILE), "logs/\n");
+
+    for (const name of RESERVED_NAME_SOURCES) {
+      for (const declared of [name, `./${name}`]) {
+        await expect(
+          resolveManifest({
+            ...resolveOpts,
+            manifest: manifestWith(declared, "config"),
+            baseDir: instanceDir,
+            store,
+          }),
+          declared,
+        ).rejects.toBeInstanceOf(PathEscape);
+      }
+    }
+
+    // No lock was produced, and anvil's own files are byte-for-byte untouched.
+    expect(await readFile(join(instanceDir, MANIFEST_FILENAME), "utf8")).toBe(original);
+    expect(await readFile(join(instanceDir, LOCK_FILENAME), "utf8")).toBe("# lock\n");
+    expect(await readFile(join(instanceDir, EXCLUDE_FILE), "utf8")).toBe("logs/\n");
   });
 
   it("refuses a manifest item targeting an NTFS-ADS colon segment end to end (LB-827)", async () => {

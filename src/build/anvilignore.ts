@@ -1,7 +1,9 @@
 /**
  * `.anvilignore` — the flagship safety input. Top-level instance entries listed
  * here are never created, moved, or deleted by a build. `saves/`, `.anvil/`, and
- * `.anvilignore` itself are always protected, whether or not a file exists.
+ * `.anvilignore` itself are always protected, whether or not a file exists, and
+ * so are anvil's own `anvil.toml`, `anvil.lock` and `.anvilexclude` (LB-734) —
+ * a build writes those through their own writers, never through the swap.
  *
  * Matching is by top-level path segment (the granularity the swap operates on):
  * a line `saves/` protects the top-level `saves` entry; `options.txt` protects
@@ -10,14 +12,19 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { PROTECTED_TOP, foldName } from "../internal/fs.js";
+import { ANVIL_RESERVED_TOP, PROTECTED_TOP, foldName } from "../internal/fs.js";
 
 /** A resolved set of protected top-level entry names (case-folded for match). */
 export class IgnoreSet {
   readonly #folded: Set<string>;
 
   constructor(tops: Iterable<string>) {
-    this.#folded = new Set([...PROTECTED_TOP, ...tops].map(foldName));
+    // `ANVIL_RESERVED_TOP` joins the always-protected names here (LB-734) so the
+    // swap is the second gate under `declaredPlacementTarget`, not the only one.
+    // `journaledSwap`'s `removes` come from the PREVIOUS built lock, which is
+    // never re-validated — an install target refused at lock time still has a
+    // remove-shaped sibling that would otherwise rename `anvil.toml` aside.
+    this.#folded = new Set([...PROTECTED_TOP, ...ANVIL_RESERVED_TOP, ...tops].map(foldName));
   }
 
   /** True if the relative target's top-level segment is protected (case-insensitive). */
@@ -26,7 +33,7 @@ export class IgnoreSet {
     return top !== undefined && this.#folded.has(foldName(top));
   }
 
-  /** The protected top-level names, case-folded (always includes saves/.anvil/.anvilignore). */
+  /** The protected top-level names, case-folded (always includes the built-in set). */
   get tops(): ReadonlySet<string> {
     return this.#folded;
   }

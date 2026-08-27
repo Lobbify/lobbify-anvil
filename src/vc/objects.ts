@@ -34,7 +34,7 @@ import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/prom
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { deflateSync, inflateSync } from "node:zlib";
-import { foldName } from "../internal/fs.js";
+import { foldName, isWindowsDeviceName } from "../internal/fs.js";
 import { hashBuffer, shardOf } from "../store/hash.js";
 import { DecompressionBomb, LockParseError } from "../types/errors.js";
 import type { Hash, HashAlgo } from "../types/index.js";
@@ -210,6 +210,40 @@ export function trackedPathCollision(tracked: readonly TrackedFile[]): string | 
   return undefined;
 }
 
+/**
+ * The complaint about a tracked set holding a path whose segments name a Windows
+ * reserved device (`CON`, `NUL`, `PRN`, `AUX`, `COM1`–`COM9`, `LPT1`–`LPT9`), or
+ * `undefined` when it holds none.
+ *
+ * Such a path is an ordinary, legal file on Linux and macOS, so a remote can send
+ * one with no adversary required. On Windows, opening it returns a device handle
+ * rather than a file and the write fails at the OS level — **partway through
+ * materialize**, after earlier tracked files have already been written. Nothing
+ * escapes the instance and nothing is lost, but the failure arrives as a raw
+ * `EINVAL`/`ENOENT` from the middle of a checkout, naming a path the user never
+ * chose. Refusing the object outright is the same trade {@link
+ * trackedPathCollision} makes: a clean, named refusal at the boundary beats an
+ * OS error from the middle of an operation (LB-721).
+ *
+ * Checked at both ends for the reason the collision check is: refusing only on
+ * decode would let a Linux user commit `mods/con.txt` successfully and then be
+ * unable to read back their own history, since `getSnapshot` decodes local
+ * objects through the same path a remote's arrive on.
+ *
+ * Tracked paths are always `/`-joined (the walk builds them that way and the
+ * canonical encoding preserves them), so splitting on `/` is the whole path.
+ */
+export function trackedReservedDeviceName(tracked: readonly TrackedFile[]): string | undefined {
+  for (const t of tracked) {
+    for (const segment of t.path.split("/")) {
+      if (segment.length > 0 && isWindowsDeviceName(segment)) {
+        return `tracked path "${t.path}" contains the segment "${segment}", which names a reserved device on Windows (reserved case-insensitively and with any extension, so "con.txt" is the console too) and cannot be written there — rename it, or list it in .anvilexclude`;
+      }
+    }
+  }
+  return undefined;
+}
+
 /** The canonical body bytes for a non-blob object (sorted-key JSON). */
 function structBody(obj: SnapshotObject | CommitObject): Uint8Array {
   if (obj.type === "snapshot") {
@@ -354,6 +388,10 @@ function decodeObject(encoded: Uint8Array): VcObject {
     const collision = trackedPathCollision(tracked);
     if (collision) {
       throw new LockParseError(`snapshot.tracked: ${collision}`);
+    }
+    const reserved = trackedReservedDeviceName(tracked);
+    if (reserved) {
+      throw new LockParseError(`snapshot.tracked: ${reserved}`);
     }
     return {
       type: "snapshot",

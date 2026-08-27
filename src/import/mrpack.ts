@@ -33,7 +33,7 @@ import { posix } from "node:path";
 import { writeGraph } from "../build/graph.js";
 import { canonicalJson } from "../build/serialize.js";
 import type { AnvilEvent } from "../events.js";
-import { isProtectedTop } from "../internal/fs.js";
+import { isPlacementRefusedTop } from "../internal/fs.js";
 import { writeLock } from "../lock/index.js";
 import { comparePackages } from "../lock/serialize.js";
 import { writeManifest } from "../manifest/index.js";
@@ -157,7 +157,7 @@ export async function importMrpack(input: ImportMrpackInput): Promise<ImportMrpa
       continue;
     }
     const top = file.path.split(/[/\\]/)[0] ?? "";
-    if (isProtectedTop(top)) {
+    if (isPlacementRefusedTop(top)) {
       warnings.push(`skipped file targeting a protected path: ${file.path}`);
       continue;
     }
