@@ -130,7 +130,13 @@ export async function buildInstance(input: BuildEngineInput): Promise<BuildEngin
   assertNativesSatisfiable(input.lock.resolved, platform);
   const ruled = filterByRules(input.lock.resolved, platform, input.rules);
   const effective = filterByTargets(ruled, platform);
-  const effectiveLock: Lockfile = { meta: input.lock.meta, resolved: effective };
+  // Carry the input lock through whole and only replace `resolved` with the
+  // platform-filtered set. A hand-written `{ meta, resolved }` field list is the
+  // same shape LB-801 fixed at the 3-way-apply worktree write: it silently drops
+  // whatever field it forgets, and it forgot `base` here too — every ordinary
+  // `game.from` build recorded a `.anvil/refs/built` whose rows still carried
+  // `fromBase: true` beside a ref with nothing to name the pack they came from.
+  const effectiveLock: Lockfile = { ...input.lock, resolved: effective };
   // Last line of defense against a silently-wrong build: no two distinct items may
   // `link` to the same target on THIS machine. Checked on the platform-effective
   // set (so cross-platform packages that legitimately share a target but never
