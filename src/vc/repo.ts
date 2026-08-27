@@ -373,6 +373,10 @@ export class VcRepo {
         // of an encoding that holds blob ids, and a blob id comes from the bytes,
         // not from the store holding them).
         storeTracked: false,
+        // Same reasoning one level up (LB-721): the snapshot OBJECT was the last
+        // thing this path still admitted, and nothing ever references it — the
+        // caller compares the id and discards the rest.
+        storeSnapshot: false,
       });
       return built.id;
     } catch (err) {

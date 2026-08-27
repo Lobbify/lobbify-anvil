@@ -49,7 +49,7 @@ import {
 import type { MrFile } from "../import/mrpack-index.js";
 import { importOverrideTree } from "../import/pack-common.js";
 import { readZipEntry } from "../import/zip-read.js";
-import { ensureDir, isProtectedTop } from "../internal/fs.js";
+import { ensureDir, isPlacementRefusedTop } from "../internal/fs.js";
 import { inferKind } from "../sources/kind.js";
 import type { ModrinthProject, ModrinthVersion } from "../sources/modrinth.js";
 import { ModrinthApi, primaryFile, selectVersion } from "../sources/modrinth.js";
@@ -298,7 +298,7 @@ function filterClientFiles(files: readonly MrFile[], warnings: string[]): MrFile
  */
 function placementTargetFor(file: MrFile, warnings: string[]): string | undefined {
   const top = file.path.split(/[/\\]/)[0] ?? "";
-  if (isProtectedTop(top)) {
+  if (isPlacementRefusedTop(top)) {
     warnings.push(`base pack: skipped file targeting a protected path: ${file.path}`);
     return undefined;
   }

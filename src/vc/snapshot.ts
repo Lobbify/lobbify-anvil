@@ -51,6 +51,7 @@ import {
   hashToString,
   idOfEncoding,
   trackedPathCollision,
+  trackedReservedDeviceName,
 } from "./objects.js";
 import {
   WorktreeExclusion,
@@ -128,6 +129,18 @@ export interface BuildSnapshotInput {
    * tree yields the same snapshot id either way, and only the store writes differ.
    */
   readonly storeTracked?: boolean;
+  /**
+   * Admit the snapshot **object itself** as a VC object (default `true`).
+   *
+   * `false` completes what `storeTracked: false` started (LB-721). A dirty-check
+   * wants only the id, and the id is `idOfEncoding(encodeObject(snapshot))` —
+   * computable without a store, exactly as `worktreeSlotBlobs` computes a blob id
+   * without admitting the blob. Left storing, every `switch` attempt — including
+   * the ones it then refuses — wrote one snapshot object no commit will ever
+   * reference: small, but unreachable, so it lives until a GC walks the graph and
+   * proves it garbage.
+   */
+  readonly storeSnapshot?: boolean;
   /** Where the walk reports a refusal the user needs to know about. */
   readonly onWarn?: (message: string) => void;
 }
@@ -218,6 +231,14 @@ export async function buildSnapshot(input: BuildSnapshotInput): Promise<BuiltSna
   if (collision) {
     throw new VcStateError(collision);
   }
+  // Same here-and-on-decode pairing, for the same reason (LB-721): a set this
+  // process authored must not be one `decodeObject` will later refuse, or a user
+  // could commit `mods/con.txt` on Linux and then be unable to read their own
+  // history back.
+  const reserved = trackedReservedDeviceName(tracked);
+  if (reserved) {
+    throw new VcStateError(reserved);
+  }
 
   const snapshot: SnapshotObject = {
     type: "snapshot",
@@ -227,7 +248,10 @@ export async function buildSnapshot(input: BuildSnapshotInput): Promise<BuiltSna
     carried,
     tracked,
   };
-  const id = await vcStore.put(snapshot);
+  const id =
+    input.storeSnapshot === false
+      ? idOfEncoding(encodeObject(snapshot))
+      : await vcStore.put(snapshot);
   return { id, snapshot, manifest, lock };
 }
 

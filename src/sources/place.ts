@@ -17,35 +17,10 @@
  */
 
 import { posix } from "node:path";
-import { findColonSegment, isProtectedTop } from "../internal/fs.js";
+import { findColonSegment, isPlacementRefusedTop, isWindowsDeviceName } from "../internal/fs.js";
 import { PathEscape } from "../types/errors.js";
 import type { ItemKind, Placement } from "../types/index.js";
 import { placementDirForKind } from "./kind.js";
-
-const WINDOWS_RESERVED = new Set([
-  "con",
-  "prn",
-  "aux",
-  "nul",
-  "com1",
-  "com2",
-  "com3",
-  "com4",
-  "com5",
-  "com6",
-  "com7",
-  "com8",
-  "com9",
-  "lpt1",
-  "lpt2",
-  "lpt3",
-  "lpt4",
-  "lpt5",
-  "lpt6",
-  "lpt7",
-  "lpt8",
-  "lpt9",
-]);
 
 /** Drop control characters (U+0000–U+001F and DEL) without a regex. */
 function stripControlChars(s: string): string {
@@ -69,8 +44,9 @@ export function safeBasename(raw: string, fallbackExt: string): string {
   if (cleaned.length === 0 || cleaned === "." || cleaned === "..") {
     return `unnamed${fallbackExt}`;
   }
-  const stem = cleaned.split(".")[0]?.toLowerCase() ?? "";
-  if (WINDOWS_RESERVED.has(stem)) {
+  // A Windows reserved device name (`con`, `nul`, `lpt1`, …) is reserved with any
+  // extension, so `con.txt` needs the prefix as much as a bare `con` does.
+  if (isWindowsDeviceName(cleaned)) {
     return `_${cleaned}`;
   }
   return cleaned;
@@ -130,7 +106,9 @@ function normalizeDeclaredSegments(raw: string): string[] | undefined {
  *
  * Throws {@link PathEscape} for the cases that are genuinely malformed rather
  * than merely external: a NUL byte, a target under a protected top-level entry
- * (`saves/`, `.anvil/`, `.anvilignore`), and any segment containing a `:`
+ * (`saves/`, `.anvil/`, `.anvilignore`) or one of anvil's own reserved files
+ * (`anvil.toml`, `anvil.lock`, `.anvilexclude` — LB-734), and any segment
+ * containing a `:`
  * (opens an NTFS Alternate Data Stream on Windows instead of the ordinary file
  * the same string names on POSIX — see {@link findColonSegment}). Refusing at
  * lock time is deliberate — the kind-directory fallback would quietly place
@@ -153,7 +131,7 @@ export function declaredPlacementTarget(rawPath: string): string | undefined {
     );
   }
   const top = segments[0] ?? "";
-  if (isProtectedTop(top)) {
+  if (isPlacementRefusedTop(top)) {
     throw new PathEscape(rawPath, `targets protected path "${top}"`);
   }
   return segments.join("/");

@@ -41,7 +41,7 @@
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ensureDir, findColonSegment, isProtectedTop } from "../internal/fs.js";
+import { ensureDir, findColonSegment, isPlacementRefusedTop } from "../internal/fs.js";
 import { safeBasename } from "../sources/index.js";
 import { hashBuffer, safeExtract } from "../store/index.js";
 import type { ItemKind, LockPackage, ManifestItem, ObjectSink } from "../types/index.js";
@@ -222,7 +222,7 @@ export async function importOverrideTree(input: ImportOverrideTreeInput): Promis
       // the check standing between an untrusted archive path and the persisted
       // write below, which is a bare `join` — not `safeJoin` — so this is the
       // only gate a colon-carrying override would meet before landing on disk.
-      if (isProtectedTop(top) || isUnsafePackPath(destRel)) {
+      if (isPlacementRefusedTop(top) || isUnsafePackPath(destRel)) {
         input.warnings.push(`skipped override targeting a protected/unsafe path: ${destRel}`);
         continue;
       }

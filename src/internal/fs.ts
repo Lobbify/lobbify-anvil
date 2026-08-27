@@ -28,6 +28,104 @@ export function isProtectedTop(segment: string): boolean {
 }
 
 /**
+ * The top-level entries that are anvil's own metadata for an instance: the
+ * manifest (`anvil.toml`), the lock (`anvil.lock`), and the version-control
+ * exclude file (`.anvilexclude`).
+ *
+ * **A SEPARATE set from {@link PROTECTED_TOP}, deliberately — do not merge them
+ * (LB-734).** The two sets answer different questions, and the three names below
+ * belong to only one of them:
+ *
+ *   - {@link PROTECTED_TOP} means "version control and the build do not manage
+ *     this path **at all**". It is consulted by `WorktreeExclusion.excludes`
+ *     (so a protected path is neither recorded nor materialized) and by the
+ *     default branch of {@link safeJoin} (so materialize *throws* on a snapshot
+ *     claiming one).
+ *   - This set means "package content must never be **placed** here". These
+ *     files are anvil's own, but version control very much does manage them:
+ *     `anvil.toml` / `anvil.lock` have their own snapshot slots, and
+ *     `.anvilexclude` is an ordinary **tracked** file — a commit travels with
+ *     the exclude rules it was authored under, and `materializeSnapshot` looks
+ *     it up in the target commit's tracked set by name.
+ *
+ * So adding these three to `PROTECTED_TOP` would not have hardened anything; it
+ * would have stopped `.anvilexclude` being tracked and made `safeJoin` throw on
+ * every checkout of a commit that tracks one. The protection this set expresses
+ * is placement-side only, which is why it has its own predicate.
+ *
+ * The names are literals rather than imports of `MANIFEST_FILENAME` /
+ * `LOCK_FILENAME` / `EXCLUDE_FILE`: this module sits underneath the manifest,
+ * lock, and VC layers and importing them here would cycle. `test/security/`
+ * pins the set against those three constants instead, so a rename there goes
+ * red rather than silently narrowing this set.
+ */
+export const ANVIL_RESERVED_TOP = new Set(["anvil.toml", "anvil.lock", ".anvilexclude"]);
+
+const ANVIL_RESERVED_TOP_FOLDED = new Set([...ANVIL_RESERVED_TOP].map(foldName));
+
+/** True if a top-level segment is one of anvil's own metadata files (case-insensitive). */
+export function isAnvilReservedTop(segment: string): boolean {
+  return ANVIL_RESERVED_TOP_FOLDED.has(foldName(segment));
+}
+
+/**
+ * True if package content must never be **placed** at this top-level segment —
+ * the union of {@link isProtectedTop} and {@link isAnvilReservedTop}.
+ *
+ * This is the predicate every placement-declaring surface asks (a manifest item's
+ * declared path, a `.mrpack` file entry, an imported override tree). It is
+ * deliberately *not* what `safeJoin` and the working-tree exclusion ask — see
+ * {@link ANVIL_RESERVED_TOP} for why those two must stay on the narrower set.
+ */
+export function isPlacementRefusedTop(segment: string): boolean {
+  return isProtectedTop(segment) || isAnvilReservedTop(segment);
+}
+
+/**
+ * The names Windows reserves for character devices. Reserved **case-insensitively
+ * and with any extension**: `CON`, `con`, and `con.txt` all name the console
+ * device, while `console` is an ordinary filename. Opening one yields a device
+ * handle rather than a file, so writing `mods/con.txt` on Windows fails at the
+ * OS level instead of creating a file.
+ */
+const WINDOWS_DEVICE_NAMES = new Set([
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  "com1",
+  "com2",
+  "com3",
+  "com4",
+  "com5",
+  "com6",
+  "com7",
+  "com8",
+  "com9",
+  "lpt1",
+  "lpt2",
+  "lpt3",
+  "lpt4",
+  "lpt5",
+  "lpt6",
+  "lpt7",
+  "lpt8",
+  "lpt9",
+]);
+
+/**
+ * True when a single path segment names a Windows reserved device.
+ *
+ * The boundary is the **stem before the first `.`**, case-folded: `con`,
+ * `CON.TXT` and `con.tar.gz` are all the console device, and `console`,
+ * `con2` and `mycon` are ordinary names. Matching the whole segment instead
+ * would miss `con.txt`; matching a prefix would reject `console`.
+ */
+export function isWindowsDeviceName(segment: string): boolean {
+  return WINDOWS_DEVICE_NAMES.has(foldName(segment).split(".")[0] ?? "");
+}
+
+/**
  * The first segment in `segments` that contains a `:` (colon), or `undefined`
  * if none do.
  *
