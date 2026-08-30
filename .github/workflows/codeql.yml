@@ -1,0 +1,66 @@
+# CodeQL code scanning.
+#
+# anvil is a public repo, so code scanning is free here. That is the whole
+# reason this file exists: the only other Lobbify repo with a CodeQL workflow
+# is private, where the SARIF upload is rejected outright, so it has produced
+# no results in 17 runs (LB-995). Scanning was configured exactly where it
+# could not run and absent where it costs nothing.
+#
+# Structure follows GitHub's own `code-scanning/codeql.yml` starter, including
+# its action majors -- checkout@v7 and codeql-action@v4. Do not downgrade these
+# to match ci.yml's checkout@v4: v4 targets the deprecated Node 20 and is
+# already being force-run on Node 24, which is a warning today and a failure
+# later. (ci.yml has that problem and is left alone here on purpose; fixing it
+# is a separate one-line change, not this ticket.)
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, deliberately off the hour and off Monday so it does not land in
+    # the same minute as every other scheduled scan on the platform.
+    - cron: "27 6 * * 2"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # `security-events: write` is the one that matters -- it is what uploads
+      # the SARIF. Without it the analysis still runs and still reports green,
+      # and nothing is ever written to the Security tab.
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `none` is correct for JS/TS: CodeQL reads the sources directly and
+          # needs no compilation, so there is nothing for autobuild to do.
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
